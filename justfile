@@ -2,6 +2,7 @@
 # Docker image name
 # Build the project
 # Check next release version
+# Smoke test - verify Rust tools are installed
 
 default:
 	@just --list
@@ -205,6 +206,28 @@ release-version:
 
 run *ARGS:
 	cargo run --features cli -- {{ARGS}}
+
+smoke-test:
+	#!/usr/bin/env bash
+	set -e
+	echo "Checking essential tools..."
+	command -v just >/dev/null || { echo "ERROR: just not installed"; exit 1; }
+	command -v git >/dev/null || { echo "ERROR: git not installed"; exit 1; }
+	command -v claude >/dev/null || { echo "ERROR: claude not installed"; exit 1; }
+	# Run language-specific smoke tests if they exist
+	for recipe in $(just --list --unsorted 2>/dev/null | grep '^smoke-test-' | awk '{print $1}'); do
+		echo "Running $recipe..."
+		just "$recipe"
+	done
+	echo "All essential tools present"
+
+smoke-test-rust:
+	#!/usr/bin/env bash
+	set -e
+	command -v cargo >/dev/null || { echo "ERROR: cargo not installed"; exit 1; }
+	command -v rustc >/dev/null || { echo "ERROR: rustc not installed"; exit 1; }
+	rustc --version
+	echo "Rust tools present"
 
 test *ARGS:
 	cargo test {{ARGS}}
