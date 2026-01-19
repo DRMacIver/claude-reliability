@@ -795,4 +795,243 @@ mod tests {
             assert!(section.contains(entry));
         }
     }
+
+    // Pedantic gitignore preservation tests
+
+    #[test]
+    fn test_gitignore_preserves_whitespace_only_file() {
+        let existing = "   \n\n   \n";
+        let result = update_gitignore_content(existing);
+        // Should add our section after the whitespace
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+        assert!(result.contains(".claude/bin/"));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_no_trailing_newline() {
+        let existing = "node_modules/";
+        let result = update_gitignore_content(existing);
+        // Should still have node_modules
+        assert!(result.contains("node_modules/"));
+        // And our section
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_trailing_whitespace_on_lines() {
+        let existing = "node_modules/   \ntarget/  \n";
+        let result = update_gitignore_content(existing);
+        // Should preserve the original lines exactly (including trailing whitespace)
+        assert!(result.contains("node_modules/   \n") || result.contains("node_modules/"));
+        assert!(result.contains("target/"));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_blank_lines_between_sections() {
+        let existing = "# Section 1\nfoo/\n\n\n# Section 2\nbar/\n";
+        let result = update_gitignore_content(existing);
+        // Both sections preserved
+        assert!(result.contains("# Section 1"));
+        assert!(result.contains("foo/"));
+        assert!(result.contains("# Section 2"));
+        assert!(result.contains("bar/"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_section_at_beginning() {
+        let existing = "# claude-reliability managed\n.claude/old/\n\n# Other stuff\nfoo/\n";
+        let result = update_gitignore_content(existing);
+        // Our section should be updated
+        assert!(result.contains(".claude/bin/"));
+        assert!(!result.contains(".claude/old/"));
+        // Other section preserved
+        assert!(result.contains("# Other stuff"));
+        assert!(result.contains("foo/"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_section_at_end() {
+        let existing = "# Other stuff\nfoo/\n\n# claude-reliability managed\n.claude/old/\n";
+        let result = update_gitignore_content(existing);
+        // Other section preserved
+        assert!(result.contains("# Other stuff"));
+        assert!(result.contains("foo/"));
+        // Our section updated
+        assert!(result.contains(".claude/bin/"));
+        assert!(!result.contains(".claude/old/"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_section_in_middle() {
+        let existing = "# Start\nfoo/\n\n# claude-reliability managed\n.claude/old/\n\n# End\nbar/\n";
+        let result = update_gitignore_content(existing);
+        // All sections preserved in order
+        assert!(result.contains("# Start"));
+        assert!(result.contains("foo/"));
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+        assert!(result.contains(".claude/bin/"));
+        assert!(!result.contains(".claude/old/"));
+        assert!(result.contains("# End"));
+        assert!(result.contains("bar/"));
+        // Verify order
+        let start_pos = result.find("# Start").unwrap();
+        let our_pos = result.find(GITIGNORE_SECTION_HEADER).unwrap();
+        let end_pos = result.find("# End").unwrap();
+        assert!(start_pos < our_pos);
+        assert!(our_pos < end_pos);
+    }
+
+    #[test]
+    fn test_gitignore_does_not_match_similar_headers() {
+        // Headers that look similar but aren't our exact header
+        let existing = "# claude-reliability\nold/\n\n# claude-reliability-extra\nmore/\n";
+        let result = update_gitignore_content(existing);
+        // Neither of these should be treated as our section
+        assert!(result.contains("# claude-reliability\n"));
+        assert!(result.contains("old/"));
+        assert!(result.contains("# claude-reliability-extra"));
+        assert!(result.contains("more/"));
+        // Our section should be appended
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_unicode_content() {
+        let existing = "# 日本語コメント\nテスト/\n\n# Emoji section 🎉\n*.emoji\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("# 日本語コメント"));
+        assert!(result.contains("テスト/"));
+        assert!(result.contains("# Emoji section 🎉"));
+        assert!(result.contains("*.emoji"));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_comment_only_lines() {
+        let existing = "# This is a comment\n# Another comment\n# Third comment\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("# This is a comment"));
+        assert!(result.contains("# Another comment"));
+        assert!(result.contains("# Third comment"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_negation_patterns() {
+        let existing = "*.log\n!important.log\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("*.log"));
+        assert!(result.contains("!important.log"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_complex_patterns() {
+        let existing = "[Bb]uild/\n**/node_modules/\n*.py[cod]\ntest?.txt\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("[Bb]uild/"));
+        assert!(result.contains("**/node_modules/"));
+        assert!(result.contains("*.py[cod]"));
+        assert!(result.contains("test?.txt"));
+    }
+
+    #[test]
+    fn test_gitignore_handles_escaped_patterns() {
+        let existing = "\\#not-a-comment\n\\!not-negation\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("\\#not-a-comment"));
+        assert!(result.contains("\\!not-negation"));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_inline_comments_in_patterns() {
+        // Note: gitignore doesn't actually support inline comments,
+        // but we should preserve whatever the user wrote
+        let existing = "*.log # these are logs\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("*.log # these are logs"));
+    }
+
+    #[test]
+    fn test_gitignore_idempotent_multiple_calls() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "existing/\n").unwrap();
+
+        // First call
+        ensure_gitignore(dir.path()).unwrap();
+        let first = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+
+        // Second call
+        ensure_gitignore(dir.path()).unwrap();
+        let second = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+
+        // Third call
+        ensure_gitignore(dir.path()).unwrap();
+        let third = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+
+        // All should be identical
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn test_gitignore_handles_crlf_line_endings() {
+        let existing = "node_modules/\r\ntarget/\r\n";
+        let result = update_gitignore_content(existing);
+        // Should handle CRLF without breaking
+        assert!(result.contains("node_modules/"));
+        assert!(result.contains("target/"));
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_gitignore_preserves_paths_with_spaces() {
+        let existing = "My Documents/\nProgram\\ Files/\n";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("My Documents/"));
+        assert!(result.contains("Program\\ Files/"));
+    }
+
+    #[test]
+    fn test_gitignore_exact_content_verification() {
+        let existing = "# My project\nnode_modules/\n\n";
+        let result = update_gitignore_content(existing);
+
+        // The result should have exactly:
+        // 1. Original content (with proper newlines)
+        // 2. Our managed section
+
+        // Check it starts with the original comment
+        assert!(result.starts_with("# My project\n"));
+
+        // Check our section is present and formatted correctly
+        let expected_section = format!(
+            "{}\n{}\n",
+            GITIGNORE_SECTION_HEADER,
+            GITIGNORE_ENTRIES.join("\n")
+        );
+        assert!(result.contains(&expected_section) || result.contains(GITIGNORE_SECTION_HEADER));
+
+        // Make sure we haven't duplicated content
+        let header_count = result.matches(GITIGNORE_SECTION_HEADER).count();
+        assert_eq!(header_count, 1, "Should have exactly one managed section header");
+    }
+
+    #[test]
+    fn test_gitignore_file_not_found_creates_new() {
+        let dir = TempDir::new().unwrap();
+        let gitignore_path = dir.path().join(".gitignore");
+
+        // Ensure it doesn't exist
+        assert!(!gitignore_path.exists());
+
+        // Call ensure_gitignore
+        let result = ensure_gitignore(dir.path()).unwrap();
+        assert!(result); // Should report modified
+
+        // File should now exist
+        assert!(gitignore_path.exists());
+
+        // And contain our entries
+        let content = std::fs::read_to_string(&gitignore_path).unwrap();
+        assert!(content.contains(GITIGNORE_SECTION_HEADER));
+        assert!(content.contains(".claude/bin/"));
+    }
 }

@@ -2,9 +2,9 @@
 # ensure-binary.sh - Ensures the claude-reliability binary is available
 #
 # This script:
-# 1. Checks for cached binary in ~/.cache/claude-reliability/
+# 1. Checks for cached binary in ~/.claude-reliability/bin/
 # 2. Downloads from GitHub releases if not cached
-# 3. Falls back to building from source with cargo
+# 3. Falls back to building from source (from this repo) with cargo
 # 4. Prints the path to the binary on success, exits non-zero on failure
 
 set -euo pipefail
@@ -117,7 +117,7 @@ download_binary() {
     return 1
 }
 
-# Build from source using cargo
+# Build from source using cargo (from the plugin repo)
 build_from_source() {
     local target_path="$1"
 
@@ -126,37 +126,21 @@ build_from_source() {
         return 1
     fi
 
-    echo "Building ${BINARY_NAME} from source..." >&2
-
-    # Check if we're in the plugin directory with Cargo.toml
-    if [[ -f "${PLUGIN_ROOT}/Cargo.toml" ]]; then
-        # Build from local source
-        if cargo build --release --features cli --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
-            local built_binary="${PLUGIN_ROOT}/target/release/${BINARY_NAME}"
-            if [[ -x "$built_binary" ]]; then
-                mkdir -p "$(dirname "$target_path")"
-                cp "$built_binary" "$target_path"
-                chmod +x "$target_path"
-                return 0
-            fi
-        fi
+    # The plugin is installed from the repo, so PLUGIN_ROOT has the source
+    if [[ ! -f "${PLUGIN_ROOT}/Cargo.toml" ]]; then
+        echo "Cargo.toml not found in plugin directory" >&2
+        return 1
     fi
 
-    # Try to install from crates.io or git
-    echo "Attempting to install from git repository..." >&2
-    local temp_dir
-    temp_dir="$(mktemp -d)"
-    trap 'rm -rf "$temp_dir"' EXIT
+    echo "Building ${BINARY_NAME} from source..." >&2
 
-    if git clone --depth 1 "https://github.com/${REPO}.git" "$temp_dir" 2>/dev/null; then
-        if cargo build --release --features cli --manifest-path "${temp_dir}/Cargo.toml" >&2; then
-            local built_binary="${temp_dir}/target/release/${BINARY_NAME}"
-            if [[ -x "$built_binary" ]]; then
-                mkdir -p "$(dirname "$target_path")"
-                cp "$built_binary" "$target_path"
-                chmod +x "$target_path"
-                return 0
-            fi
+    if cargo build --release --features cli --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
+        local built_binary="${PLUGIN_ROOT}/target/release/${BINARY_NAME}"
+        if [[ -x "$built_binary" ]]; then
+            mkdir -p "$(dirname "$target_path")"
+            cp "$built_binary" "$target_path"
+            chmod +x "$target_path"
+            return 0
         fi
     fi
 
