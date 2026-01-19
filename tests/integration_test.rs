@@ -1,4 +1,4 @@
-//! Integration tests for claude_reliability.
+//! Integration tests for `claude_reliability`.
 
 use claude_reliability::greet;
 

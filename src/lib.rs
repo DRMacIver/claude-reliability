@@ -1,4 +1,4 @@
-//! claude_reliability library.
+//! `claude_reliability` library.
 //!
 //! This is the main library crate.
 
