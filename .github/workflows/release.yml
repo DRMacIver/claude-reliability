@@ -16,7 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
-      version: ${{ steps.version.outputs.version }}
+      use_existing_tag: ${{ steps.check.outputs.use_existing_tag }}
+      version: ${{ steps.version.outputs.version || steps.existing_version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,6 +25,8 @@ jobs:
 
       - name: Check if release needed
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Skip auto-release until first manual release
           # Look for CalVer tags (vYY.M.D.N format, not v0.0.0 or v0.1.0)
@@ -43,6 +46,16 @@ jobs:
             exit 0
           fi
 
+          # Check if a release exists for the last tag
+          RELEASE_EXISTS=$(gh release view "$LAST_TAG" --json tagName 2>/dev/null || echo "")
+          if [ -z "$RELEASE_EXISTS" ]; then
+            echo "Tag $LAST_TAG exists but no release found - will create release"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            # Use existing tag version (strip 'v' prefix)
+            echo "use_existing_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Check if src/ or Cargo.toml changed since last tag
           DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Cargo.toml Cargo.lock)
           if [ -n "$DIFF" ]; then
@@ -55,10 +68,19 @@ jobs:
           fi
 
       - name: Generate CalVer version
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.use_existing_tag == ''
         id: version
         run: |
           VERSION=$(python3 scripts/release.py --version-only)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Use existing tag version
+        if: steps.check.outputs.use_existing_tag != ''
+        id: existing_version
+        run: |
+          # Strip 'v' prefix from tag
+          VERSION="${{ steps.check.outputs.use_existing_tag }}"
+          VERSION="${VERSION#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
   build:
@@ -74,10 +96,10 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             artifact_name: linux-aarch64
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: macos-x86_64
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact_name: macos-aarch64
 
@@ -137,9 +159,11 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Update Cargo.toml version
+        if: needs.check-release.outputs.use_existing_tag == ''
         run: python3 scripts/release.py
 
       - name: Commit version update
+        if: needs.check-release.outputs.use_existing_tag == ''
         run: |
           git add Cargo.toml
           git commit -m "Release ${{ needs.check-release.outputs.version }}"
@@ -152,6 +176,7 @@ jobs:
           path: dist/
 
       - name: Create and push tag
+        if: needs.check-release.outputs.use_existing_tag == ''
         run: |
           git tag "v${{ needs.check-release.outputs.version }}"
           git push origin main "v${{ needs.check-release.outputs.version }}"
