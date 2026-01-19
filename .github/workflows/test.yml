@@ -20,5 +20,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Run tests with coverage (library only)
-        run: cargo llvm-cov --lib --all-features --fail-under-lines 100
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run coverage check
+        run: ./scripts/check-coverage.py
