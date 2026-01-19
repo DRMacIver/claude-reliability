@@ -49,33 +49,71 @@ get_latest_version() {
     fi
 }
 
+# Map platform to release artifact name
+get_artifact_name() {
+    local platform="$1"
+    case "$platform" in
+        linux-x86_64) echo "linux-x86_64" ;;
+        darwin-aarch64) echo "macos-arm64" ;;
+        *) echo "" ;;
+    esac
+}
+
 # Download binary from GitHub releases
 download_binary() {
     local version="$1"
     local platform="$2"
     local target_path="$3"
 
-    # Construct download URL - adjust based on your release naming convention
-    local asset_name="${BINARY_NAME}-${platform}"
-    local url="https://github.com/${REPO}/releases/download/v${version}/${asset_name}"
+    # Map platform to artifact name
+    local artifact_name
+    artifact_name="$(get_artifact_name "$platform")"
+    if [[ -z "$artifact_name" ]]; then
+        echo "No release available for platform: $platform" >&2
+        return 1
+    fi
+
+    # Release format: claude-reliability-VERSION-ARTIFACT.tar.gz
+    local tarball="${BINARY_NAME}-${version}-${artifact_name}.tar.gz"
+    local url="https://github.com/${REPO}/releases/download/v${version}/${tarball}"
 
     mkdir -p "$(dirname "$target_path")"
 
-    echo "Downloading ${BINARY_NAME} v${version} for ${platform}..." >&2
+    echo "Downloading ${BINARY_NAME} v${version} for ${artifact_name}..." >&2
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local tarball_path="${tmp_dir}/release.tar.gz"
 
     if command -v curl >/dev/null 2>&1; then
-        if curl -fsSL "$url" -o "$target_path" 2>/dev/null; then
-            chmod +x "$target_path"
-            return 0
+        if ! curl -fsSL "$url" -o "$tarball_path" 2>/dev/null; then
+            return 1
         fi
     elif command -v wget >/dev/null 2>&1; then
-        if wget -q "$url" -O "$target_path" 2>/dev/null; then
-            chmod +x "$target_path"
-            return 0
+        if ! wget -q "$url" -O "$tarball_path" 2>/dev/null; then
+            return 1
         fi
+    else
+        echo "Neither curl nor wget available" >&2
+        return 1
     fi
 
-    rm -f "$target_path"
+    # Extract the tarball
+    if ! tar -xzf "$tarball_path" -C "$tmp_dir" 2>/dev/null; then
+        echo "Failed to extract tarball" >&2
+        return 1
+    fi
+
+    # Move binary to target location
+    if [[ -f "${tmp_dir}/${BINARY_NAME}" ]]; then
+        mv "${tmp_dir}/${BINARY_NAME}" "$target_path"
+        chmod +x "$target_path"
+        return 0
+    fi
+
+    echo "Binary not found in tarball" >&2
     return 1
 }
 
