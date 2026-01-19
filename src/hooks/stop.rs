@@ -18,9 +18,12 @@ use crate::transcript::{self, TranscriptInfo};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Magic string that allows stopping when human input is required.
+/// Magic string that allows stopping when work is complete but human input is required.
 pub const HUMAN_INPUT_REQUIRED: &str =
     "I have completed all work that I can and require human input to proceed.";
+
+/// Magic string that allows stopping when encountering an unsolvable problem.
+pub const PROBLEM_NEEDS_USER: &str = "I have run into a problem I can't solve without user input.";
 
 /// Time window for considering user as "recently active" (minutes).
 pub const USER_RECENCY_MINUTES: u32 = 5;
@@ -120,11 +123,15 @@ pub fn run_stop_hook(
         }
     }
 
-    // Check for bypass string in Claude's last output
+    // Check for bypass strings in Claude's last output
     if let Some(ref output) = transcript_info.last_assistant_output {
-        if output.contains(HUMAN_INPUT_REQUIRED) {
-            // Check if there are remaining issues (if beads is available)
-            if beads::is_beads_available(runner) {
+        let has_complete_phrase = output.contains(HUMAN_INPUT_REQUIRED);
+        let has_problem_phrase = output.contains(PROBLEM_NEEDS_USER);
+
+        if has_complete_phrase || has_problem_phrase {
+            // For the "work complete" phrase, check if there are remaining issues
+            // The "problem" phrase allows exit even with open issues
+            if has_complete_phrase && !has_problem_phrase && beads::is_beads_available(runner) {
                 let open_count = beads::get_open_issues_count(runner)?;
                 if open_count > 0 {
                     return Ok(StopHookResult::block()
@@ -133,13 +140,23 @@ pub fn run_stop_hook(
                         .with_message(format!("There are {open_count} open issue(s) remaining."))
                         .with_message("")
                         .with_message("Please work on the remaining issues before exiting.")
-                        .with_message("Run `bd ready` to see available work."));
+                        .with_message("Run `bd ready` to see available work.")
+                        .with_message("")
+                        .with_message(
+                            "If you've hit a blocker you can't resolve, use this phrase instead:",
+                        )
+                        .with_message("")
+                        .with_message(format!("  \"{PROBLEM_NEEDS_USER}\"")));
                 }
             }
             // Bypass allowed
             session::cleanup_session_file(session_path)?;
-            return Ok(StopHookResult::allow()
-                .with_message("Human input required acknowledged. Allowing stop."));
+            let reason = if has_problem_phrase {
+                "Problem requiring user input acknowledged. Allowing stop."
+            } else {
+                "Human input required acknowledged. Allowing stop."
+            };
+            return Ok(StopHookResult::allow().with_message(reason));
         }
     }
 
@@ -306,6 +323,14 @@ fn handle_uncommitted_changes(
         result.messages.push(String::new());
         result.messages.push("Work is incomplete until `git push` succeeds.".to_string());
     }
+    result.messages.push(String::new());
+    result.messages.push("---".to_string());
+    result.messages.push(String::new());
+    result
+        .messages
+        .push("If you've hit a problem you cannot solve without user input:".to_string());
+    result.messages.push(String::new());
+    result.messages.push(format!("  \"{PROBLEM_NEEDS_USER}\""));
 
     Ok(result)
 }
@@ -503,11 +528,9 @@ fn handle_autonomous_mode(
                     result.messages.push("## Options".to_string());
                     result.messages.push(String::new());
                     result.messages.push("1. Run `/ideate` to generate new work items".to_string());
-                    result.messages.push("2. Say the exit phrase to end the session".to_string());
+                    result.messages.push("2. Say an exit phrase to end the session".to_string());
                     result.messages.push(String::new());
-                    result
-                        .messages
-                        .push("To exit, include this exact phrase in your response:".to_string());
+                    result.messages.push("To exit when work is complete:".to_string());
                     result.messages.push(String::new());
                     result.messages.push(format!("  \"{HUMAN_INPUT_REQUIRED}\""));
                     return Ok(result);
@@ -557,9 +580,13 @@ fn handle_autonomous_mode(
     result.messages.push(String::new());
     result
         .messages
-        .push("If you cannot proceed without human input, include this exact string:".to_string());
+        .push("If you cannot proceed without human input, use one of these phrases:".to_string());
     result.messages.push(String::new());
+    result.messages.push("When all your work is done:".to_string());
     result.messages.push(format!("  \"{HUMAN_INPUT_REQUIRED}\""));
+    result.messages.push(String::new());
+    result.messages.push("When you've hit a problem you can't solve:".to_string());
+    result.messages.push(format!("  \"{PROBLEM_NEEDS_USER}\""));
 
     Ok(result)
 }
@@ -628,5 +655,11 @@ mod tests {
     #[test]
     fn test_human_input_required_constant() {
         assert!(HUMAN_INPUT_REQUIRED.contains("human input"));
+    }
+
+    #[test]
+    fn test_problem_needs_user_constant() {
+        assert!(PROBLEM_NEEDS_USER.contains("problem"));
+        assert!(PROBLEM_NEEDS_USER.contains("user input"));
     }
 }
