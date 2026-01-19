@@ -20,6 +20,8 @@ use std::process::ExitCode;
 pub enum Command {
     /// Show version information.
     Version,
+    /// Ensure config file exists (create with defaults if not).
+    EnsureConfig,
     /// Run the stop hook.
     Stop,
     /// Run the no-verify pre-tool-use hook.
@@ -52,6 +54,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
 
     match args[1].as_str() {
         "version" | "--version" | "-v" => ParseResult::Command(Command::Version),
+        "ensure-config" => ParseResult::Command(Command::EnsureConfig),
         "stop" => ParseResult::Command(Command::Stop),
         "pre-tool-use" => {
             if args.len() < 3 {
@@ -73,6 +76,7 @@ pub fn usage(program: &str) -> String {
     format!(
         "Usage: {program} <command> [subcommand]\n\n\
          Commands:\n  \
+         ensure-config           Ensure config file exists\n  \
          stop                    Run the stop hook\n  \
          pre-tool-use no-verify  Check for --no-verify usage\n  \
          pre-tool-use code-review Run code review on commits\n  \
@@ -184,18 +188,58 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::Version => {
             (ExitCode::SUCCESS, vec![format!("claude-reliability v{}", crate::VERSION)])
         }
+        Command::EnsureConfig => run_ensure_config_cmd(),
         Command::Stop => run_stop_cmd(stdin),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
     }
 }
 
+fn run_ensure_config_cmd() -> (ExitCode, Vec<String>) {
+    use crate::config;
+
+    let runner = RealCommandRunner::new();
+
+    match config::ensure_config(&runner) {
+        Ok(config) => {
+            let mut messages = vec!["Config ensured at .claude/reliability-config.yaml".to_string()];
+            messages.push(format!("  git_repo: {}", config.git_repo));
+            messages.push(format!("  beads_installed: {}", config.beads_installed));
+            if let Some(ref cmd) = config.check_command {
+                messages.push(format!("  check_command: {cmd}"));
+            } else {
+                messages.push("  check_command: (none)".to_string());
+            }
+            (ExitCode::SUCCESS, messages)
+        }
+        Err(e) => (ExitCode::from(1), vec![format!("Error ensuring config: {e}")]),
+    }
+}
+
 fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::config;
+
     let runner = RealCommandRunner::new();
     let sub_agent = RealSubAgent::new(&runner);
+
+    // Load or create config
+    let project_config = match config::ensure_config(&runner) {
+        Ok(c) => c,
+        Err(e) => {
+            // Log warning but continue with defaults
+            eprintln!("Warning: Could not load config: {e}");
+            config::ProjectConfig::default()
+        }
+    };
+
+    // Build hook config from project config
+    // Environment variables can still override for backwards compatibility
     let config = StopHookConfig {
-        quality_check_enabled: env::var("QUALITY_CHECK_ENABLED").is_ok(),
-        quality_check_command: env::var("QUALITY_CHECK_COMMAND").ok(),
+        quality_check_enabled: env::var("QUALITY_CHECK_ENABLED").is_ok()
+            || project_config.check_command.is_some(),
+        quality_check_command: env::var("QUALITY_CHECK_COMMAND")
+            .ok()
+            .or(project_config.check_command),
         require_push: env::var("REQUIRE_PUSH").is_ok(),
         repo_critique_mode: env::var("REPO_CRITIQUE_MODE").is_ok(),
         base_dir: None,
@@ -208,6 +252,15 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
 }
 
 fn run_no_verify_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::config;
+
+    let runner = RealCommandRunner::new();
+
+    // Ensure config exists (creates with defaults if not)
+    if let Err(e) = config::ensure_config(&runner) {
+        eprintln!("Warning: Could not ensure config: {e}");
+    }
+
     match run_no_verify(stdin) {
         Ok(result) => (result.exit_code, result.messages),
         Err(e) => (ExitCode::from(1), vec![e]),
@@ -215,8 +268,16 @@ fn run_no_verify_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
 }
 
 fn run_code_review_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::config;
+
     let runner = RealCommandRunner::new();
     let sub_agent = RealSubAgent::new(&runner);
+
+    // Ensure config exists (creates with defaults if not)
+    if let Err(e) = config::ensure_config(&runner) {
+        eprintln!("Warning: Could not ensure config: {e}");
+    }
+
     let config = CodeReviewConfig { skip_review: env::var("SKIP_CODE_REVIEW").is_ok() };
 
     match run_code_review(stdin, &config, &runner, &sub_agent) {
@@ -251,6 +312,14 @@ mod tests {
     #[test]
     fn test_parse_args_stop() {
         assert_eq!(parse_args(&args(&["prog", "stop"])), ParseResult::Command(Command::Stop));
+    }
+
+    #[test]
+    fn test_parse_args_ensure_config() {
+        assert_eq!(
+            parse_args(&args(&["prog", "ensure-config"])),
+            ParseResult::Command(Command::EnsureConfig)
+        );
     }
 
     #[test]
@@ -290,6 +359,7 @@ mod tests {
     fn test_usage_contains_commands() {
         let u = usage("test-prog");
         assert!(u.contains("test-prog"));
+        assert!(u.contains("ensure-config"));
         assert!(u.contains("stop"));
         assert!(u.contains("pre-tool-use"));
         assert!(u.contains("version"));
@@ -567,6 +637,15 @@ mod tests {
             .output()
             .unwrap();
 
+        // Create .gitignore to ignore .claude/ (which ensure_config creates)
+        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
+        Command::new("git").args(["add", ".gitignore"]).current_dir(dir_path).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add gitignore"])
+            .current_dir(dir_path)
+            .output()
+            .unwrap();
+
         // Change to temp dir, run the stop command, then change back
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
@@ -590,6 +669,9 @@ mod tests {
 
         // Initialize git repo
         Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
+
+        // Create .gitignore to ignore .claude/ (which ensure_config creates)
+        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
 
         // Change to temp dir, run the code-review command, then change back
         let original_dir = std::env::current_dir().unwrap();

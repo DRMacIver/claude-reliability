@@ -6,6 +6,7 @@
 .claude/settings.local.json
 .claude/setup.local.md
 .claude/beads-warning-given.local
+.claude/reliability-config.yaml
 .claude/bin/
 target/
 Cargo.lock

@@ -6,6 +6,7 @@ pub mod analysis;
 pub mod beads;
 pub mod cli;
 pub mod command;
+pub mod config;
 pub mod error;
 pub mod git;
 pub mod hooks;

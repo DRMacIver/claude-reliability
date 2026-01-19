@@ -11,7 +11,7 @@ set -euo pipefail
 
 REPO="DRMacIver/claude-reliability"
 BINARY_NAME="claude-reliability"
-CACHE_DIR="${HOME}/.cache/claude-reliability"
+CACHE_DIR="${HOME}/.claude-reliability"
 VERSION_FILE="${CACHE_DIR}/version"
 
 # Get the directory where this script lives (plugin root)
