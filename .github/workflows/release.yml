@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: write
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if release needed
+        id: check
+        run: |
+          # Skip auto-release until first manual release
+          # Look for CalVer tags (vYY.M.D.N format, not v0.0.0 or v0.1.0)
+          REAL_TAGS=$(git tag -l 'v[0-9][0-9].*' 2>/dev/null | head -1)
+          if [ -z "$REAL_TAGS" ]; then
+            echo "No manual release yet - skipping auto-release"
+            echo "Run 'just release' locally to create the first release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found, will release"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if src/ or Cargo.toml changed since last tag
+          DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Cargo.toml Cargo.lock)
+          if [ -n "$DIFF" ]; then
+            echo "Changes detected since $LAST_TAG:"
+            echo "$DIFF"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes since $LAST_TAG"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate CalVer version
+        if: steps.check.outputs.should_release == 'true'
+        id: version
+        run: |
+          VERSION=$(python3 scripts/release.py --version-only)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  build:
+    needs: check-release
+    if: needs.check-release.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: linux-x86_64
+            binary_ext: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact_name: linux-aarch64
+            binary_ext: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: macos-x86_64
+            binary_ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: macos-aarch64
+            binary_ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x86_64
+            binary_ext: ".exe"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Install musl tools (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --features cli
+
+      - name: Strip binary (Unix)
+        if: matrix.binary_ext == ''
+        run: strip target/${{ matrix.target }}/release/claude-reliability${{ matrix.binary_ext }}
+
+      - name: Package (Unix)
+        if: matrix.binary_ext == ''
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability
+          mv *.tar.gz ../../../
+
+      - name: Package (Windows)
+        if: matrix.binary_ext == '.exe'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path claude-reliability.exe -DestinationPath claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.zip
+          Move-Item *.zip ../../../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.artifact_name }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  release:
+    needs: [check-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update Cargo.toml version
+        run: python3 scripts/release.py
+
+      - name: Commit version update
+        run: |
+          git add Cargo.toml
+          git commit -m "Release ${{ needs.check-release.outputs.version }}"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ needs.check-release.outputs.version }}"
+          git push origin main "v${{ needs.check-release.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-release.outputs.version }}
+          name: v${{ needs.check-release.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
