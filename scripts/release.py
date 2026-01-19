@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Release script for claude-reliability.
 
-Updates version to calver (YY.M.D.N), where N is the release number for the day.
+Updates version to calver (YY.MDD.patch), compatible with Rust's semver.
+Month not zero-padded, day zero-padded. Example: 25.119.0 for Jan 19, 2025.
 This script is called by the release workflow.
 
 Usage:
@@ -30,22 +31,15 @@ def get_current_cargo_version() -> str | None:
     return match.group(1) if match else None
 
 
-def parse_version_release_number(version: str, base_version: str) -> int | None:
-    """Parse the release number from a version string.
+def parse_version_patch_number(version: str, base_version: str) -> int | None:
+    """Parse the patch number from a version string.
 
-    Returns the release number if the version matches base_version.N format,
-    or 0 if it matches base_version exactly (old versioning scheme).
+    Returns the patch number if the version matches base_version.N format.
     Returns None if the version doesn't match the base_version date.
     """
-    # Check for new format: base_version.N
     match = re.match(rf"^{re.escape(base_version)}\.(\d+)$", version)
     if match:
         return int(match.group(1))
-
-    # Check for old format: base_version (without .N suffix)
-    if version == base_version:
-        return 0
-
     return None
 
 
@@ -66,24 +60,26 @@ def run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProce
 
 
 def get_calver() -> str:
-    """Generate calver version string in YY.M.D.N format.
+    """Generate calver version string in YY.MDD.patch format.
 
-    N is the release number for the day (0 for first, 1 for second, etc.).
+    patch is the release number for the day (0 for first, 1 for second, etc.).
+    Month is not zero-padded, day is zero-padded.
+    Example: 25.119.0 for first release on Jan 19, 2025.
     """
     now = datetime.now()
     year = now.strftime("%y")
-    month = str(now.month)  # No leading zero
-    day = str(now.day)  # No leading zero
-    base_version = f"{year}.{month}.{day}"
+    month = str(now.month)  # No leading zero (1-12)
+    day = now.strftime("%d")  # Zero-padded day (01-31)
+    base_version = f"{year}.{month}{day}"
 
-    release_numbers: list[int] = []
+    patch_numbers: list[int] = []
 
     # Check Cargo.toml for current version
     current_version = get_current_cargo_version()
     if current_version:
-        cargo_release = parse_version_release_number(current_version, base_version)
-        if cargo_release is not None:
-            release_numbers.append(cargo_release)
+        cargo_patch = parse_version_patch_number(current_version, base_version)
+        if cargo_patch is not None:
+            patch_numbers.append(cargo_patch)
 
     # Find existing tags for today (format v{base}.N)
     result = run_command(["git", "tag", "-l", f"v{base_version}.*"], check=False)
@@ -91,20 +87,15 @@ def get_calver() -> str:
         for tag in result.stdout.strip().split("\n"):
             match = re.match(rf"^v{re.escape(base_version)}\.(\d+)$", tag)
             if match:
-                release_numbers.append(int(match.group(1)))
+                patch_numbers.append(int(match.group(1)))
 
-    # Also check for old format tag (v{base} without .N)
-    result = run_command(["git", "tag", "-l", f"v{base_version}"], check=False)
-    if result.returncode == 0 and result.stdout.strip() == f"v{base_version}":
-        release_numbers.append(0)
-
-    if not release_numbers:
+    if not patch_numbers:
         # No releases today yet, start at 0
         return f"{base_version}.0"
 
-    # Next release number is max + 1
-    next_release = max(release_numbers) + 1
-    return f"{base_version}.{next_release}"
+    # Next patch number is max + 1
+    next_patch = max(patch_numbers) + 1
+    return f"{base_version}.{next_patch}"
 
 
 def update_version(new_version: str) -> None:
