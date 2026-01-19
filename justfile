@@ -212,5 +212,18 @@ test *ARGS:
 test-cov:
 	cargo llvm-cov --lib --all-features --fail-under-lines 100
 
+update-my-hooks:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "Building claude-reliability binary..."
+	cargo build --release --features cli
+	mkdir -p .claude/bin
+	cp target/release/claude-reliability .claude/bin/
+	chmod +x .claude/bin/claude-reliability
+	echo "Installed to .claude/bin/claude-reliability"
+	echo ""
+	echo "Binary version:"
+	.claude/bin/claude-reliability version
+
 validate-devcontainer:
 	@test -f .devcontainer/devcontainer.json && test -f .devcontainer/Dockerfile && echo "Devcontainer configuration valid"
