@@ -1,0 +1,24 @@
+{
+  "name": "claude-reliability-marketplace",
+  "owner": {
+    "name": "David R. MacIver",
+    "email": "david@drmaciver.com"
+  },
+  "metadata": {
+    "description": "Reliability tools for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "claude-reliability",
+      "source": ".",
+      "description": "Reliability hooks for Claude Code - prevents common mistakes, enforces quality standards, blocks --no-verify, and runs automated code review",
+      "version": "0.1.0",
+      "author": {
+        "name": "David R. MacIver"
+      },
+      "category": "productivity",
+      "strict": true
+    }
+  ]
+}

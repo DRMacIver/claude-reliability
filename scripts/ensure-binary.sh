@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# ensure-binary.sh - Ensures the claude-reliability binary is available
+#
+# This script:
+# 1. Checks for cached binary in ~/.cache/claude-reliability/
+# 2. Downloads from GitHub releases if not cached
+# 3. Falls back to building from source with cargo
+# 4. Prints the path to the binary on success, exits non-zero on failure
+
+set -euo pipefail
+
+REPO="DRMacIver/claude-reliability"
+BINARY_NAME="claude-reliability"
+CACHE_DIR="${HOME}/.cache/claude-reliability"
+VERSION_FILE="${CACHE_DIR}/version"
+
+# Get the directory where this script lives (plugin root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Detect platform
+detect_platform() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch="$(uname -m)"
+
+    case "$os" in
+        linux) os="linux" ;;
+        darwin) os="darwin" ;;
+        *) echo "Unsupported OS: $os" >&2; return 1 ;;
+    esac
+
+    case "$arch" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) echo "Unsupported architecture: $arch" >&2; return 1 ;;
+    esac
+
+    echo "${os}-${arch}"
+}
+
+# Get latest release version from GitHub
+get_latest_version() {
+    local url="https://api.github.com/repos/${REPO}/releases/latest"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/' || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$url" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/' || true
+    fi
+}
+
+# Download binary from GitHub releases
+download_binary() {
+    local version="$1"
+    local platform="$2"
+    local target_path="$3"
+
+    # Construct download URL - adjust based on your release naming convention
+    local asset_name="${BINARY_NAME}-${platform}"
+    local url="https://github.com/${REPO}/releases/download/v${version}/${asset_name}"
+
+    mkdir -p "$(dirname "$target_path")"
+
+    echo "Downloading ${BINARY_NAME} v${version} for ${platform}..." >&2
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL "$url" -o "$target_path" 2>/dev/null; then
+            chmod +x "$target_path"
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q "$url" -O "$target_path" 2>/dev/null; then
+            chmod +x "$target_path"
+            return 0
+        fi
+    fi
+
+    rm -f "$target_path"
+    return 1
+}
+
+# Build from source using cargo
+build_from_source() {
+    local target_path="$1"
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "cargo not found - cannot build from source" >&2
+        return 1
+    fi
+
+    echo "Building ${BINARY_NAME} from source..." >&2
+
+    # Check if we're in the plugin directory with Cargo.toml
+    if [[ -f "${PLUGIN_ROOT}/Cargo.toml" ]]; then
+        # Build from local source
+        if cargo build --release --features cli --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
+            local built_binary="${PLUGIN_ROOT}/target/release/${BINARY_NAME}"
+            if [[ -x "$built_binary" ]]; then
+                mkdir -p "$(dirname "$target_path")"
+                cp "$built_binary" "$target_path"
+                chmod +x "$target_path"
+                return 0
+            fi
+        fi
+    fi
+
+    # Try to install from crates.io or git
+    echo "Attempting to install from git repository..." >&2
+    local temp_dir
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "$temp_dir"' EXIT
+
+    if git clone --depth 1 "https://github.com/${REPO}.git" "$temp_dir" 2>/dev/null; then
+        if cargo build --release --features cli --manifest-path "${temp_dir}/Cargo.toml" >&2; then
+            local built_binary="${temp_dir}/target/release/${BINARY_NAME}"
+            if [[ -x "$built_binary" ]]; then
+                mkdir -p "$(dirname "$target_path")"
+                cp "$built_binary" "$target_path"
+                chmod +x "$target_path"
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
+# Main logic
+main() {
+    local platform binary_path version
+
+    # Detect platform
+    if ! platform="$(detect_platform)"; then
+        echo "ERROR: Could not detect platform" >&2
+        exit 1
+    fi
+
+    binary_path="${CACHE_DIR}/bin/${BINARY_NAME}"
+
+    # Check if we have a cached binary
+    if [[ -x "$binary_path" ]]; then
+        # Verify it works
+        if "$binary_path" version >/dev/null 2>&1; then
+            echo "$binary_path"
+            exit 0
+        fi
+        # Binary is broken, remove it
+        rm -f "$binary_path"
+    fi
+
+    # Try to download from GitHub releases
+    version="$(get_latest_version)"
+    if [[ -n "$version" ]]; then
+        if download_binary "$version" "$platform" "$binary_path"; then
+            # Verify downloaded binary works
+            if "$binary_path" version >/dev/null 2>&1; then
+                echo "$version" > "$VERSION_FILE"
+                echo "$binary_path"
+                exit 0
+            fi
+            rm -f "$binary_path"
+        fi
+    fi
+
+    # Fall back to building from source
+    if build_from_source "$binary_path"; then
+        # Verify built binary works
+        if "$binary_path" version >/dev/null 2>&1; then
+            echo "source" > "$VERSION_FILE"
+            echo "$binary_path"
+            exit 0
+        fi
+        rm -f "$binary_path"
+    fi
+
+    # All methods failed
+    echo "ERROR: Could not obtain ${BINARY_NAME} binary" >&2
+    echo "" >&2
+    echo "Tried:" >&2
+    echo "  1. Download from GitHub releases (${REPO})" >&2
+    echo "  2. Build from source with cargo" >&2
+    echo "" >&2
+    echo "To fix, either:" >&2
+    echo "  - Ensure you have internet access for downloads" >&2
+    echo "  - Install Rust/cargo and try again" >&2
+    echo "  - Manually place the binary at: ${binary_path}" >&2
+    exit 1
+}
+
+main "$@"
