@@ -91,17 +91,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
             artifact_name: linux-x86_64
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact_name: linux-aarch64
-          - os: macos-15
-            target: x86_64-apple-darwin
-            artifact_name: macos-x86_64
-          - os: macos-15
-            target: aarch64-apple-darwin
-            artifact_name: macos-aarch64
+          - os: macos-latest
+            artifact_name: macos-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -111,7 +103,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
           components: clippy, rustfmt
 
       - name: Run clippy
@@ -121,16 +112,16 @@ jobs:
         run: cargo test --all-features
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --features cli
+        run: cargo build --release --features cli
 
       - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/claude-reliability
+        run: strip target/release/claude-reliability
 
       - name: Package
         run: |
-          cd target/${{ matrix.target }}/release
+          cd target/release
           tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability
-          mv *.tar.gz ../../../
+          mv *.tar.gz ../../
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
