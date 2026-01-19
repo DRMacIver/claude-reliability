@@ -2,6 +2,13 @@
   "name": "claude-reliability",
   "description": "Reliability hooks for Claude Code - prevents common mistakes and enforces quality standards",
   "version": "0.1.0",
+  "author": {
+    "name": "David R. MacIver",
+    "email": "david@drmaciver.com"
+  },
+  "repository": "https://github.com/DRMacIver/claude-reliability",
+  "license": "MIT",
+  "keywords": ["reliability", "hooks", "quality", "code-review"],
   "hooks": {
     "Stop": [
       {
