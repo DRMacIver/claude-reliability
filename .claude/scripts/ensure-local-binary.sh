@@ -3,10 +3,14 @@
 #
 # This script:
 # 1. Checks for binary at .claude/bin/claude-reliability
-# 2. If missing, builds it with `just update-my-hooks`
-# 3. Prints the path to the binary on success, exits non-zero on failure
+# 2. If missing, tries to download from GitHub releases
+# 3. Falls back to building from source if in the source repo
+# 4. Prints the path to the binary on success, exits non-zero on failure
 
 set -euo pipefail
+
+REPO="DRMacIver/claude-reliability"
+GITHUB_API="https://api.github.com"
 
 # Get the project root (where CLAUDE.md and justfile live)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,34 +25,118 @@ if [[ -x "$BINARY_PATH" ]]; then
         echo "$BINARY_PATH"
         exit 0
     fi
-    # Binary is broken, rebuild
+    # Binary is broken, remove it
     rm -f "$BINARY_PATH"
 fi
 
-# Binary missing or broken - build it
-echo "Building claude-reliability binary..." >&2
+# Detect platform
+detect_platform() {
+    local os arch
+    os="$(uname -s)"
+    arch="$(uname -m)"
 
-cd "$PROJECT_ROOT"
+    case "$os" in
+        Linux)
+            case "$arch" in
+                x86_64|amd64) echo "linux-x86_64" ;;
+                *) echo "" ;;
+            esac
+            ;;
+        Darwin)
+            case "$arch" in
+                arm64|aarch64) echo "macos-arm64" ;;
+                *) echo "" ;;
+            esac
+            ;;
+        *) echo "" ;;
+    esac
+}
 
-# Check if just is available
-if command -v just >/dev/null 2>&1; then
-    just update-my-hooks >&2
-elif command -v cargo >/dev/null 2>&1; then
-    # Fall back to direct cargo build
-    cargo build --release --features cli >&2
-    mkdir -p .claude/bin
-    cp target/release/claude-reliability .claude/bin/
-    chmod +x .claude/bin/claude-reliability
-else
-    echo "ERROR: Neither 'just' nor 'cargo' available to build binary" >&2
-    exit 1
+# Try to download from GitHub releases
+download_from_release() {
+    local artifact_name="$1"
+
+    echo "Downloading claude-reliability from GitHub releases..." >&2
+
+    # Get latest version
+    local version
+    if command -v curl >/dev/null 2>&1; then
+        version=$(curl -fsSL "${GITHUB_API}/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' || echo "")
+    elif command -v wget >/dev/null 2>&1; then
+        version=$(wget -qO- "${GITHUB_API}/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' || echo "")
+    fi
+
+    if [[ -z "$version" ]]; then
+        echo "Could not determine latest version" >&2
+        return 1
+    fi
+
+    local version_num="${version#v}"
+    local download_url="https://github.com/${REPO}/releases/download/${version}/claude-reliability-${version_num}-${artifact_name}.tar.gz"
+
+    echo "Downloading version ${version}..." >&2
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" RETURN
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$download_url" -o "${tmp_dir}/release.tar.gz" || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$download_url" -O "${tmp_dir}/release.tar.gz" || return 1
+    else
+        return 1
+    fi
+
+    mkdir -p "${PROJECT_ROOT}/.claude/bin"
+    tar -xzf "${tmp_dir}/release.tar.gz" -C "$tmp_dir"
+    mv "${tmp_dir}/claude-reliability" "$BINARY_PATH"
+    chmod +x "$BINARY_PATH"
+
+    return 0
+}
+
+# Try to build from source
+build_from_source() {
+    echo "Building claude-reliability from source..." >&2
+
+    cd "$PROJECT_ROOT"
+
+    if command -v just >/dev/null 2>&1 && [[ -f "justfile" ]]; then
+        just update-my-hooks >&2
+        return $?
+    elif command -v cargo >/dev/null 2>&1 && [[ -f "Cargo.toml" ]]; then
+        cargo build --release --features cli >&2
+        mkdir -p .claude/bin
+        cp target/release/claude-reliability .claude/bin/
+        chmod +x .claude/bin/claude-reliability
+        return $?
+    fi
+
+    return 1
+}
+
+# Main logic
+artifact_name=$(detect_platform)
+
+if [[ -n "$artifact_name" ]]; then
+    # Try downloading first
+    if download_from_release "$artifact_name"; then
+        if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
+            echo "$BINARY_PATH"
+            exit 0
+        fi
+    fi
 fi
 
-# Verify the binary now exists and works
-if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
-    echo "$BINARY_PATH"
-    exit 0
+# Fall back to building from source (only works in the source repo)
+if build_from_source; then
+    if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
+        echo "$BINARY_PATH"
+        exit 0
+    fi
 fi
 
-echo "ERROR: Failed to build claude-reliability binary" >&2
+echo "ERROR: Failed to obtain claude-reliability binary" >&2
+echo "Supported platforms: Linux x86_64, macOS ARM64" >&2
 exit 1
