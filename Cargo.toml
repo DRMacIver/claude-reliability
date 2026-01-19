@@ -1,6 +1,6 @@
 [package]
 name = "claude-reliability"
-version = "26.1.19.2"
+version = "26.1.19.4"
 edition = "2021"
 rust-version = "1.75"
 description = ""
