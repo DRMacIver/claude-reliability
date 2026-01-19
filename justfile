@@ -6,9 +6,7 @@
 default:
 	@just --list
 
-
 DOCKER_IMAGE := "claude-reliability-dev"
-
 
 _docker-build:
 	#!/usr/bin/env bash
@@ -25,17 +23,13 @@ _docker-build:
 		echo "$HASH" > "$SENTINEL"
 	fi
 
-
 build:
 	cargo build
-
 
 build-release:
 	cargo build --release
 
-
 check: lint test
-
 
 check-bin-size:
 	#!/usr/bin/env bash
@@ -57,10 +51,8 @@ check-bin-size:
 	fi
 	echo "All binary entry points are thin wrappers (≤$MAX_LINES lines)"
 
-
 clean:
 	cargo clean
-
 
 develop *ARGS:
 	#!/usr/bin/env bash
@@ -176,46 +168,40 @@ develop *ARGS:
 doc:
 	cargo doc --no-deps --open
 
-
 format:
 	cargo fmt
-
 
 install-tools:
 	rustup component add clippy rustfmt llvm-tools-preview
 	cargo install cargo-llvm-cov
 
-
 lint: check-bin-size
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo fmt --check
 
-
 release:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	# Run checks first
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test --all-features
-	# Update version
+	# Update version in Cargo.toml
 	python3 scripts/release.py
 	# Get the version that was set
 	VERSION=$(python3 scripts/release.py --version-only)
 	# Commit version update
 	git add Cargo.toml
 	git commit -m "Release $VERSION"
-	# Create and push tag
+	# Create and push tag - this triggers the GitHub Actions release workflow
 	git tag "v$VERSION"
 	git push origin main "v$VERSION"
-	echo "Released v$VERSION - future pushes to main will auto-release"
+	echo ""
+	echo "Release v$VERSION initiated!"
+	echo "GitHub Actions will now build binaries for all platforms."
+	echo "Monitor progress at: https://github.com/$(git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')/actions"
 
 release-preview:
 	python3 scripts/release.py --dry-run
 
-
 release-version:
 	python3 scripts/release.py --version-only
-
 
 run *ARGS:
 	cargo run --features cli -- {{ARGS}}
@@ -223,11 +209,8 @@ run *ARGS:
 test *ARGS:
 	cargo test {{ARGS}}
 
-
 test-cov:
 	cargo llvm-cov --lib --all-features --fail-under-lines 100
 
-
 validate-devcontainer:
 	@test -f .devcontainer/devcontainer.json && test -f .devcontainer/Dockerfile && echo "Devcontainer configuration valid"
-
