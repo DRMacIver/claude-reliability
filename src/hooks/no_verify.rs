@@ -34,6 +34,12 @@ pub enum NoVerifyResult {
 
 /// Check if a command is trying to use --no-verify.
 pub fn check_no_verify(command: &str) -> NoVerifyResult {
+    let ack_value = env::var("NO_VERIFY_OK").ok();
+    check_no_verify_with_ack(command, ack_value.as_deref())
+}
+
+/// Check no-verify with an explicit acknowledgment value (for testing).
+fn check_no_verify_with_ack(command: &str, ack_value: Option<&str>) -> NoVerifyResult {
     // Check if this is a git commit with --no-verify or -n
     let has_no_verify = NO_VERIFY_PATTERNS.iter().any(|re| re.is_match(command));
 
@@ -41,8 +47,8 @@ pub fn check_no_verify(command: &str) -> NoVerifyResult {
         return NoVerifyResult::NoFlag;
     }
 
-    // Check for the acknowledgment environment variable
-    if let Ok(no_verify_ok) = env::var("NO_VERIFY_OK") {
+    // Check for the acknowledgment
+    if let Some(no_verify_ok) = ack_value {
         if no_verify_ok.contains(ACKNOWLEDGMENT) {
             return NoVerifyResult::Acknowledged;
         }
@@ -107,63 +113,49 @@ pub fn generate_output(result: NoVerifyResult) -> Option<PreToolUseOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn test_check_no_verify_not_git() {
-        assert_eq!(check_no_verify("echo hello"), NoVerifyResult::NoFlag);
+        assert_eq!(check_no_verify_with_ack("echo hello", None), NoVerifyResult::NoFlag);
     }
 
     #[test]
     fn test_check_no_verify_normal_commit() {
-        assert_eq!(check_no_verify("git commit -m 'test'"), NoVerifyResult::NoFlag);
+        assert_eq!(check_no_verify_with_ack("git commit -m 'test'", None), NoVerifyResult::NoFlag);
     }
 
     #[test]
     fn test_check_no_verify_with_flag() {
-        // Clear env var first
-        env::remove_var("NO_VERIFY_OK");
-
-        assert_eq!(check_no_verify("git commit --no-verify -m 'test'"), NoVerifyResult::Blocked);
-        assert_eq!(check_no_verify("git commit -n -m 'test'"), NoVerifyResult::Blocked);
-        assert_eq!(check_no_verify("git commit -am 'test' --no-verify"), NoVerifyResult::Blocked);
+        assert_eq!(
+            check_no_verify_with_ack("git commit --no-verify -m 'test'", None),
+            NoVerifyResult::Blocked
+        );
+        assert_eq!(
+            check_no_verify_with_ack("git commit -n -m 'test'", None),
+            NoVerifyResult::Blocked
+        );
+        assert_eq!(
+            check_no_verify_with_ack("git commit -am 'test' --no-verify", None),
+            NoVerifyResult::Blocked
+        );
     }
-
-    // Note: These tests manipulate environment variables and may interfere
-    // with parallel test execution. Run with --test-threads=1 if issues occur.
 
     #[test]
     fn test_check_no_verify_acknowledged() {
-        // Temporarily set the env var, check, then clean up
-        let key = "NO_VERIFY_OK";
-        let original = env::var(key).ok();
-
-        env::set_var(key, "I promise the user has said I can use --no-verify here");
-        let result = check_no_verify("git commit --no-verify -m 'test'");
-
-        // Restore original value
-        match original {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
-        }
-
-        assert_eq!(result, NoVerifyResult::Acknowledged);
+        let ack = Some("I promise the user has said I can use --no-verify here");
+        assert_eq!(
+            check_no_verify_with_ack("git commit --no-verify -m 'test'", ack),
+            NoVerifyResult::Acknowledged
+        );
     }
 
     #[test]
     fn test_check_no_verify_wrong_acknowledgment() {
-        let key = "NO_VERIFY_OK";
-        let original = env::var(key).ok();
-
-        env::set_var(key, "wrong phrase");
-        let result = check_no_verify("git commit --no-verify -m 'test'");
-
-        match original {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
-        }
-
-        assert_eq!(result, NoVerifyResult::Blocked);
+        let ack = Some("wrong phrase");
+        assert_eq!(
+            check_no_verify_with_ack("git commit --no-verify -m 'test'", ack),
+            NoVerifyResult::Blocked
+        );
     }
 
     #[test]

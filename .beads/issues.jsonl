@@ -1,0 +1,1 @@
+{"id":"claude-reliability-99v","title":"Refactor main.rs to be thin wrapper (currently 167 lines, max 50)","status":"open","priority":0,"issue_type":"bug","created_at":"2026-01-19T14:04:00.328448Z","created_by":"drmaciver","updated_at":"2026-01-19T14:04:00.328448Z"}
