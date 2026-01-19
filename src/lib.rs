@@ -1,4 +1,4 @@
-//! # claude_reliability
+//! # `claude_reliability`
 //!
 //! Hooks and analysis tools for improving Claude Code reliability and safety.
 
