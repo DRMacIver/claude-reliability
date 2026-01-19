@@ -157,7 +157,6 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
                 "json",
                 "--allowedTools",
                 "Read,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(git show*)",
-                "--no-hooks",
             ],
             Some(CODE_REVIEW_TIMEOUT),
         )?;

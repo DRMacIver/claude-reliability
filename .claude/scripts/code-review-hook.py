@@ -203,7 +203,6 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
                 "--model", "opus",
                 "--output-format", "json",
                 "--allowedTools", "Read,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(git show*)",
-                "--no-hooks",
             ],
             capture_output=True,
             text=True,
