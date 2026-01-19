@@ -9,3 +9,4 @@
 .claude/bin/
 target/
 Cargo.lock
+lcov.info

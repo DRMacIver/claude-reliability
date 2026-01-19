@@ -266,4 +266,37 @@ iteration: 1
     fn test_staleness_threshold() {
         assert_eq!(STALENESS_THRESHOLD, 5);
     }
+
+    #[test]
+    fn test_parse_session_invalid_frontmatter_format() {
+        // Test with frontmatter that doesn't have proper closing ---
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.md");
+
+        // Write a file with only opening --- but no closing
+        fs::write(&path, "---\niteration: 1\n# No closing delimiter").unwrap();
+
+        let result = parse_session_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_write_session_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        // Path with non-existent parent directory
+        let nested = dir.path().join("deeply").join("nested").join("path");
+        let path = nested.join("session.md");
+
+        // Verify parent doesn't exist yet
+        assert!(!nested.exists());
+
+        let config =
+            SessionConfig { iteration: 1, last_issue_change_iteration: 1, issue_snapshot: vec![] };
+
+        write_session_file(&path, &config).unwrap();
+
+        // Verify both parent and file now exist
+        assert!(nested.exists());
+        assert!(path.exists());
+    }
 }

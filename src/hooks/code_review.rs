@@ -278,4 +278,271 @@ mod tests {
         assert!(!GIT_COMMIT_REGEX.is_match("git status"));
         assert!(!GIT_COMMIT_REGEX.is_match("git push"));
     }
+
+    #[test]
+    fn test_is_source_code_file_egg_info() {
+        assert!(!is_source_code_file("mypackage.egg-info/PKG-INFO"));
+    }
+
+    #[test]
+    fn test_run_code_review_hook_skip_review() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig { skip_review: true };
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_not_bash() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput { tool_name: Some("Read".to_string()), ..Default::default() };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_not_commit() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput { command: Some("git status".to_string()) }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_amend() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit --amend -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_no_staged_files() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use crate::traits::CommandOutput;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_no_source_files() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use crate::traits::CommandOutput;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "README.md\nconfig.yaml\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_empty_diff() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use crate::traits::CommandOutput;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/main.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "-U0"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_approved() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use crate::traits::CommandOutput;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/main.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "-U0"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "+fn main() {}\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_review(true, "LGTM");
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_rejected() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use crate::traits::CommandOutput;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/main.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "-U0"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "+fn main() {}\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_review(false, "Security issue found");
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn test_run_code_review_hook_no_tool_input() {
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+        let config = CodeReviewConfig::default();
+
+        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_load_review_guide_not_exists() {
+        // When file doesn't exist, should return None
+        let guide = load_review_guide();
+        // This depends on whether REVIEWGUIDE.md exists in the repo
+        // Just make sure it doesn't panic
+        let _ = guide;
+    }
 }

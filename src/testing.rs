@@ -154,6 +154,35 @@ impl SubAgent for MockSubAgent {
     }
 }
 
+/// A command runner that always fails, for testing error paths.
+#[derive(Debug, Default)]
+pub struct FailingCommandRunner {
+    error_message: String,
+}
+
+impl FailingCommandRunner {
+    /// Create a new failing command runner with the specified error message.
+    #[must_use]
+    pub fn new(error_message: impl Into<String>) -> Self {
+        Self { error_message: error_message.into() }
+    }
+}
+
+impl CommandRunner for FailingCommandRunner {
+    fn run(
+        &self,
+        _program: &str,
+        _args: &[&str],
+        _timeout: Option<Duration>,
+    ) -> Result<CommandOutput> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn is_available(&self, _program: &str) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +226,30 @@ mod tests {
 
         let decision = agent.decide_on_question("test", 5).unwrap();
         assert_eq!(decision, SubAgentDecision::Continue);
+    }
+
+    #[test]
+    #[should_panic(expected = "no more expectations")]
+    fn test_mock_command_runner_too_many_calls() {
+        let runner = MockCommandRunner::new();
+        // No expectations set, so any call should panic
+        let _ = runner.run("echo", &["hello"], None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected 1 command calls")]
+    fn test_mock_command_runner_verify_fails() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect("echo", &["hello"], CommandOutput::default());
+        // Don't make the call, so verify should fail
+        runner.verify();
+    }
+
+    #[test]
+    fn test_failing_command_runner() {
+        let runner = FailingCommandRunner::new("test error");
+        let result = runner.run("any", &["args"], None);
+        assert!(result.is_err());
+        assert!(!runner.is_available("any"));
     }
 }

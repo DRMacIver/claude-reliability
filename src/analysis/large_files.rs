@@ -88,6 +88,85 @@ pub fn check_large_files(runner: &dyn CommandRunner) -> Vec<Violation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::MockCommandRunner;
+    use crate::traits::CommandOutput;
+
+    #[test]
+    fn test_check_large_files_no_files() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_check_large_files_git_failure() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput { exit_code: 1, stdout: String::new(), stderr: "error".to_string() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 1, stdout: String::new(), stderr: "error".to_string() },
+        );
+
+        let violations = check_large_files(&runner);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_check_large_files_nonexistent_file() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "nonexistent_file.txt\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        // File doesn't exist, so no violation
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_check_large_files_empty_lines() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput { exit_code: 0, stdout: "\n\n  \n".to_string(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        assert!(violations.is_empty());
+    }
 
     #[test]
     fn test_formatted_size_kb() {
@@ -120,5 +199,100 @@ mod tests {
     fn test_threshold_constant() {
         // Verify the threshold is 500KB
         assert_eq!(LARGE_FILE_THRESHOLD_BYTES, 500 * 1024);
+    }
+
+    #[test]
+    fn test_check_large_files_detects_large_file() {
+        use tempfile::TempDir;
+
+        // Create a temp directory with a large file
+        let dir = TempDir::new().unwrap();
+        let large_file_path = dir.path().join("large.bin");
+
+        // Create a file larger than 500KB threshold
+        let large_content = vec![0u8; 600 * 1024]; // 600KB
+        std::fs::write(&large_file_path, large_content).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: format!("{}\n", large_file_path.display()),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].description.contains("large file"));
+    }
+
+    #[test]
+    fn test_check_large_files_small_file_ignored() {
+        use tempfile::TempDir;
+
+        // Create a temp directory with a small file
+        let dir = TempDir::new().unwrap();
+        let small_file_path = dir.path().join("small.txt");
+
+        // Create a file smaller than 500KB threshold
+        let small_content = vec![0u8; 100 * 1024]; // 100KB
+        std::fs::write(&small_file_path, small_content).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: format!("{}\n", small_file_path.display()),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_check_large_files_directory_ignored() {
+        use tempfile::TempDir;
+
+        // Create a temp directory
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: format!("{}\n", subdir.display()),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let violations = check_large_files(&runner);
+        // Directories are not flagged
+        assert!(violations.is_empty());
     }
 }

@@ -16,7 +16,7 @@ use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
 use crate::transcript::{self, TranscriptInfo};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Magic string that allows stopping when work is complete but human input is required.
 pub const HUMAN_INPUT_REQUIRED: &str =
@@ -39,6 +39,21 @@ pub struct StopHookConfig {
     pub require_push: bool,
     /// Whether we're in a repo critique mode (bypass hook).
     pub repo_critique_mode: bool,
+    /// Base directory for beads checks (defaults to current directory).
+    /// Used by tests to avoid changing global CWD.
+    pub base_dir: Option<PathBuf>,
+}
+
+impl StopHookConfig {
+    /// Get the base directory for file operations, defaulting to current directory.
+    fn base_dir(&self) -> &Path {
+        self.base_dir.as_deref().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// Get the session file path (relative to `base_dir`).
+    fn session_path(&self) -> PathBuf {
+        self.base_dir().join(session::SESSION_FILE_PATH)
+    }
 }
 
 /// Result of running the stop hook.
@@ -112,8 +127,8 @@ pub fn run_stop_hook(
         .unwrap_or_default();
 
     // Check if autonomous session is active
-    let session_path = Path::new(session::SESSION_FILE_PATH);
-    let session_config = session::parse_session_file(session_path)?;
+    let session_path = config.session_path();
+    let session_config = session::parse_session_file(&session_path)?;
 
     // Fast path: if no autonomous session and no git changes, allow immediate exit
     if session_config.is_none() {
@@ -131,7 +146,10 @@ pub fn run_stop_hook(
         if has_complete_phrase || has_problem_phrase {
             // For the "work complete" phrase, check if there are remaining issues
             // The "problem" phrase allows exit even with open issues
-            if has_complete_phrase && !has_problem_phrase && beads::is_beads_available(runner) {
+            if has_complete_phrase
+                && !has_problem_phrase
+                && beads::is_beads_available_in(runner, config.base_dir())
+            {
                 let open_count = beads::get_open_issues_count(runner)?;
                 if open_count > 0 {
                     return Ok(StopHookResult::block()
@@ -150,7 +168,7 @@ pub fn run_stop_hook(
                 }
             }
             // Bypass allowed
-            session::cleanup_session_file(session_path)?;
+            session::cleanup_session_file(&session_path)?;
             let reason = if has_problem_phrase {
                 "Problem requiring user input acknowledged. Allowing stop."
             } else {
@@ -226,10 +244,11 @@ fn handle_uncommitted_changes(
     let mut result = StopHookResult::block();
 
     // Check beads interaction if beads is available
-    if beads::is_beads_available(runner) {
-        let beads_status = beads::check_beads_interaction(runner)?;
+    let base_dir = config.base_dir();
+    if beads::is_beads_available_in(runner, base_dir) {
+        let beads_status = beads::check_beads_interaction_in(runner, base_dir)?;
         if !beads_status.has_interaction && !beads_status.already_warned {
-            beads::mark_beads_warning_given()?;
+            beads::mark_beads_warning_given_in(base_dir)?;
             return Ok(result
                 .with_message("# Beads Interaction Required")
                 .with_message("")
@@ -465,14 +484,14 @@ fn handle_autonomous_mode(
     runner: &dyn CommandRunner,
     _sub_agent: &dyn SubAgent,
 ) -> Result<StopHookResult> {
-    let session_path = Path::new(session::SESSION_FILE_PATH);
+    let session_path = config.session_path();
 
     // Increment iteration
     session.iteration += 1;
     let iteration = session.iteration;
 
     // Get current issue state (if beads is available)
-    let (open_ids, in_progress_ids) = if beads::is_beads_available(runner) {
+    let (open_ids, in_progress_ids) = if beads::is_beads_available_in(runner, config.base_dir()) {
         beads::get_current_issues(runner)?
     } else {
         (HashSet::new(), HashSet::new())
@@ -489,12 +508,12 @@ fn handle_autonomous_mode(
 
     // Update session file
     session.issue_snapshot = current_snapshot.into_iter().collect();
-    session::write_session_file(session_path, session)?;
+    session::write_session_file(&session_path, session)?;
 
     // Check staleness
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
-        session::cleanup_session_file(session_path)?;
+        session::cleanup_session_file(&session_path)?;
         return Ok(StopHookResult::allow()
             .with_message("# Staleness Detected")
             .with_message("")
@@ -610,6 +629,115 @@ fn truncate_output(output: &str, max_lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{MockCommandRunner, MockSubAgent};
+    use crate::traits::CommandOutput;
+
+    fn mock_clean_git() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        // git diff --stat (no changes)
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // git diff --cached --stat (no staged)
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // git ls-files --others --exclude-standard (no untracked)
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // git rev-list --count @{upstream}..HEAD (not ahead)
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_clean_repo_allows_exit() {
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_run_stop_hook_repo_critique_mode_bypasses() {
+        let runner = MockCommandRunner::new(); // No expectations - shouldn't be called
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { repo_critique_mode: true, ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+    }
+
+    fn mock_uncommitted_changes() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // beads availability check uses runner.is_available(), not a command
+        // Since we don't call runner.set_available("bd"), beads is not available
+
+        // combined_diff for analysis (staged_diff first, then unstaged_diff)
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_uncommitted_changes_blocks() {
+        let runner = mock_uncommitted_changes();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert_eq!(result.exit_code, 2);
+        assert!(result.messages.iter().any(|m| m.contains("Uncommitted Changes")));
+    }
 
     #[test]
     fn test_stop_hook_result_allow() {
@@ -661,5 +789,1103 @@ mod tests {
     fn test_problem_needs_user_constant() {
         assert!(PROBLEM_NEEDS_USER.contains("problem"));
         assert!(PROBLEM_NEEDS_USER.contains("user input"));
+    }
+
+    #[test]
+    fn test_stop_hook_result_with_messages_iter() {
+        let msgs = vec!["A".to_string(), "B".to_string()];
+        let result = StopHookResult::block().with_messages(msgs);
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0], "A");
+        assert_eq!(result.messages[1], "B");
+    }
+
+    #[test]
+    fn test_add_analysis_messages_suppression() {
+        let mut result = StopHookResult::block();
+        let analysis = AnalysisResults {
+            suppression_violations: vec![crate::analysis::Violation::new(
+                "test.py",
+                1,
+                "noqa violation",
+            )],
+            ..Default::default()
+        };
+        add_analysis_messages(&mut result, &analysis);
+        assert!(result.messages.iter().any(|m| m.contains("Error Suppression")));
+    }
+
+    #[test]
+    fn test_add_analysis_messages_empty_except() {
+        let mut result = StopHookResult::block();
+        let analysis = AnalysisResults {
+            empty_except_violations: vec![crate::analysis::Violation::new(
+                "test.py",
+                1,
+                "empty except",
+            )],
+            ..Default::default()
+        };
+        add_analysis_messages(&mut result, &analysis);
+        assert!(result.messages.iter().any(|m| m.contains("Empty Exception")));
+    }
+
+    #[test]
+    fn test_add_analysis_messages_secrets() {
+        let mut result = StopHookResult::block();
+        let analysis = AnalysisResults {
+            secret_violations: vec![crate::analysis::Violation::new(
+                "test.py",
+                1,
+                "hardcoded secret",
+            )],
+            ..Default::default()
+        };
+        add_analysis_messages(&mut result, &analysis);
+        assert!(result.messages.iter().any(|m| m.contains("SECURITY")));
+        assert!(result.messages.iter().any(|m| m.contains("Hardcoded Secrets")));
+    }
+
+    #[test]
+    fn test_add_analysis_messages_todos() {
+        let mut result = StopHookResult::block();
+        let analysis = AnalysisResults {
+            todo_warnings: vec![crate::analysis::Violation::new("test.py", 1, "TODO found")],
+            ..Default::default()
+        };
+        add_analysis_messages(&mut result, &analysis);
+        assert!(result.messages.iter().any(|m| m.contains("Untracked Work")));
+    }
+
+    fn mock_clean_with_ahead() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let three_ahead =
+            CommandOutput { exit_code: 0, stdout: "3\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], three_ahead.clone());
+
+        // Fast path doesn't return because ahead_of_remote is true
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], three_ahead);
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_unpushed_commits_blocks() {
+        let runner = mock_clean_with_ahead();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { require_push: true, ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert_eq!(result.exit_code, 2);
+        assert!(result.messages.iter().any(|m| m.contains("Unpushed Commits")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_unpushed_allowed_without_require_push() {
+        let runner = mock_clean_with_ahead();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { require_push: false, ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        // Without require_push, being ahead is allowed
+        assert!(result.allow_stop);
+    }
+
+    fn mock_uncommitted_with_untracked() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let untracked_files = CommandOutput {
+            exit_code: 0,
+            stdout: "untracked1.txt\nuntracked2.txt\n".to_string(),
+            stderr: String::new(),
+        };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            untracked_files.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], untracked_files);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_shows_untracked_files() {
+        let runner = mock_uncommitted_with_untracked();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Untracked Files")));
+        assert!(result.messages.iter().any(|m| m.contains("untracked1.txt")));
+    }
+
+    fn mock_uncommitted_with_quality_checks() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        // Quality check command
+        runner.expect(
+            "sh",
+            &["-c", "just check"],
+            CommandOutput {
+                exit_code: 1,
+                stdout: "Error: lint failed".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_quality_check_fails() {
+        let runner = mock_uncommitted_with_quality_checks();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Quality Checks Failed")));
+    }
+
+    #[test]
+    fn test_check_interactive_question_no_output() {
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_interactive_question_not_a_question() {
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("This is just a statement.".to_string()),
+            last_user_message_time: None,
+        };
+        let sub_agent = MockSubAgent::new();
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_interactive_question_user_not_active() {
+        use chrono::{Duration, Utc};
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Would you like me to continue?".to_string()),
+            // User was active 10 minutes ago (beyond the 5-minute threshold)
+            last_user_message_time: Some(Utc::now() - Duration::minutes(10)),
+        };
+        let sub_agent = MockSubAgent::new();
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_interactive_question_continue_question() {
+        use chrono::{Duration, Utc};
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Should I continue?".to_string()),
+            last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+        };
+        let sub_agent = MockSubAgent::new();
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.inject_response.is_some());
+        assert!(result.inject_response.unwrap().contains("continue"));
+    }
+
+    #[test]
+    fn test_check_interactive_question_subagent_allow_stop() {
+        use crate::traits::SubAgentDecision;
+        use chrono::{Duration, Utc};
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("What color theme would you prefer?".to_string()),
+            last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+        };
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
+            "User preference needed".to_string(),
+        )));
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("user interaction")));
+    }
+
+    #[test]
+    fn test_check_interactive_question_subagent_answer() {
+        use crate::traits::SubAgentDecision;
+        use chrono::{Duration, Utc};
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Which approach should I use?".to_string()),
+            last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+        };
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        assert_eq!(result.inject_response, Some("Use approach A".to_string()));
+    }
+
+    #[test]
+    fn test_check_interactive_question_subagent_continue() {
+        use crate::traits::SubAgentDecision;
+        use chrono::{Duration, Utc};
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("What do you think about this?".to_string()),
+            last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+        };
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_question_decision(SubAgentDecision::Continue);
+
+        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        assert!(result.is_none());
+    }
+
+    fn create_transcript_with_output(output: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": output}
+                ]
+            }
+        });
+        writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        file
+    }
+
+    fn mock_with_uncommitted_for_bypass() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // Fast path check - returns changes so we don't exit early
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        runner
+    }
+
+    #[test]
+    fn test_bypass_problem_phrase_allows_exit() {
+        let transcript_file = create_transcript_with_output(PROBLEM_NEEDS_USER);
+        let runner = mock_with_uncommitted_for_bypass();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Problem requiring user input")));
+    }
+
+    #[test]
+    fn test_bypass_human_input_phrase_allows_exit() {
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+        let runner = mock_with_uncommitted_for_bypass();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Human input required")));
+    }
+
+    #[test]
+    fn test_bypass_human_input_blocked_with_open_issues() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .beads directory
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
+
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path) - returns changes so we continue
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // beads availability check happens in bypass check
+        // get_open_issues_count - returns 2 open issues
+        runner.expect(
+            "bd",
+            &["list", "--status=open", "--format=json"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: r#"[{"id": "a"}, {"id": "b"}]"#.to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
+        assert!(result.messages.iter().any(|m| m.contains("2 open issue")));
+    }
+
+    #[test]
+    fn test_beads_warning_on_uncommitted_changes() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .beads directory so beads is "available"
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // check_beads_interaction - no interaction
+        runner.expect(
+            "git",
+            &["diff", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["log", "--oneline", "-10", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Beads Interaction Required")));
+    }
+
+    #[test]
+    fn test_quality_check_passes() {
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path) - clean
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        // Clean repo, so fast path returns early without running quality checks
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_quality_check_fails_not_autonomous() {
+        // Test quality check failure when NOT in autonomous mode
+        // This requires: no session, ahead of remote (skip fast path),
+        // require_push=false, quality check enabled and fails
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        // Ahead of remote by 1 commit (skips fast path)
+        let one_commit =
+            CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+        let quality_fail = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "lint failed\n".to_string(),
+        };
+
+        // check_uncommitted_changes (fast path check) - no uncommitted but ahead
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit.clone());
+
+        // Second check_uncommitted_changes
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit);
+
+        // Quality check fails
+        runner.expect("sh", &["-c", "just check"], quality_fail);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            require_push: false, // Don't block on unpushed commits
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Quality Gates Failed")));
+    }
+
+    // Helper to create a session file for autonomous mode tests
+    fn create_session_file(base: &std::path::Path, iteration: u32, last_change: u32) {
+        let session_dir = base.join(".claude");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let content = format!(
+            "---\niteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: []\n---\n# Session"
+        );
+        std::fs::write(session_dir.join("autonomous-session.local.md"), content).unwrap();
+    }
+
+    #[test]
+    fn test_autonomous_mode_work_remaining() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file (iteration 3, last change at 2)
+        create_session_file(base, 3, 2);
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped due to session file)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // get_current_issues (beads not available since no .beads dir)
+        // So no beads commands expected
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        assert!(result.messages.iter().any(|m| m.contains("Iteration 4")));
+    }
+
+    #[test]
+    fn test_autonomous_mode_staleness_detected() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file with high staleness (iteration 10, last change at 3)
+        // This means iterations_since_change = 10-3 = 7, and after increment = 11-3 = 8 >= 5
+        create_session_file(base, 10, 3);
+
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Staleness Detected")));
+    }
+
+    #[test]
+    fn test_autonomous_mode_all_done_quality_passes() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file (iteration 1, last change at 1)
+        create_session_file(base, 1, 1);
+
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // Quality check passes
+        runner.expect("sh", &["-c", "just check"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Checking Completion")));
+        assert!(result.messages.iter().any(|m| m.contains("All quality gates passed")));
+    }
+
+    #[test]
+    fn test_autonomous_mode_all_done_quality_fails() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file (iteration 1, last change at 1)
+        create_session_file(base, 1, 1);
+
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let quality_fail = CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Test failed\n".to_string(),
+        };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // Quality check fails
+        runner.expect("sh", &["-c", "just check"], quality_fail);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Quality Gates Failed")));
+    }
+
+    #[test]
+    fn test_autonomous_mode_with_staleness_warning() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file (iteration 5, last change at 2 - gives 3 iterations since change)
+        // After increment it becomes iteration 6, so iterations_since_change = 4 > 2
+        create_session_file(base, 5, 2);
+
+        let mut runner = MockCommandRunner::new();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        // Check for staleness warning (iterations > 2)
+        assert!(result.messages.iter().any(|m| m.contains("Warning")));
+    }
+
+    #[test]
+    fn test_autonomous_mode_with_beads_issues() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file and .beads directory
+        create_session_file(base, 1, 1);
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // get_current_issues - returns some issues
+        runner.expect(
+            "bd",
+            &["list", "--status=open"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "proj-1 [P1] Test issue\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "bd",
+            &["list", "--status=in_progress"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        assert!(result.messages.iter().any(|m| m.contains("Outstanding issues: 1")));
+        assert!(result.messages.iter().any(|m| m.contains("Open issues: 1")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_shows_many_untracked_files() {
+        // Test with more than 10 untracked files to cover the "... and X more" message
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // 15 untracked files
+        let many_untracked = CommandOutput {
+            exit_code: 0,
+            stdout: "file1.txt\nfile2.txt\nfile3.txt\nfile4.txt\nfile5.txt\nfile6.txt\nfile7.txt\nfile8.txt\nfile9.txt\nfile10.txt\nfile11.txt\nfile12.txt\nfile13.txt\nfile14.txt\nfile15.txt\n".to_string(),
+            stderr: String::new(),
+        };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            many_untracked.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], many_untracked);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        // Should show "... and 5 more" for the extra files beyond 10
+        assert!(result.messages.iter().any(|m| m.contains("... and 5 more")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_require_push_message() {
+        // Test that require_push adds the push message
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { require_push: true, ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        // Should include push instruction when require_push is enabled
+        assert!(result.messages.iter().any(|m| m.contains("Push to remote")));
+        assert!(result.messages.iter().any(|m| m.contains("Work is incomplete until")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_interactive_question_allows_stop() {
+        // Test interactive question path through run_stop_hook (covers line 209)
+        // To reach check_interactive_question, we need:
+        // 1. Skip fast path: ahead_of_remote = true OR uncommitted changes
+        // 2. No uncommitted changes (to not go to handle_uncommitted_changes)
+        // 3. require_push = false (to not block on unpushed commits)
+        use chrono::{Duration, Utc};
+        use std::io::Write;
+
+        // Create transcript with a question and recent user activity
+        let mut transcript_file = tempfile::NamedTempFile::new().unwrap();
+        let user_time = Utc::now() - Duration::minutes(1);
+        let user_entry = serde_json::json!({
+            "type": "user",
+            "timestamp": user_time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+        });
+        let assistant_entry = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "What color theme would you prefer?"}
+                ]
+            }
+        });
+        writeln!(transcript_file, "{}", serde_json::to_string(&user_entry).unwrap()).unwrap();
+        writeln!(transcript_file, "{}", serde_json::to_string(&assistant_entry).unwrap()).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        // Ahead of remote by 1 commit (to skip fast path)
+        let one_commit =
+            CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path) - clean repo but ahead
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit);
+
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
+            "User preference needed".to_string(),
+        )));
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        // require_push = false so we don't block on unpushed commits
+        let config = StopHookConfig { require_push: false, ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("user interaction")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_quality_check_with_uncommitted_changes() {
+        // Test quality check running when there are uncommitted changes (covers line 283)
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let quality_pass = CommandOutput {
+            exit_code: 0,
+            stdout: "All checks passed\n".to_string(),
+            stderr: String::new(),
+        };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        // Quality check passes
+        runner.expect("sh", &["-c", "just check"], quality_pass);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        // Should have run quality checks
+        assert!(result.messages.iter().any(|m| m.contains("Running Quality Checks")));
     }
 }

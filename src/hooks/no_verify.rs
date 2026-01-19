@@ -32,12 +32,6 @@ pub enum NoVerifyResult {
     Blocked,
 }
 
-/// Check if a command is trying to use --no-verify.
-pub fn check_no_verify(command: &str) -> NoVerifyResult {
-    let ack_value = env::var("NO_VERIFY_OK").ok();
-    check_no_verify_with_ack(command, ack_value.as_deref())
-}
-
 /// Check no-verify with an explicit acknowledgment value (for testing).
 fn check_no_verify_with_ack(command: &str, ack_value: Option<&str>) -> NoVerifyResult {
     // Check if this is a git commit with --no-verify or -n
@@ -65,6 +59,16 @@ fn check_no_verify_with_ack(command: &str, ack_value: Option<&str>) -> NoVerifyR
 ///
 /// Returns an error if writing to stderr fails.
 pub fn run_no_verify_hook(input: &HookInput) -> Result<i32> {
+    let ack_value = env::var("NO_VERIFY_OK").ok();
+    run_no_verify_hook_with_ack(input, ack_value.as_deref())
+}
+
+/// Run the no-verify hook with an explicit acknowledgment value (for testing).
+///
+/// # Errors
+///
+/// Returns an error if writing to stderr fails.
+fn run_no_verify_hook_with_ack(input: &HookInput, ack_value: Option<&str>) -> Result<i32> {
     // Only run for Bash tool calls
     if input.tool_name.as_deref() != Some("Bash") {
         return Ok(0);
@@ -73,7 +77,7 @@ pub fn run_no_verify_hook(input: &HookInput) -> Result<i32> {
     // Get the command
     let command = input.tool_input.as_ref().and_then(|t| t.command.as_deref()).unwrap_or("");
 
-    match check_no_verify(command) {
+    match check_no_verify_with_ack(command, ack_value) {
         NoVerifyResult::NoFlag => Ok(0),
         NoVerifyResult::Acknowledged => {
             eprintln!("--no-verify acknowledged by NO_VERIFY_OK environment variable");
@@ -170,5 +174,74 @@ mod tests {
     fn test_generate_output_allow() {
         assert!(generate_output(NoVerifyResult::NoFlag).is_none());
         assert!(generate_output(NoVerifyResult::Acknowledged).is_none());
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_not_bash() {
+        let input = HookInput { tool_name: Some("Read".to_string()), ..Default::default() };
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_no_tool_name() {
+        let input = HookInput::default();
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_normal_command() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput { command: Some("git status".to_string()) }),
+            ..Default::default()
+        };
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_blocked() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit --no-verify -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_no_command() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput { command: None }),
+            ..Default::default()
+        };
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_no_tool_input() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+        assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_run_no_verify_hook_acknowledged() {
+        let ack = Some("I promise the user has said I can use --no-verify here");
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git commit --no-verify -m 'test'".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        // Should allow (exit code 0) since acknowledged
+        assert_eq!(run_no_verify_hook_with_ack(&input, ack).unwrap(), 0);
     }
 }

@@ -220,4 +220,105 @@ mod tests {
         assert!(status.uncommitted.has_untracked);
         assert_eq!(status.untracked_files, vec!["new_file.rs", "another_file.txt"]);
     }
+
+    #[test]
+    fn test_check_uncommitted_changes_untracked_command_fails() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // ls-files command fails
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 1, stdout: String::new(), stderr: "error".to_string() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let status = check_uncommitted_changes(&runner).unwrap();
+        // Untracked check is skipped when command fails
+        assert!(!status.uncommitted.has_untracked);
+        assert!(status.untracked_files.is_empty());
+    }
+
+    #[test]
+    fn test_check_uncommitted_changes_rev_list_non_zero_exit() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // rev-list command returns non-zero (e.g., no upstream set)
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput {
+                exit_code: 128,
+                stdout: String::new(),
+                stderr: "fatal: no upstream".to_string(),
+            },
+        );
+
+        let status = check_uncommitted_changes(&runner).unwrap();
+        // ahead_of_remote remains false when command fails
+        assert!(!status.ahead_of_remote);
+        assert_eq!(status.commits_ahead, 0);
+    }
+
+    #[test]
+    fn test_check_uncommitted_changes_rev_list_invalid_output() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // rev-list returns success but with unparseable output
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "not a number\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let status = check_uncommitted_changes(&runner).unwrap();
+        // ahead_of_remote remains false when output can't be parsed
+        assert!(!status.ahead_of_remote);
+        assert_eq!(status.commits_ahead, 0);
+    }
 }

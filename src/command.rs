@@ -2,8 +2,39 @@
 
 use crate::error::Result;
 use crate::traits::{CommandOutput, CommandRunner};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+/// ETXTBSY error code (errno 26 on Linux).
+/// This error occurs when trying to execute a file that is currently being written.
+const ETXTBSY: i32 = 26;
+
+/// Spawn a command with retry logic for ETXTBSY errors.
+///
+/// ETXTBSY ("Text file busy") can occur on overlay filesystems (like Docker)
+/// when executing a script that was just created. The file may still be held
+/// open by the filesystem layer. A brief retry usually succeeds.
+///
+/// # Arguments
+/// * `spawn_fn` - A function that attempts to spawn the process
+///
+/// # Returns
+/// The spawned child process, or an error if spawning fails for non-ETXTBSY reasons.
+fn spawn_with_etxtbsy_retry<F>(mut spawn_fn: F) -> std::io::Result<Child>
+where
+    F: FnMut() -> std::io::Result<Child>,
+{
+    loop {
+        match spawn_fn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                // ETXTBSY - wait briefly and retry
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// Real command runner that executes shell commands.
 #[derive(Debug, Default, Clone)]
@@ -27,7 +58,7 @@ impl CommandRunner for RealCommandRunner {
         let mut command = Command::new(program);
         command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let child = command.spawn()?;
+        let child = spawn_with_etxtbsy_retry(|| command.spawn())?;
 
         // Handle timeout if specified
         // Note: For now, we don't actually implement timeout - that would require
@@ -93,5 +124,73 @@ mod tests {
         let stderr_only =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: "err".to_string() };
         assert_eq!(stderr_only.combined_output(), "err");
+    }
+
+    #[test]
+    fn test_run_nonexistent_command() {
+        let runner = RealCommandRunner::new();
+        // Running a command that doesn't exist should return an error
+        let result = runner.run("definitely_not_a_real_command_12345", &[], None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spawn_with_etxtbsy_retry_immediate_success() {
+        // Test that immediate success works
+        let mut call_count = 0;
+        let mut command = Command::new("true");
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let result = spawn_with_etxtbsy_retry(|| {
+            call_count += 1;
+            command.spawn()
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_spawn_with_etxtbsy_retry_retries_on_etxtbsy() {
+        // Test that ETXTBSY errors trigger retries
+        let mut call_count = 0;
+        let mut command = Command::new("true");
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let result = spawn_with_etxtbsy_retry(|| {
+            call_count += 1;
+            if call_count < 3 {
+                // Simulate ETXTBSY error
+                Err(std::io::Error::from_raw_os_error(ETXTBSY))
+            } else {
+                // Succeed on third attempt
+                command.spawn()
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(call_count, 3); // Should have retried twice
+    }
+
+    #[test]
+    fn test_spawn_with_etxtbsy_retry_propagates_other_errors() {
+        // Test that non-ETXTBSY errors are propagated immediately
+        let mut call_count = 0;
+
+        let result = spawn_with_etxtbsy_retry(|| {
+            call_count += 1;
+            // Return ENOENT (No such file or directory) - should not retry
+            Err(std::io::Error::from_raw_os_error(2))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(call_count, 1); // Should not have retried
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(2));
+    }
+
+    #[test]
+    fn test_etxtbsy_constant() {
+        // Verify the ETXTBSY constant is correct for Linux
+        assert_eq!(ETXTBSY, 26);
     }
 }

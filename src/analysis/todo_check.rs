@@ -20,6 +20,12 @@ static ISSUE_REF_PATTERN: Lazy<Regex> =
 ///
 /// This is a non-blocking warning. TODOs should ideally be linked to
 /// tracked issues for better project management.
+///
+/// # Panics
+///
+/// This function uses `unwrap()` on regex capture group 2, which is guaranteed
+/// to exist when the regex matches because the pattern `(?i)(#|//)\s*(TODO|FIXME|HACK|XXX)\b`
+/// always captures the marker keyword in group 2.
 pub fn check_todo_without_issue(added_lines: &[AddedLine]) -> Vec<TodoWarning> {
     let mut warnings = Vec::new();
 
@@ -31,8 +37,8 @@ pub fn check_todo_without_issue(added_lines: &[AddedLine]) -> Vec<TodoWarning> {
                 continue; // Has issue reference, skip
             }
 
-            let marker =
-                captures.get(2).map_or_else(|| "TODO".to_string(), |m| m.as_str().to_uppercase());
+            // Group 2 always exists when regex matches (it's the TODO/FIXME/HACK/XXX part)
+            let marker = captures.get(2).unwrap().as_str().to_uppercase();
             warnings.push(Violation::new(
                 &line.file,
                 line.line_number,

@@ -114,4 +114,24 @@ mod tests {
         results.todo_warnings.push(Violation::new("f", 1, "test"));
         assert!(results.has_warnings());
     }
+
+    #[test]
+    fn test_analysis_results_has_issues_none() {
+        let results = AnalysisResults::default();
+        assert!(!results.has_issues());
+    }
+
+    #[test]
+    fn test_analysis_results_has_issues_with_blocking() {
+        let mut results = AnalysisResults::default();
+        results.suppression_violations.push(Violation::new("f", 1, "blocking"));
+        assert!(results.has_issues());
+    }
+
+    #[test]
+    fn test_analysis_results_has_issues_with_warning() {
+        let mut results = AnalysisResults::default();
+        results.todo_warnings.push(Violation::new("f", 1, "warning"));
+        assert!(results.has_issues());
+    }
 }

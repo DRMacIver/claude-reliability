@@ -13,12 +13,27 @@ const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
     runner: &'a dyn CommandRunner,
+    /// Optional explicit path to claude command (for testing).
+    claude_cmd: Option<String>,
 }
 
 impl<'a> RealSubAgent<'a> {
     /// Create a new real sub-agent.
     pub fn new(runner: &'a dyn CommandRunner) -> Self {
-        Self { runner }
+        Self { runner, claude_cmd: None }
+    }
+
+    /// Set an explicit path to the claude command (for testing).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_claude_cmd(mut self, cmd: impl Into<String>) -> Self {
+        self.claude_cmd = Some(cmd.into());
+        self
+    }
+
+    /// Get the claude command to use.
+    fn claude_cmd(&self) -> &str {
+        self.claude_cmd.as_deref().unwrap_or("claude")
     }
 }
 
@@ -75,7 +90,7 @@ Choose CONTINUE if:
         );
 
         let output = self.runner.run(
-            "claude",
+            self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(QUESTION_DECISION_TIMEOUT),
         )?;
@@ -147,7 +162,7 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
         );
 
         let output = self.runner.run(
-            "claude",
+            self.claude_cmd(),
             &[
                 "-p",
                 &prompt,
@@ -292,5 +307,286 @@ mod tests {
         let json = extract_json_object(response).unwrap();
         let review: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(review["decision"], "reject");
+    }
+
+    #[test]
+    fn test_extract_json_unclosed_brace() {
+        // JSON with unclosed brace should return None
+        let text = r#"{"decision": "approve""#;
+        assert!(extract_json_object(text).is_none());
+    }
+
+    #[test]
+    fn test_real_sub_agent_new() {
+        // Just test that we can create a RealSubAgent
+        let runner = MockCommandRunner::new();
+        let _agent = RealSubAgent::new(&runner);
+    }
+
+    #[test]
+    fn test_question_decision_timeout_constant() {
+        // Verify the timeout constant
+        assert_eq!(QUESTION_DECISION_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_code_review_timeout_constant() {
+        // Verify the timeout constant
+        assert_eq!(CODE_REVIEW_TIMEOUT, Duration::from_secs(300));
+    }
+
+    // Integration tests using fake claude CLI
+    mod integration {
+        use super::*;
+        use crate::command::RealCommandRunner;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::TempDir;
+
+        /// Creates a script that outputs the expected result.
+        fn setup_fake_claude(dir: &TempDir, output: &str, exit_code: i32) -> String {
+            use std::io::Write;
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            // Use unique counter for filename uniqueness
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique_id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+            // Simple script using POSIX sh - escape single quotes for shell
+            let escaped_output = output.replace('\'', "'\\''");
+            let script =
+                format!("#!/bin/sh\nprintf '%s\\n' '{escaped_output}'\nexit {exit_code}\n");
+
+            // Use test's TempDir for isolation
+            let script_path = dir.path().join(format!("fake_claude_{unique_id}"));
+
+            // Write file, sync, set permissions
+            {
+                let mut file = std::fs::File::create(&script_path).unwrap();
+                file.write_all(script.as_bytes()).unwrap();
+                file.sync_all().unwrap();
+            }
+            fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+            script_path.to_string_lossy().to_string()
+        }
+
+        #[test]
+        fn test_real_subagent_decide_allow_stop() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "ALLOW_STOP: User preference needed", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let result = agent.decide_on_question("test output", 5).unwrap();
+
+            assert!(matches!(
+                result,
+                SubAgentDecision::AllowStop(Some(ref r)) if r.contains("User preference")
+            ));
+        }
+
+        #[test]
+        fn test_real_subagent_decide_answer() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "ANSWER: Yes, please continue.", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let result = agent.decide_on_question("Should I continue?", 5).unwrap();
+
+            assert!(matches!(
+                result,
+                SubAgentDecision::Answer(ref a) if a.contains("continue")
+            ));
+        }
+
+        #[test]
+        fn test_real_subagent_decide_continue() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "CONTINUE: Not a real question", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let result = agent.decide_on_question("test", 5).unwrap();
+
+            assert_eq!(result, SubAgentDecision::Continue);
+        }
+
+        #[test]
+        fn test_real_subagent_decide_unrecognized_format() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "Some unrecognized response format", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let result = agent.decide_on_question("test", 5).unwrap();
+
+            // Unrecognized format defaults to Continue
+            assert_eq!(result, SubAgentDecision::Continue);
+        }
+
+        #[test]
+        fn test_real_subagent_decide_command_fails() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let result = agent.decide_on_question("test", 5).unwrap();
+
+            // Command failure defaults to Continue
+            assert_eq!(result, SubAgentDecision::Continue);
+        }
+
+        #[test]
+        fn test_real_subagent_review_approve() {
+            let dir = TempDir::new().unwrap();
+            let json = r#"{"decision": "approve", "feedback": "Code looks good"}"#;
+            let claude_cmd = setup_fake_claude(&dir, json, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) =
+                agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None).unwrap();
+
+            assert!(approved);
+            assert!(feedback.contains("looks good"));
+        }
+
+        #[test]
+        fn test_real_subagent_review_reject() {
+            let dir = TempDir::new().unwrap();
+            let json = r#"{"decision": "reject", "feedback": "Security issue found"}"#;
+            let claude_cmd = setup_fake_claude(&dir, json, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) = agent
+                .review_code("+password = 'secret'", &["src/config.rs".to_string()], None)
+                .unwrap();
+
+            assert!(!approved);
+            assert!(feedback.contains("Security"));
+        }
+
+        #[test]
+        fn test_real_subagent_review_with_guide() {
+            let dir = TempDir::new().unwrap();
+            let json = r#"{"decision": "approve", "feedback": "Follows guidelines"}"#;
+            let claude_cmd = setup_fake_claude(&dir, json, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, _) = agent
+                .review_code(
+                    "+fn main() {}",
+                    &["src/main.rs".to_string()],
+                    Some("Review for security issues"),
+                )
+                .unwrap();
+
+            assert!(approved);
+        }
+
+        #[test]
+        fn test_real_subagent_review_command_fails() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error occurred", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) =
+                agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None).unwrap();
+
+            // Command failure defaults to approve with warning
+            assert!(approved);
+            assert!(feedback.contains("failed to run"));
+        }
+
+        #[test]
+        fn test_real_subagent_review_invalid_json() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "This is not JSON at all", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) =
+                agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None).unwrap();
+
+            // Invalid JSON defaults to approve
+            assert!(approved);
+            assert!(feedback.contains("could not parse"));
+        }
+
+        #[test]
+        fn test_real_subagent_review_json_in_markdown() {
+            let dir = TempDir::new().unwrap();
+            // JSON embedded in markdown code block
+            let response = "Here is my review:\n```json\n{\"decision\": \"approve\", \"feedback\": \"LGTM\"}\n```";
+            let claude_cmd = setup_fake_claude(&dir, response, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) =
+                agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None).unwrap();
+
+            assert!(approved);
+            assert!(feedback.contains("LGTM"));
+        }
+
+        #[test]
+        fn test_real_subagent_decide_spawn_fails() {
+            // Use a command that doesn't exist to trigger runner.run() Err
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            // The run() call returns Err, which propagates via ?
+            let result = agent.decide_on_question("test", 5);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_real_subagent_review_spawn_fails() {
+            // Use a command that doesn't exist to trigger runner.run() Err
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            // The run() call returns Err, which propagates via ?
+            let result = agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_real_subagent_review_json_looks_valid_but_invalid() {
+            let dir = TempDir::new().unwrap();
+            // JSON-like syntax that extract_json_object finds but can't be parsed
+            // The { starts an object but has invalid JSON content
+            let response = "Here is my review: {\"decision\": invalid}";
+            let claude_cmd = setup_fake_claude(&dir, response, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (approved, feedback) =
+                agent.review_code("+fn main() {}", &["src/main.rs".to_string()], None).unwrap();
+
+            // Falls through to default approval with raw output as feedback
+            assert!(approved);
+            assert!(feedback.contains("could not parse"));
+        }
     }
 }

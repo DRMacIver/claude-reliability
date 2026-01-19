@@ -58,6 +58,9 @@ This file provides guidance to the automated code reviewer. Customize it for you
 - New functionality has corresponding tests
 - Tests cover edge cases and error paths
 - No test code in production files
+- Tests should be runnable in parallel wherever possible, and explicitly marked as serial where not. It should always be possible to safely run the test suite with more than one thread.
+- The coverage is kept at 100% and no attempts to change this are permitted
+- Where coverage is hard to achieve, suggest refactoring to improve testability (e.g. extract functions, make globals into arguments, create traits encapsulating specific behaviours)
 
 ## When to Reject
 

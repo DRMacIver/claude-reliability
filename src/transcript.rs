@@ -254,4 +254,79 @@ also not json
         let info = parse_transcript(file.path()).unwrap();
         assert_eq!(info.last_assistant_output, Some("Third".to_string()));
     }
+
+    #[test]
+    fn test_parse_transcript_with_empty_lines() {
+        // Test that empty lines are skipped (line 89)
+        let content = r#"
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}}
+
+
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z"}
+
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert_eq!(info.last_assistant_output, Some("Hello".to_string()));
+        assert!(info.last_user_message_time.is_some());
+    }
+
+    #[test]
+    fn test_parse_transcript_unknown_entry_type() {
+        // Test that unknown entry types are ignored (line 117)
+        let content = r#"{"type": "system", "message": "ignored"}
+{"type": "tool_use", "tool": "test"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Valid"}]}}
+{"type": "result", "output": "ignored"}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert_eq!(info.last_assistant_output, Some("Valid".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_assistant_with_non_text_content() {
+        // Test that non-text content blocks are skipped
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "123", "name": "test", "input": {}}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "After tool"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert_eq!(info.last_assistant_output, Some("After tool".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_user_without_timestamp() {
+        // Test user message without timestamp field
+        let content = r#"{"type": "user"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Response"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.last_user_message_time.is_none());
+        assert_eq!(info.last_assistant_output, Some("Response".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_user_with_invalid_timestamp() {
+        // Test user message with unparseable timestamp
+        let content = r#"{"type": "user", "timestamp": "not-a-timestamp"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Response"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Invalid timestamp is ignored, so last_user_message_time remains None
+        assert!(info.last_user_message_time.is_none());
+    }
+
+    #[test]
+    fn test_parse_transcript_assistant_with_no_message() {
+        // Test assistant entry without message field
+        let content = r#"{"type": "assistant"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Valid"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert_eq!(info.last_assistant_output, Some("Valid".to_string()));
+    }
 }
