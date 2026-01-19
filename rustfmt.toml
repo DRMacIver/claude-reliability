@@ -2,8 +2,9 @@
 edition = "2021"
 max_width = 100
 use_small_heuristics = "Max"
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
+# Note: imports_granularity and group_imports require nightly
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
 reorder_imports = true
 reorder_modules = true
 newline_style = "Unix"

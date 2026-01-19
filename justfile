@@ -145,9 +145,9 @@ build:
 build-release:
 	cargo build --release
 
-# Run tests
+# Run tests (single-threaded due to env var tests in no_verify)
 test *ARGS:
-	cargo test {{ARGS}}
+	cargo test -- --test-threads=1 {{ARGS}}
 
 # Run tests with coverage (requires cargo-llvm-cov)
 test-cov:
@@ -178,6 +178,6 @@ install-tools:
 doc:
 	cargo doc --no-deps --open
 
-# Run the CLI (if cli feature is enabled)
+# Run the CLI
 run *ARGS:
-	cargo run --features cli -- {{ARGS}}
+	cargo run -- {{ARGS}}
