@@ -1,15 +1,15 @@
 # List available commands
+# Docker image name
+# Build the project
+# Check next release version
+
 default:
 	@just --list
 
-# Docker image name
+
 DOCKER_IMAGE := "claude-reliability-dev"
 
-# Validate devcontainer configuration files exist
-validate-devcontainer:
-	@test -f .devcontainer/devcontainer.json && test -f .devcontainer/Dockerfile && echo "Devcontainer configuration valid"
 
-# Build Docker image if Dockerfile changed
 _docker-build:
 	#!/usr/bin/env bash
 	set -e
@@ -25,7 +25,43 @@ _docker-build:
 		echo "$HASH" > "$SENTINEL"
 	fi
 
-# Start development container and run claude (or custom command if args provided)
+
+build:
+	cargo build
+
+
+build-release:
+	cargo build --release
+
+
+check: lint test
+
+
+check-bin-size:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	MAX_LINES=50
+	FAILED=0
+	for file in src/main.rs src/bin/*.rs; do
+		[ -f "$file" ] || continue
+		lines=$(wc -l < "$file")
+		if [ "$lines" -gt "$MAX_LINES" ]; then
+			echo "ERROR: $file has $lines lines (max $MAX_LINES)"
+			echo "Binary entry points must be thin wrappers around library code."
+			echo "Move logic to src/lib.rs and call it from main()."
+			FAILED=1
+		fi
+	done
+	if [ "$FAILED" -eq 1 ]; then
+		exit 1
+	fi
+	echo "All binary entry points are thin wrappers (≤$MAX_LINES lines)"
+
+
+clean:
+	cargo clean
+
+
 develop *ARGS:
 	#!/usr/bin/env bash
 	set -e
@@ -137,47 +173,61 @@ develop *ARGS:
 		{{DOCKER_IMAGE}} \
 		bash -c "$DOCKER_CMD"
 
-# Build the project
-build:
-	cargo build
+doc:
+	cargo doc --no-deps --open
 
-# Build release version
-build-release:
-	cargo build --release
 
-# Run tests (single-threaded due to env var tests in no_verify)
-test *ARGS:
-	cargo test -- --test-threads=1 {{ARGS}}
-
-# Run tests with coverage (requires cargo-llvm-cov)
-test-cov:
-	cargo llvm-cov --all-features --fail-under-lines 100
-
-# Run linter (clippy)
-lint:
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo fmt --check
-
-# Format code
 format:
 	cargo fmt
 
-# Run all checks
-check: lint test
 
-# Clean build artifacts
-clean:
-	cargo clean
-
-# Install development tools
 install-tools:
 	rustup component add clippy rustfmt llvm-tools-preview
 	cargo install cargo-llvm-cov
 
-# Generate documentation
-doc:
-	cargo doc --no-deps --open
 
-# Run the CLI
+lint: check-bin-size
+	cargo clippy --all-targets --all-features -- -D warnings
+	cargo fmt --check
+
+
+release:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	# Run checks first
+	cargo clippy --all-targets --all-features -- -D warnings
+	cargo test --all-features
+	# Update version
+	python3 scripts/release.py
+	# Get the version that was set
+	VERSION=$(python3 scripts/release.py --version-only)
+	# Commit version update
+	git add Cargo.toml
+	git commit -m "Release $VERSION"
+	# Create and push tag
+	git tag "v$VERSION"
+	git push origin main "v$VERSION"
+	echo "Released v$VERSION - future pushes to main will auto-release"
+
+release-preview:
+	python3 scripts/release.py --dry-run
+
+
+release-version:
+	python3 scripts/release.py --version-only
+
+
 run *ARGS:
-	cargo run -- {{ARGS}}
+	cargo run --features cli -- {{ARGS}}
+
+test *ARGS:
+	cargo test {{ARGS}}
+
+
+test-cov:
+	cargo llvm-cov --lib --all-features --fail-under-lines 100
+
+
+validate-devcontainer:
+	@test -f .devcontainer/devcontainer.json && test -f .devcontainer/Dockerfile && echo "Devcontainer configuration valid"
+
