@@ -1,0 +1,3 @@
+git_repo: true
+beads_installed: true
+check_command: just check
