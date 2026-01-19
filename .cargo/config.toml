@@ -1,8 +1,10 @@
-[build]
-# Enable colored output
+# Use lld for faster linking on Linux (if available)
+# Note: This config is Linux-specific; macOS uses the system linker
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
-[target.x86_64-unknown-linux-gnu]
+[target.aarch64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
