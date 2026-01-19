@@ -51,7 +51,7 @@ def parse_version_release_number(version: str, base_version: str) -> int | None:
 
 def run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a shell command and return the result."""
-    print(f"Running: {' '.join(cmd)}")
+    print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
 
     if result.returncode != 0:
