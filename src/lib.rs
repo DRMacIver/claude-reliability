@@ -1,7 +1,6 @@
-//! `claude_reliability` - Hooks and analysis tools for Claude Code.
+//! # claude_reliability
 //!
-//! This library provides pre-tool-use hooks and code analysis tools
-//! for improving Claude Code reliability and safety.
+//! Hooks and analysis tools for improving Claude Code reliability and safety.
 
 pub mod analysis;
 pub mod beads;
