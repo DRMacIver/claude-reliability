@@ -92,26 +92,22 @@ def run_coverage() -> Path:
     print("Running coverage analysis...")
     lcov_path = Path("lcov.info")
 
-    # Use --format=terse for compact output (dots instead of test names)
-    # Use -- to separate cargo-llvm-cov args from test runner args
     result = subprocess.run(
-        [
-            "cargo", "llvm-cov", "--lib", "--lcov", f"--output-path={lcov_path}",
-            "--", "--format=terse"
-        ],
+        ["cargo", "llvm-cov", "--lib", "--lcov", f"--output-path={lcov_path}"],
         capture_output=True,
         text=True,
     )
 
     if result.returncode != 0:
-        # Show stderr on failure
-        print(f"ERROR: Coverage generation failed:\n{result.stderr}", file=sys.stderr)
+        # Show full output on failure
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        print("\nERROR: Coverage generation failed", file=sys.stderr)
         sys.exit(1)
 
-    # Show a summary instead of all test output
-    # Count tests from the terse output (dots)
-    test_output = result.stderr  # cargo test outputs to stderr
-    print("Tests completed successfully")
+    print("Tests passed")
 
     if not lcov_path.exists():
         print("ERROR: lcov.info was not generated", file=sys.stderr)
