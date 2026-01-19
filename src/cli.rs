@@ -22,6 +22,8 @@ pub enum Command {
     Version,
     /// Ensure config file exists (create with defaults if not).
     EnsureConfig,
+    /// Ensure gitignore has required entries.
+    EnsureGitignore,
     /// Run the stop hook.
     Stop,
     /// Run the no-verify pre-tool-use hook.
@@ -55,6 +57,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
     match args[1].as_str() {
         "version" | "--version" | "-v" => ParseResult::Command(Command::Version),
         "ensure-config" => ParseResult::Command(Command::EnsureConfig),
+        "ensure-gitignore" => ParseResult::Command(Command::EnsureGitignore),
         "stop" => ParseResult::Command(Command::Stop),
         "pre-tool-use" => {
             if args.len() < 3 {
@@ -77,6 +80,7 @@ pub fn usage(program: &str) -> String {
         "Usage: {program} <command> [subcommand]\n\n\
          Commands:\n  \
          ensure-config           Ensure config file exists\n  \
+         ensure-gitignore        Ensure .gitignore has required entries\n  \
          stop                    Run the stop hook\n  \
          pre-tool-use no-verify  Check for --no-verify usage\n  \
          pre-tool-use code-review Run code review on commits\n  \
@@ -189,6 +193,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
             (ExitCode::SUCCESS, vec![format!("claude-reliability v{}", crate::VERSION)])
         }
         Command::EnsureConfig => run_ensure_config_cmd(),
+        Command::EnsureGitignore => run_ensure_gitignore_cmd(),
         Command::Stop => run_stop_cmd(stdin),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
@@ -213,6 +218,22 @@ fn run_ensure_config_cmd() -> (ExitCode, Vec<String>) {
             (ExitCode::SUCCESS, messages)
         }
         Err(e) => (ExitCode::from(1), vec![format!("Error ensuring config: {e}")]),
+    }
+}
+
+fn run_ensure_gitignore_cmd() -> (ExitCode, Vec<String>) {
+    use crate::config;
+    use std::path::Path;
+
+    match config::ensure_gitignore(Path::new(".")) {
+        Ok(modified) => {
+            if modified {
+                (ExitCode::SUCCESS, vec!["Updated .gitignore with claude-reliability entries".to_string()])
+            } else {
+                (ExitCode::SUCCESS, vec![".gitignore already has required entries".to_string()])
+            }
+        }
+        Err(e) => (ExitCode::from(1), vec![format!("Error updating .gitignore: {e}")]),
     }
 }
 
@@ -323,6 +344,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_ensure_gitignore() {
+        assert_eq!(
+            parse_args(&args(&["prog", "ensure-gitignore"])),
+            ParseResult::Command(Command::EnsureGitignore)
+        );
+    }
+
+    #[test]
     fn test_parse_args_pre_tool_use() {
         assert_eq!(
             parse_args(&args(&["prog", "pre-tool-use", "no-verify"])),
@@ -360,6 +389,7 @@ mod tests {
         let u = usage("test-prog");
         assert!(u.contains("test-prog"));
         assert!(u.contains("ensure-config"));
+        assert!(u.contains("ensure-gitignore"));
         assert!(u.contains("stop"));
         assert!(u.contains("pre-tool-use"));
         assert!(u.contains("version"));
