@@ -1,0 +1,10 @@
+.cache/
+.devcontainer/.credentials/
+.devcontainer/.ssh/
+.devcontainer/.docker-build-hash
+.claude/autonomous-session.local.md
+.claude/settings.local.json
+.claude/setup.local.md
+.claude/beads-warning-given.local
+target/
+Cargo.lock

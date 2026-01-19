@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Pre-commit hook that runs all checks
+#
+# This hook is used when core.hooksPath is set to .githooks/
+# It runs both bd hooks (for JSONL sync) and our custom validation scripts.
+
+set -e
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Run bd hooks first (for JSONL sync)
+if command -v bd >/dev/null 2>&1; then
+    bd hooks run pre-commit "$@" || true
+fi
+
+# Run our custom checks (only in Claude Code sessions)
+# Note: beads interaction is checked in the stop hook, not here
+if [ -n "$CLAUDECODE" ]; then
+    # Check capability version bumps
+    if [ -x "$SCRIPT_DIR/check-capability-version.sh" ]; then
+        "$SCRIPT_DIR/check-capability-version.sh" || exit 1
+    fi
+
+    # Check hook edits
+    if [ -x "$SCRIPT_DIR/check-hook-edits.sh" ]; then
+        "$SCRIPT_DIR/check-hook-edits.sh" || exit 1
+    fi
+fi
+
+exit 0

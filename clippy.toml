@@ -1,0 +1,3 @@
+# Clippy configuration
+# Complexity threshold for cognitive complexity lint
+cognitive-complexity-threshold = 20

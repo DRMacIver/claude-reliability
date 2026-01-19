@@ -1,0 +1,28 @@
+{
+  "name": "claude-reliability",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {},
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {}
+    }
+  },
+  "containerEnv": {
+    "UV_PROJECT_ENVIRONMENT": "/home/dev/venvs/claude-reliability"
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/mnt/host-claude,type=bind,readonly",
+    "source=${localEnv:HOME}/.ssh,target=/mnt/host-ssh,type=bind,readonly",
+    "source=${localWorkspaceFolder}/.devcontainer/.credentials,target=/mnt/credentials,type=bind,readonly",
+    "source=${localWorkspaceFolder}/.devcontainer/.ssh,target=/mnt/ssh-keys,type=bind,readonly",
+    "source=${localWorkspaceFolderBasename}-.cache,target=${containerWorkspaceFolder}/.cache,type=volume",
+    "source=${localWorkspaceFolderBasename}-target,target=${containerWorkspaceFolder}/target,type=volume"
+  ],
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "dev"
+}
