@@ -37,6 +37,8 @@ pub enum Command {
     PreToolUseJkwSetup,
     /// Run the validation tracking pre-tool-use hook.
     PreToolUseValidation,
+    /// Run the protect-config pre-tool-use hook.
+    PreToolUseProtectConfig,
 }
 
 impl Command {
@@ -52,7 +54,8 @@ impl Command {
             | Self::PreToolUseCodeReview
             | Self::PreToolUseProblemMode
             | Self::PreToolUseJkwSetup
-            | Self::PreToolUseValidation => true,
+            | Self::PreToolUseValidation
+            | Self::PreToolUseProtectConfig => true,
         }
     }
 }
@@ -95,6 +98,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
                 "problem-mode" => ParseResult::Command(Command::PreToolUseProblemMode),
                 "jkw-setup" => ParseResult::Command(Command::PreToolUseJkwSetup),
                 "validation" => ParseResult::Command(Command::PreToolUseValidation),
+                "protect-config" => ParseResult::Command(Command::PreToolUseProtectConfig),
                 other => ParseResult::UnknownSubcommand(other.to_string()),
             }
         }
@@ -116,6 +120,7 @@ pub fn usage(program: &str) -> String {
          pre-tool-use code-review   Run code review on commits\n  \
          pre-tool-use problem-mode  Block tools when in problem mode\n  \
          pre-tool-use jkw-setup     Enforce JKW session file creation\n  \
+         pre-tool-use protect-config Block writes to reliability config\n  \
          version                    Show version information"
     )
 }
@@ -233,6 +238,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::PreToolUseProblemMode => run_problem_mode_cmd(stdin),
         Command::PreToolUseJkwSetup => run_jkw_setup_cmd(stdin),
         Command::PreToolUseValidation => run_validation_cmd(stdin),
+        Command::PreToolUseProtectConfig => run_protect_config_cmd(stdin),
     }
 }
 
@@ -397,6 +403,20 @@ fn run_validation_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     (ExitCode::SUCCESS, vec![json])
 }
 
+fn run_protect_config_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::hooks::{parse_hook_input, run_protect_config_hook};
+
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    let output = run_protect_config_hook(&input);
+    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
+
+    (ExitCode::SUCCESS, vec![json])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +474,10 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["prog", "pre-tool-use", "problem-mode"])),
             ParseResult::Command(Command::PreToolUseProblemMode)
+        );
+        assert_eq!(
+            parse_args(&args(&["prog", "pre-tool-use", "protect-config"])),
+            ParseResult::Command(Command::PreToolUseProtectConfig)
         );
     }
 
@@ -1115,6 +1139,82 @@ mod tests {
         assert!(messages[0].contains("allow"));
         // Should NOT set the needs_validation marker
         assert!(!crate::session::needs_validation(dir_path));
+    }
+
+    #[test]
+    fn test_run_protect_config_via_cli() {
+        // Write to normal file should be allowed
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "protect-config"]),
+            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("allow"));
+    }
+
+    #[test]
+    fn test_run_protect_config_blocks_config_write() {
+        // Write to config file should be blocked
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "protect-config"]),
+            r#"{"tool_name": "Write", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("block"));
+        assert!(messages[0].contains("Protected File"));
+    }
+
+    #[test]
+    fn test_run_protect_config_blocks_config_edit() {
+        // Edit to config file should be blocked
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "protect-config"]),
+            r#"{"tool_name": "Edit", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("block"));
+    }
+
+    #[test]
+    fn test_run_protect_config_blocks_config_delete() {
+        // rm command targeting config should be blocked
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "protect-config"]),
+            r#"{"tool_name": "Bash", "tool_input": {"command": "rm .claude/reliability-config.yaml"}}"#,
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("block"));
+        assert!(messages[0].contains("Deletion Blocked"));
+    }
+
+    #[test]
+    fn test_run_protect_config_allows_read() {
+        // Read should be allowed
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "protect-config"]),
+            r#"{"tool_name": "Read", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("allow"));
+    }
+
+    #[test]
+    fn test_run_protect_config_invalid_json() {
+        let (code, messages) = run(&args(&["prog", "pre-tool-use", "protect-config"]), "not json");
+
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Failed to parse"));
     }
 
     #[test]
