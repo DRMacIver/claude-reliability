@@ -24,10 +24,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -130,20 +132,13 @@ def setup_test_environment(temp_dir: Path, test: TestConfig, project_dir: Path) 
     """
     os.chdir(temp_dir)
 
-    # Initialize git repo
-    subprocess.run(["git", "init", "--quiet"], check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], check=True
-    )
-    subprocess.run(["git", "config", "user.name", "Test User"], check=True)
-
     # Copy project binary if it exists
     binary_path = project_dir / "target" / "release" / "claude-reliability"
     if binary_path.exists():
         (temp_dir / ".claude" / "bin").mkdir(parents=True, exist_ok=True)
         shutil.copy(binary_path, temp_dir / ".claude" / "bin" / "claude-reliability")
 
-    # Run setup script
+    # Run setup script - this handles git init if needed
     if test.setup_script.suffix == ".py":
         subprocess.run(
             ["python3", str(test.setup_script)],
@@ -155,19 +150,6 @@ def setup_test_environment(temp_dir: Path, test: TestConfig, project_dir: Path) 
             ["bash", str(test.setup_script)],
             check=True,
             cwd=temp_dir,
-        )
-
-    # Create initial commit if needed
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    if result.stdout.strip():
-        subprocess.run(["git", "add", "-A"], check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Initial setup", "--quiet", "--allow-empty"],
-            check=True,
         )
 
 
@@ -279,6 +261,144 @@ def _summarize_input(tool_use) -> str:
         return json.dumps(tool_use.input)[:50]
 
 
+def extract_prompt_from_story(story_path: Path) -> str | None:
+    """Extract the prompt from story.md.
+
+    Looks for a ```-fenced code block after a "## Prompt" heading.
+    """
+    if not story_path.exists():
+        return None
+
+    content = story_path.read_text()
+
+    # Find the Prompt section
+    prompt_match = re.search(r"##\s*Prompt\s*\n+```[^\n]*\n(.*?)```", content, re.DOTALL)
+    if prompt_match:
+        return prompt_match.group(1).strip()
+
+    return None
+
+
+def run_record(
+    temp_dir: Path,
+    test: TestConfig,
+    project_dir: Path,
+    verbose: bool = False,
+) -> TestResult:
+    """Run a test in record mode.
+
+    Runs Claude Code with the prompt from story.md and captures the transcript.
+
+    Args:
+        temp_dir: Temporary directory for test
+        test: Test configuration
+        project_dir: Project root directory
+        verbose: Show detailed output
+
+    Returns:
+        TestResult with pass/fail status
+    """
+    # Extract prompt from story.md
+    story_path = test.test_dir / "story.md"
+    prompt = extract_prompt_from_story(story_path)
+
+    if not prompt:
+        return TestResult(
+            name=test.name,
+            passed=False,
+            error="No prompt found in story.md (need ## Prompt section with ```code block```)",
+        )
+
+    if verbose:
+        print(f"  Prompt: {prompt[:100]}...")
+
+    # Generate session ID
+    session_id = str(uuid.uuid4())
+
+    if verbose:
+        print(f"  Session ID: {session_id}")
+
+    # Run Claude Code
+    cmd = [
+        "claude",
+        "--print",
+        "--session-id", session_id,
+        "--dangerously-skip-permissions",
+        "--model", "opus",  # Use opus for first message
+        "-p", prompt,
+    ]
+
+    if verbose:
+        print(f"  Running Claude Code...")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+        )
+    except subprocess.TimeoutExpired:
+        return TestResult(
+            name=test.name,
+            passed=False,
+            error="Claude Code timed out after 5 minutes",
+        )
+
+    if verbose:
+        print(f"  Claude Code exit code: {result.returncode}")
+        if result.stdout:
+            print(f"  Output: {result.stdout[:500]}...")
+
+    # Find and copy the transcript
+    # Claude stores transcripts in ~/.claude/projects/<project-path-hash>/<session-id>.jsonl
+    home = Path.home()
+    claude_projects = home / ".claude" / "projects"
+
+    transcript_found = False
+    for project_dir_hash in claude_projects.iterdir():
+        if not project_dir_hash.is_dir():
+            continue
+        transcript_file = project_dir_hash / f"{session_id}.jsonl"
+        if transcript_file.exists():
+            # Copy transcript to test directory
+            dest_path = test.test_dir / "transcript.jsonl"
+            shutil.copy(transcript_file, dest_path)
+            transcript_found = True
+            if verbose:
+                print(f"  Copied transcript to {dest_path}")
+            break
+
+    if not transcript_found:
+        return TestResult(
+            name=test.name,
+            passed=False,
+            error=f"Transcript not found for session {session_id}",
+        )
+
+    # Run post-condition if present
+    if test.post_condition:
+        if verbose:
+            print("  Running post-condition...")
+        try:
+            subprocess.run(
+                ["python3", str(test.post_condition)],
+                check=True,
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            return TestResult(
+                name=test.name,
+                passed=False,
+                error=f"Post-condition failed: {e.stderr}",
+            )
+
+    return TestResult(name=test.name, passed=True)
+
+
 def run_test(
     test: TestConfig,
     mode: str,
@@ -305,11 +425,7 @@ def run_test(
             if mode == "replay":
                 return run_replay(temp_dir, test, project_dir, verbose)
             elif mode == "record":
-                return TestResult(
-                    name=test.name,
-                    passed=False,
-                    error="Record mode not yet implemented",
-                )
+                return run_record(temp_dir, test, project_dir, verbose)
             else:
                 return TestResult(
                     name=test.name,

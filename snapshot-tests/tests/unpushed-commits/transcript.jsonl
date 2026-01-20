@@ -1,4 +1,0 @@
-{"type":"user","uuid":"user-1","timestamp":"2026-01-20T00:00:00.000Z","parentUuid":null,"message":{"role":"user","content":"Check if there are any uncommitted changes"}}
-{"type":"assistant","uuid":"assistant-1","timestamp":"2026-01-20T00:00:01.000Z","parentUuid":"user-1","message":{"role":"assistant","content":[{"type":"text","text":"I'll check the git status for uncommitted changes."},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"git status --porcelain"}}]}}
-{"type":"user","uuid":"result-1","timestamp":"2026-01-20T00:00:02.000Z","parentUuid":"assistant-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":""}]}}
-{"type":"assistant","uuid":"assistant-2","timestamp":"2026-01-20T00:00:03.000Z","parentUuid":"result-1","message":{"role":"assistant","content":[{"type":"text","text":"There are no uncommitted changes in the repository."}]}}
