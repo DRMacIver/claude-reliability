@@ -10,6 +10,9 @@ const QUESTION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Timeout for code reviews (5 minutes).
 const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Timeout for reflection checks (90 seconds).
+const REFLECTION_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
     runner: &'a dyn CommandRunner,
@@ -214,6 +217,85 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
             format!(
                 "Review completed (could not parse structured response): {}",
                 response.chars().take(1000).collect::<String>()
+            ),
+        ))
+    }
+
+    fn reflect_on_work(&self, assistant_output: &str, git_diff: &str) -> Result<(bool, String)> {
+        let prompt = format!(
+            r#"You are a self-reflection agent. Your task is to reflect on whether the assistant has completed the user's request properly, or whether there might be something incomplete, misunderstood, or shortcuts taken.
+
+## Assistant's Last Output
+<assistant_output>
+{assistant_output}
+</assistant_output>
+
+## Changes Made (Git Diff)
+<git_diff>
+{git_diff}
+</git_diff>
+
+## Your Task
+Carefully reflect on whether the work appears complete and correct. Consider:
+
+1. **Completeness**: Has everything the user asked for been done? Are there any TODO items or "left for later" comments?
+
+2. **Correctness**: Do the changes look correct and match what was requested? Are there any obvious bugs or issues?
+
+3. **Shortcuts**: Were any corners cut? Any "I'll skip X" or "this should be good enough"?
+
+4. **Misunderstandings**: Could the user's request have been misunderstood in any way?
+
+5. **Edge cases**: Are there obvious edge cases that were missed?
+
+Respond with a JSON object:
+```json
+{{
+    "complete": true or false,
+    "feedback": "Your analysis here. If complete is false, explain what seems incomplete or problematic. If complete is true, briefly confirm why the work looks good."
+}}
+```
+
+Be constructively critical - it's better to flag potential issues than to miss them. However, don't be overly pedantic about trivial matters."#
+        );
+
+        let output = self.runner.run(
+            self.claude_cmd(),
+            &["-p", &prompt, "--model", "haiku", "--output-format", "json"],
+            Some(REFLECTION_TIMEOUT),
+        )?;
+
+        if !output.success() {
+            // If Claude fails, assume work is complete with warning
+            return Ok((
+                true,
+                "Reflection check failed to run. Proceeding assuming work is complete.".to_string(),
+            ));
+        }
+
+        let response = output.stdout.trim();
+
+        // Try to find and parse JSON in the output
+        if let Some(json_match) = extract_json_object(response) {
+            if let Ok(reflection) = serde_json::from_str::<serde_json::Value>(json_match) {
+                let complete =
+                    reflection.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(true);
+                let feedback = reflection
+                    .get("feedback")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("No feedback provided.")
+                    .to_string();
+
+                return Ok((complete, feedback));
+            }
+        }
+
+        // If parsing fails, assume complete with the raw output as feedback
+        Ok((
+            true,
+            format!(
+                "Reflection check completed (could not parse response): {}",
+                response.chars().take(500).collect::<String>()
             ),
         ))
     }
@@ -587,6 +669,76 @@ mod tests {
             // Falls through to default approval with raw output as feedback
             assert!(approved);
             assert!(feedback.contains("could not parse"));
+        }
+
+        #[test]
+        fn test_real_subagent_reflect_complete() {
+            let dir = TempDir::new().unwrap();
+            let json = r#"{"complete": true, "feedback": "Work looks good"}"#;
+            let claude_cmd = setup_fake_claude(&dir, json, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+
+            assert!(complete);
+            assert!(feedback.contains("looks good"));
+        }
+
+        #[test]
+        fn test_real_subagent_reflect_incomplete() {
+            let dir = TempDir::new().unwrap();
+            let json = r#"{"complete": false, "feedback": "Missing test coverage"}"#;
+            let claude_cmd = setup_fake_claude(&dir, json, 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+
+            assert!(!complete);
+            assert!(feedback.contains("Missing test"));
+        }
+
+        #[test]
+        fn test_real_subagent_reflect_command_fails() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error occurred", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+
+            // Command failure defaults to complete
+            assert!(complete);
+            assert!(feedback.contains("failed to run"));
+        }
+
+        #[test]
+        fn test_real_subagent_reflect_invalid_json() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "Not valid JSON at all", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+
+            // Invalid JSON defaults to complete
+            assert!(complete);
+            assert!(feedback.contains("could not parse"));
+        }
+
+        #[test]
+        fn test_real_subagent_reflect_spawn_fails() {
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            let result = agent.reflect_on_work("test output", "+diff");
+            assert!(result.is_err());
         }
     }
 }

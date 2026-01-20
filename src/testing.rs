@@ -99,8 +99,10 @@ impl CommandRunner for MockCommandRunner {
 pub struct MockSubAgent {
     question_decisions: RefCell<Vec<SubAgentDecision>>,
     code_reviews: RefCell<Vec<(bool, String)>>,
+    reflections: RefCell<Vec<(bool, String)>>,
     question_index: RefCell<usize>,
     review_index: RefCell<usize>,
+    reflection_index: RefCell<usize>,
 }
 
 impl MockSubAgent {
@@ -118,6 +120,11 @@ impl MockSubAgent {
     /// Add an expected code review result.
     pub fn expect_review(&mut self, approved: bool, feedback: &str) {
         self.code_reviews.borrow_mut().push((approved, feedback.to_string()));
+    }
+
+    /// Add an expected reflection result.
+    pub fn expect_reflection(&mut self, complete: bool, feedback: &str) {
+        self.reflections.borrow_mut().push((complete, feedback.to_string()));
     }
 }
 
@@ -151,6 +158,17 @@ impl SubAgent for MockSubAgent {
         let review = reviews[*index].clone();
         *index += 1;
         Ok(review)
+    }
+
+    fn reflect_on_work(&self, _assistant_output: &str, _git_diff: &str) -> Result<(bool, String)> {
+        let mut index = self.reflection_index.borrow_mut();
+        let reflections = self.reflections.borrow();
+
+        assert!(*index < reflections.len(), "No more reflections expected");
+
+        let reflection = reflections[*index].clone();
+        *index += 1;
+        Ok(reflection)
     }
 }
 
@@ -251,5 +269,32 @@ mod tests {
         let result = runner.run("any", &["args"], None);
         assert!(result.is_err());
         assert!(!runner.is_available("any"));
+    }
+
+    #[test]
+    fn test_mock_sub_agent_reflect_on_work() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_reflection(true, "Work looks complete");
+
+        let (complete, feedback) = agent.reflect_on_work("output", "diff").unwrap();
+        assert!(complete);
+        assert_eq!(feedback, "Work looks complete");
+    }
+
+    #[test]
+    fn test_mock_sub_agent_reflect_on_work_incomplete() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_reflection(false, "Missing test coverage");
+
+        let (complete, feedback) = agent.reflect_on_work("output", "diff").unwrap();
+        assert!(!complete);
+        assert_eq!(feedback, "Missing test coverage");
+    }
+
+    #[test]
+    #[should_panic(expected = "No more reflections expected")]
+    fn test_mock_sub_agent_reflect_on_work_no_expectation() {
+        let agent = MockSubAgent::new();
+        let _ = agent.reflect_on_work("output", "diff");
     }
 }

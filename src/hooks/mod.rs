@@ -3,10 +3,12 @@
 mod code_review;
 mod no_verify;
 mod stop;
+mod user_prompt_submit;
 
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
 pub use no_verify::run_no_verify_hook;
 pub use stop::{run_stop_hook, StopHookConfig, StopHookResult};
+pub use user_prompt_submit::run_user_prompt_submit_hook;
 
 use crate::error::Result;
 use serde::{Deserialize, Serialize};

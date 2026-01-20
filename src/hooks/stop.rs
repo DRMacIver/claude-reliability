@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
+use crate::reflection;
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
 use crate::transcript::{self, TranscriptInfo};
@@ -244,6 +245,12 @@ pub fn run_stop_hook(
         }
     }
 
+    // Self-reflection check: on first attempt to stop after making changes,
+    // ask the LLM to reflect on whether work was completed properly
+    if let Some(result) = check_self_reflection(config, runner, &transcript_info, sub_agent)? {
+        return Ok(result);
+    }
+
     Ok(StopHookResult::allow())
 }
 
@@ -429,6 +436,87 @@ fn add_analysis_messages(result: &mut StopHookResult, analysis: &AnalysisResults
         }
         result.messages.push(String::new());
     }
+}
+
+/// Check for self-reflection on completed work.
+///
+/// On the first attempt to stop after making changes, this asks the LLM to
+/// reflect on whether the work was completed properly. The reflection marker
+/// is set after the first reflection so this only runs once per user prompt.
+fn check_self_reflection(
+    config: &StopHookConfig,
+    runner: &dyn CommandRunner,
+    transcript_info: &TranscriptInfo,
+    sub_agent: &dyn SubAgent,
+) -> Result<Option<StopHookResult>> {
+    let base_dir = config.base_dir();
+
+    // Skip if reflection was already done this session
+    if reflection::has_reflection_marker_in(base_dir) {
+        return Ok(None);
+    }
+
+    // Check if there were any changes made this session
+    // Use git if available, otherwise use tool use tracking
+    let has_changes = if let Ok(git_status) = git::check_uncommitted_changes(runner) {
+        git_status.uncommitted.has_changes() || git_status.ahead_of_remote
+    } else {
+        transcript_info.has_modifying_tool_use
+    };
+
+    if !has_changes {
+        return Ok(None);
+    }
+
+    // Get the assistant's last output for context
+    let assistant_output =
+        transcript_info.last_assistant_output.as_deref().unwrap_or("(No output available)");
+    let assistant_output = truncate_for_context(assistant_output, 3000);
+
+    // Get the git diff for context
+    let git_diff = git::combined_diff(runner).unwrap_or_default();
+    let git_diff = if git_diff.len() > 5000 {
+        format!("{}...(truncated)", &git_diff[..5000])
+    } else {
+        git_diff
+    };
+
+    // Ask the LLM to reflect
+    let (complete, feedback) = sub_agent.reflect_on_work(assistant_output, &git_diff)?;
+
+    // Mark reflection as done so we don't run again
+    reflection::mark_reflection_done_in(base_dir)?;
+
+    // Build the result
+    let mut result = StopHookResult::block()
+        .with_message("# Self-Reflection Check")
+        .with_message("")
+        .with_message("Before finishing, please reflect on your work:");
+    result.messages.push(String::new());
+
+    if complete {
+        result.messages.push("## Work Assessment: Complete".to_string());
+    } else {
+        result.messages.push("## Work Assessment: May Be Incomplete".to_string());
+    }
+    result.messages.push(String::new());
+    result.messages.push(feedback);
+    result.messages.push(String::new());
+    result.messages.push("---".to_string());
+    result.messages.push(String::new());
+
+    if complete {
+        result
+            .messages
+            .push("The self-reflection check has passed. Try stopping again to exit.".to_string());
+    } else {
+        result
+            .messages
+            .push("Please review the feedback above and address any concerns.".to_string());
+        result.messages.push("Then try stopping again when ready.".to_string());
+    }
+
+    Ok(Some(result))
 }
 
 /// Check for interactive question handling.
@@ -646,6 +734,7 @@ mod tests {
     use super::*;
     use crate::testing::{MockCommandRunner, MockSubAgent};
     use crate::traits::CommandOutput;
+    use tempfile::TempDir;
 
     fn mock_clean_git() -> MockCommandRunner {
         let mut runner = MockCommandRunner::new();
@@ -903,10 +992,21 @@ mod tests {
 
     #[test]
     fn test_run_stop_hook_unpushed_allowed_without_require_push() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up reflection marker so the reflection check is skipped
+        // (this test is about require_push behavior, not reflection)
+        reflection::mark_reflection_done_in(base).unwrap();
+
         let runner = mock_clean_with_ahead();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { require_push: false, ..Default::default() };
+        let config = StopHookConfig {
+            require_push: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Without require_push, being ahead is allowed
@@ -1048,6 +1148,7 @@ mod tests {
             last_user_message_time: None,
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1064,6 +1165,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(10)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1079,6 +1181,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1100,6 +1203,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
@@ -1123,6 +1227,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
@@ -1144,6 +1249,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Continue);

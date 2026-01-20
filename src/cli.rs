@@ -7,7 +7,7 @@ use crate::{
     command::RealCommandRunner,
     hooks::{
         parse_hook_input, run_code_review_hook, run_no_verify_hook, run_stop_hook,
-        CodeReviewConfig, StopHookConfig,
+        run_user_prompt_submit_hook, CodeReviewConfig, StopHookConfig,
     },
     subagent::RealSubAgent,
     traits::{CommandRunner, SubAgent},
@@ -25,6 +25,8 @@ pub enum Command {
     EnsureGitignore,
     /// Run the stop hook.
     Stop,
+    /// Run the user-prompt-submit hook.
+    UserPromptSubmit,
     /// Run the no-verify pre-tool-use hook.
     PreToolUseNoVerify,
     /// Run the code-review pre-tool-use hook.
@@ -58,6 +60,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "ensure-config" => ParseResult::Command(Command::EnsureConfig),
         "ensure-gitignore" => ParseResult::Command(Command::EnsureGitignore),
         "stop" => ParseResult::Command(Command::Stop),
+        "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
         "pre-tool-use" => {
             if args.len() < 3 {
                 return ParseResult::MissingSubcommand;
@@ -81,6 +84,7 @@ pub fn usage(program: &str) -> String {
          ensure-config           Ensure config file exists\n  \
          ensure-gitignore        Ensure .gitignore has required entries\n  \
          stop                    Run the stop hook\n  \
+         user-prompt-submit      Run the user prompt submit hook\n  \
          pre-tool-use no-verify  Check for --no-verify usage\n  \
          pre-tool-use code-review Run code review on commits\n  \
          version                 Show version information"
@@ -194,6 +198,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::EnsureConfig => run_ensure_config_cmd(),
         Command::EnsureGitignore => run_ensure_gitignore_cmd(),
         Command::Stop => run_stop_cmd(stdin),
+        Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
     }
@@ -237,6 +242,13 @@ fn run_ensure_gitignore_cmd() -> (ExitCode, Vec<String>) {
             }
         }
         Err(e) => (ExitCode::from(1), vec![format!("Error updating .gitignore: {e}")]),
+    }
+}
+
+fn run_user_prompt_submit_cmd() -> (ExitCode, Vec<String>) {
+    match run_user_prompt_submit_hook(None) {
+        Ok(()) => (ExitCode::SUCCESS, Vec::new()),
+        Err(e) => (ExitCode::from(1), vec![format!("Error running user-prompt-submit hook: {e}")]),
     }
 }
 
@@ -389,8 +401,17 @@ mod tests {
         assert!(u.contains("ensure-config"));
         assert!(u.contains("ensure-gitignore"));
         assert!(u.contains("stop"));
+        assert!(u.contains("user-prompt-submit"));
         assert!(u.contains("pre-tool-use"));
         assert!(u.contains("version"));
+    }
+
+    #[test]
+    fn test_parse_args_user_prompt_submit() {
+        assert_eq!(
+            parse_args(&args(&["prog", "user-prompt-submit"])),
+            ParseResult::Command(Command::UserPromptSubmit)
+        );
     }
 
     #[test]

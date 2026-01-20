@@ -53,6 +53,9 @@ pub struct TranscriptEntry {
     pub is_api_error_message: bool,
 }
 
+/// Tools that are considered "read-only" and don't count as modifications.
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch", "LS"];
+
 /// Parsed transcript information.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptInfo {
@@ -64,6 +67,8 @@ pub struct TranscriptInfo {
     pub has_api_error: bool,
     /// Count of consecutive API errors at the end of the transcript.
     pub consecutive_api_errors: u32,
+    /// Whether the transcript contains any modifying (non-Read) tool uses.
+    pub has_modifying_tool_use: bool,
 }
 
 /// Parse a transcript file and extract relevant information.
@@ -115,11 +120,20 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
 
         match entry.entry_type.as_str() {
             "assistant" => {
-                // Extract text from assistant message
+                // Extract text from assistant message and check for tool uses
                 if let Some(message) = &entry.message {
                     for block in &message.content {
-                        if let ContentBlock::Text { text } = block {
-                            info.last_assistant_output = Some(text.clone());
+                        match block {
+                            ContentBlock::Text { text } => {
+                                info.last_assistant_output = Some(text.clone());
+                            }
+                            ContentBlock::ToolUse { name } => {
+                                // Check if this is a modifying tool
+                                if !READ_ONLY_TOOLS.contains(&name.as_str()) {
+                                    info.has_modifying_tool_use = true;
+                                }
+                            }
+                            ContentBlock::Other => {}
                         }
                     }
                 }
@@ -257,6 +271,7 @@ also not json
             last_user_message_time: Some(Utc::now()),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         assert!(is_user_recently_active(&info, 5));
     }
@@ -268,6 +283,7 @@ also not json
             last_user_message_time: Some(Utc::now() - chrono::Duration::minutes(10)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            has_modifying_tool_use: false,
         };
         assert!(!is_user_recently_active(&info, 5));
     }
@@ -531,5 +547,77 @@ also not json
             is_api_error_message: false,
         };
         assert!(!is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_parse_transcript_detects_modifying_tool_use() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "123"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_read_only_tool_not_modifying() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "123"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(!info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_glob_not_modifying() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Glob", "id": "123"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(!info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_write_is_modifying() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "id": "123"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_bash_is_modifying() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "id": "123"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_mixed_tools_detects_modifying() {
+        // Even with read-only tools, if there's a modifying tool, it should be detected
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Glob", "id": "2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "3"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Grep", "id": "4"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_parse_transcript_only_read_tools_not_modifying() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Glob", "id": "2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Grep", "id": "3"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebFetch", "id": "4"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebSearch", "id": "5"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "LS", "id": "6"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(!info.has_modifying_tool_use);
     }
 }
