@@ -6,6 +6,7 @@ mod no_verify;
 mod problem_mode;
 mod stop;
 mod user_prompt_submit;
+mod validation;
 
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
 pub use jkw_setup::run_jkw_setup_hook;
@@ -13,6 +14,7 @@ pub use no_verify::run_no_verify_hook;
 pub use problem_mode::run_problem_mode_hook;
 pub use stop::{run_stop_hook, StopHookConfig, StopHookResult};
 pub use user_prompt_submit::run_user_prompt_submit_hook;
+pub use validation::run_validation_hook;
 
 use crate::error::Result;
 use serde::{Deserialize, Serialize};

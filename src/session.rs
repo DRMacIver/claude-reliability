@@ -223,6 +223,47 @@ pub fn exit_problem_mode(base_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Path for "needs validation" marker file.
+/// This marker indicates that modifying tools have been used and validation
+/// must run before stopping.
+pub const NEEDS_VALIDATION_MARKER_PATH: &str = ".claude/needs-validation.local";
+
+/// Check if validation is needed (marker file exists).
+#[must_use]
+pub fn needs_validation(base_dir: &Path) -> bool {
+    base_dir.join(NEEDS_VALIDATION_MARKER_PATH).exists()
+}
+
+/// Mark that validation is needed (modifying tool was used).
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be created.
+pub fn set_needs_validation(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(NEEDS_VALIDATION_MARKER_PATH);
+
+    // Ensure parent directory exists
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&marker_path, "Validation needed - modifying tool was used")?;
+    Ok(())
+}
+
+/// Clear the needs validation marker (validation passed or user sent message).
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be removed.
+pub fn clear_needs_validation(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(NEEDS_VALIDATION_MARKER_PATH);
+    if marker_path.exists() {
+        fs::remove_file(marker_path)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +557,42 @@ issue_snapshot:
         // Now set_jkw_setup_required should fail because it can't write over a directory
         let result = set_jkw_setup_required(base);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_needs_validation_not_set_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!needs_validation(dir.path()));
+    }
+
+    #[test]
+    fn test_set_needs_validation() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        set_needs_validation(base).unwrap();
+        assert!(needs_validation(base));
+    }
+
+    #[test]
+    fn test_clear_needs_validation() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        set_needs_validation(base).unwrap();
+        assert!(needs_validation(base));
+
+        clear_needs_validation(base).unwrap();
+        assert!(!needs_validation(base));
+    }
+
+    #[test]
+    fn test_clear_needs_validation_when_not_set() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Should not error when clearing without setting
+        clear_needs_validation(base).unwrap();
+        assert!(!needs_validation(base));
     }
 }

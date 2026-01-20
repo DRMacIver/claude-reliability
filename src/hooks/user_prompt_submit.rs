@@ -6,12 +6,13 @@
 
 use crate::error::Result;
 use crate::reflection;
+use crate::session;
 use std::path::Path;
 
 /// Run the user prompt submit hook.
 ///
 /// This hook resets session state when the user sends a new message,
-/// including clearing the self-reflection marker.
+/// including clearing the self-reflection marker and validation marker.
 ///
 /// # Arguments
 ///
@@ -28,6 +29,9 @@ pub fn run_user_prompt_submit_hook(base_dir: Option<&Path>) -> Result<()> {
 
     // Clear the "had uncommitted changes" marker as this is a new prompt
     reflection::clear_had_uncommitted_changes_in(base)?;
+
+    // Clear the needs validation marker - user has seen changes
+    session::clear_needs_validation(base)?;
 
     Ok(())
 }
@@ -86,5 +90,21 @@ mod tests {
         // Test with default directory (current directory)
         // Just ensure it doesn't error
         let _ = run_user_prompt_submit_hook(None);
+    }
+
+    #[test]
+    fn test_user_prompt_submit_clears_needs_validation_marker() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create the needs validation marker
+        session::set_needs_validation(base).unwrap();
+        assert!(session::needs_validation(base));
+
+        // Run the hook
+        run_user_prompt_submit_hook(Some(base)).unwrap();
+
+        // Marker should be cleared
+        assert!(!session::needs_validation(base));
     }
 }

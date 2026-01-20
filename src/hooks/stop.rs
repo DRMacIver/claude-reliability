@@ -161,6 +161,42 @@ pub fn run_stop_hook(
         }
     }
 
+    // Check if validation is needed (modifying tools were used since last user message or validation)
+    if session::needs_validation(config.base_dir()) {
+        if let Some(ref check_cmd) = config.quality_check_command {
+            // Run the validation command
+            let output = runner.run("sh", &["-c", check_cmd], None)?;
+
+            if output.exit_code != 0 {
+                // Validation failed - block exit
+                let mut result = StopHookResult::block()
+                    .with_message("# Validation Failed")
+                    .with_message("")
+                    .with_message(format!("The quality check command `{check_cmd}` failed."))
+                    .with_message("")
+                    .with_message("Please fix the issues before stopping.");
+
+                if !output.stdout.is_empty() {
+                    result = result.with_message("").with_message("**stdout:**");
+                    for line in output.stdout.lines().take(50) {
+                        result = result.with_message(format!("  {line}"));
+                    }
+                }
+                if !output.stderr.is_empty() {
+                    result = result.with_message("").with_message("**stderr:**");
+                    for line in output.stderr.lines().take(50) {
+                        result = result.with_message(format!("  {line}"));
+                    }
+                }
+
+                return Ok(result);
+            }
+
+            // Validation passed - clear the marker
+            session::clear_needs_validation(config.base_dir())?;
+        }
+    }
+
     // Check if just-keep-working session is active
     let session_state_path = config.session_state_path();
     let session_config = session::parse_session_state(&session_state_path)?;
@@ -2982,5 +3018,180 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop); // Block, but with inject
         assert_eq!(result.inject_response, Some("Yes, please commit these changes.".to_string()));
+    }
+
+    #[test]
+    fn test_validation_blocks_when_needed_and_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set needs_validation marker
+        session::set_needs_validation(base).unwrap();
+
+        // Set up mock runner that returns failure for the check command
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "sh",
+            &["-c", "just check"],
+            CommandOutput {
+                exit_code: 1,
+                stdout: "Error: tests failed\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Validation Failed")));
+        // Marker should still be set
+        assert!(session::needs_validation(base));
+    }
+
+    #[test]
+    fn test_validation_passes_and_clears_marker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set needs_validation marker
+        session::set_needs_validation(base).unwrap();
+
+        // Set up mock runner that returns success for the check command
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "sh",
+            &["-c", "just check"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "All checks passed\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        // After validation passes, it will check git status
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow (validation passed and git is clean)
+        assert!(result.allow_stop);
+        // Marker should be cleared
+        assert!(!session::needs_validation(base));
+    }
+
+    #[test]
+    fn test_no_validation_when_marker_not_set() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Don't set needs_validation marker
+        assert!(!session::needs_validation(base));
+
+        // Set up mock runner - no check command should be called
+        let mut runner = MockCommandRunner::new();
+        // Only git status checks
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow (no validation needed)
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_validation_shows_stderr_on_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        session::set_needs_validation(base).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "sh",
+            &["-c", "just check"],
+            CommandOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "error: compilation failed\n".to_string(),
+            },
+        );
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            quality_check_command: Some("just check".to_string()),
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("stderr")));
+        assert!(result.messages.iter().any(|m| m.contains("compilation failed")));
     }
 }

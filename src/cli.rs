@@ -35,6 +35,8 @@ pub enum Command {
     PreToolUseProblemMode,
     /// Run the JKW setup enforcement pre-tool-use hook.
     PreToolUseJkwSetup,
+    /// Run the validation tracking pre-tool-use hook.
+    PreToolUseValidation,
 }
 
 /// Result of parsing CLI arguments.
@@ -74,6 +76,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
                 "code-review" => ParseResult::Command(Command::PreToolUseCodeReview),
                 "problem-mode" => ParseResult::Command(Command::PreToolUseProblemMode),
                 "jkw-setup" => ParseResult::Command(Command::PreToolUseJkwSetup),
+                "validation" => ParseResult::Command(Command::PreToolUseValidation),
                 other => ParseResult::UnknownSubcommand(other.to_string()),
             }
         }
@@ -211,6 +214,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
         Command::PreToolUseProblemMode => run_problem_mode_cmd(stdin),
         Command::PreToolUseJkwSetup => run_jkw_setup_cmd(stdin),
+        Command::PreToolUseValidation => run_validation_cmd(stdin),
     }
 }
 
@@ -357,6 +361,21 @@ fn run_jkw_setup_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
 
     let output = run_jkw_setup_hook(&input, Path::new("."));
     // PreToolUseOutput is a simple struct that always serializes successfully
+    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
+
+    (ExitCode::SUCCESS, vec![json])
+}
+
+fn run_validation_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::hooks::{parse_hook_input, run_validation_hook};
+    use std::path::Path;
+
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    let output = run_validation_hook(&input, Path::new("."));
     let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
 
     (ExitCode::SUCCESS, vec![json])
@@ -1000,5 +1019,67 @@ mod tests {
         // Should block
         assert!(!messages.is_empty());
         assert!(messages[0].contains("block"));
+    }
+
+    #[test]
+    fn test_run_validation_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Valid JSON input for validation with Edit tool
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "validation"]),
+            r#"{"tool_name": "Edit", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        // Should return JSON output
+        assert!(!messages.is_empty());
+        assert!(messages[0].starts_with('{'));
+        // Should allow (we're just tracking, not blocking)
+        assert!(messages[0].contains("allow"));
+        // Should set the needs_validation marker
+        assert!(crate::session::needs_validation(dir_path));
+    }
+
+    #[test]
+    fn test_run_validation_invalid_json() {
+        let (code, messages) = run(&args(&["prog", "pre-tool-use", "validation"]), "not json");
+
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_validation_read_tool_no_marker() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Read tool should not set the marker
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "validation"]),
+            r#"{"tool_name": "Read", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(messages[0].contains("allow"));
+        // Should NOT set the needs_validation marker
+        assert!(!crate::session::needs_validation(dir_path));
     }
 }
