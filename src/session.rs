@@ -1,16 +1,23 @@
 //! Session file parsing for just-keep-working mode.
 //!
-//! The session file (`.claude/jkw-session.local.md`) tracks the state
-//! of a just-keep-working development session using YAML frontmatter.
+//! Session state is split into two files:
+//! - `.claude/jkw-state.local.yaml` - Hook-managed YAML state (iteration, staleness)
+//! - `.claude/jkw-session.local.md` - LLM-editable markdown (session notes, goals)
+//!
+//! This separation prevents the LLM from accidentally breaking the YAML
+//! state when editing session notes.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-/// Default path for the session file.
-pub const SESSION_FILE_PATH: &str = ".claude/jkw-session.local.md";
+/// Path for hook-managed session state (YAML).
+pub const SESSION_STATE_PATH: &str = ".claude/jkw-state.local.yaml";
+
+/// Path for LLM-editable session notes (markdown).
+pub const SESSION_NOTES_PATH: &str = ".claude/jkw-session.local.md";
 
 /// Staleness threshold - iterations without issue changes before stopping.
 pub const STALENESS_THRESHOLD: u32 = 5;
@@ -53,80 +60,74 @@ impl SessionConfig {
     }
 }
 
-/// Parse a session file with YAML frontmatter.
+/// Parse the session state file (YAML).
 ///
-/// The file format is:
-/// ```text
-/// ---
+/// The file format is plain YAML:
+/// ```yaml
 /// iteration: 5
 /// last_issue_change_iteration: 3
 /// issue_snapshot:
 ///   - project-123
 ///   - project-456
-/// ---
-///
-/// # Session Log
-/// ...
 /// ```
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or parsed.
-pub fn parse_session_file(path: &Path) -> Result<Option<SessionConfig>> {
+pub fn parse_session_state(path: &Path) -> Result<Option<SessionConfig>> {
     if !path.exists() {
         return Ok(None);
     }
 
     let content = fs::read_to_string(path)?;
-
-    // Check for YAML frontmatter
-    if !content.starts_with("---") {
-        return Err(Error::InvalidSessionFile(
-            "Session file must start with YAML frontmatter (---)".to_string(),
-        ));
-    }
-
-    // Split on --- to get the frontmatter
-    let parts: Vec<&str> = content.splitn(3, "---").collect();
-    if parts.len() < 3 {
-        return Err(Error::InvalidSessionFile("Invalid YAML frontmatter format".to_string()));
-    }
-
-    // Parse the YAML
-    let yaml_content = parts[1].trim();
-    let config: SessionConfig = serde_yaml::from_str(yaml_content)?;
+    let config: SessionConfig = serde_yaml::from_str(&content)?;
 
     Ok(Some(config))
 }
 
-/// Write a session file with YAML frontmatter.
+/// Write the session state file (YAML).
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
-pub fn write_session_file(path: &Path, config: &SessionConfig) -> Result<()> {
+pub fn write_session_state(path: &Path, config: &SessionConfig) -> Result<()> {
     let yaml = serde_yaml::to_string(config)?;
-    let content = format!(
-        "---\n{yaml}---\n\n# Just-Keep-Working Session Log\n\nThis file tracks the just-keep-working development session.\n"
-    );
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    fs::write(path, content)?;
+    fs::write(path, yaml)?;
     Ok(())
 }
 
-/// Delete the session file if it exists.
+/// Delete the session state file if it exists.
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be removed.
-pub fn cleanup_session_file(path: &Path) -> Result<()> {
+pub fn cleanup_session_state(path: &Path) -> Result<()> {
     if path.exists() {
         fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Delete both session files (state and notes) if they exist.
+///
+/// # Errors
+///
+/// Returns an error if files cannot be removed.
+pub fn cleanup_session_files(base_dir: &Path) -> Result<()> {
+    let state_path = base_dir.join(SESSION_STATE_PATH);
+    let notes_path = base_dir.join(SESSION_NOTES_PATH);
+
+    if state_path.exists() {
+        fs::remove_file(state_path)?;
+    }
+    if notes_path.exists() {
+        fs::remove_file(notes_path)?;
     }
     Ok(())
 }
@@ -176,71 +177,53 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_parse_session_file_not_exists() {
-        let result = parse_session_file(Path::new("/nonexistent/file.md")).unwrap();
+    fn test_parse_session_state_not_exists() {
+        let result = parse_session_state(Path::new("/nonexistent/file.yaml")).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_parse_session_file_valid() {
+    fn test_parse_session_state_valid() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
+        let path = dir.path().join("state.yaml");
         fs::write(
             &path,
-            r"---
-iteration: 5
+            r"iteration: 5
 last_issue_change_iteration: 3
 issue_snapshot:
   - project-123
   - project-456
----
-
-# Log
 ",
         )
         .unwrap();
 
-        let config = parse_session_file(&path).unwrap().unwrap();
+        let config = parse_session_state(&path).unwrap().unwrap();
         assert_eq!(config.iteration, 5);
         assert_eq!(config.last_issue_change_iteration, 3);
         assert_eq!(config.issue_snapshot, vec!["project-123", "project-456"]);
     }
 
     #[test]
-    fn test_parse_session_file_empty_snapshot() {
+    fn test_parse_session_state_empty_snapshot() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
+        let path = dir.path().join("state.yaml");
         fs::write(
             &path,
-            r"---
-iteration: 1
----
-
-# Log
+            r"iteration: 1
 ",
         )
         .unwrap();
 
-        let config = parse_session_file(&path).unwrap().unwrap();
+        let config = parse_session_state(&path).unwrap().unwrap();
         assert_eq!(config.iteration, 1);
         assert_eq!(config.last_issue_change_iteration, 0);
         assert!(config.issue_snapshot.is_empty());
     }
 
     #[test]
-    fn test_parse_session_file_no_frontmatter() {
+    fn test_write_session_state() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
-        fs::write(&path, "Just some content without frontmatter").unwrap();
-
-        let result = parse_session_file(&path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_write_session_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
+        let path = dir.path().join("state.yaml");
 
         let config = SessionConfig {
             iteration: 3,
@@ -249,30 +232,51 @@ iteration: 1
             ..Default::default()
         };
 
-        write_session_file(&path, &config).unwrap();
+        write_session_state(&path, &config).unwrap();
 
         // Read it back
-        let parsed = parse_session_file(&path).unwrap().unwrap();
+        let parsed = parse_session_state(&path).unwrap().unwrap();
         assert_eq!(parsed.iteration, 3);
         assert_eq!(parsed.issue_snapshot, vec!["issue-1", "issue-2"]);
     }
 
     #[test]
-    fn test_cleanup_session_file() {
+    fn test_cleanup_session_state() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
+        let path = dir.path().join("state.yaml");
         fs::write(&path, "content").unwrap();
 
         assert!(path.exists());
-        cleanup_session_file(&path).unwrap();
+        cleanup_session_state(&path).unwrap();
         assert!(!path.exists());
     }
 
     #[test]
-    fn test_cleanup_session_file_not_exists() {
-        let path = Path::new("/nonexistent/file.md");
+    fn test_cleanup_session_state_not_exists() {
+        let path = Path::new("/nonexistent/file.yaml");
         // Should not error
-        cleanup_session_file(path).unwrap();
+        cleanup_session_state(path).unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_session_files() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create both files
+        let state_path = base.join(SESSION_STATE_PATH);
+        let notes_path = base.join(SESSION_NOTES_PATH);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, "state").unwrap();
+        fs::write(&notes_path, "notes").unwrap();
+
+        assert!(state_path.exists());
+        assert!(notes_path.exists());
+
+        cleanup_session_files(base).unwrap();
+
+        assert!(!state_path.exists());
+        assert!(!notes_path.exists());
     }
 
     #[test]
@@ -313,24 +317,11 @@ iteration: 1
     }
 
     #[test]
-    fn test_parse_session_invalid_frontmatter_format() {
-        // Test with frontmatter that doesn't have proper closing ---
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("session.md");
-
-        // Write a file with only opening --- but no closing
-        fs::write(&path, "---\niteration: 1\n# No closing delimiter").unwrap();
-
-        let result = parse_session_file(&path);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_write_session_creates_parent_directory() {
+    fn test_write_session_state_creates_parent_directory() {
         let dir = TempDir::new().unwrap();
         // Path with non-existent parent directory
         let nested = dir.path().join("deeply").join("nested").join("path");
-        let path = nested.join("session.md");
+        let path = nested.join("state.yaml");
 
         // Verify parent doesn't exist yet
         assert!(!nested.exists());
@@ -338,7 +329,7 @@ iteration: 1
         let config =
             SessionConfig { iteration: 1, last_issue_change_iteration: 1, ..Default::default() };
 
-        write_session_file(&path, &config).unwrap();
+        write_session_state(&path, &config).unwrap();
 
         // Verify both parent and file now exist
         assert!(nested.exists());

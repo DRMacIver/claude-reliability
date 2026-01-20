@@ -51,9 +51,9 @@ impl StopHookConfig {
         self.base_dir.as_deref().unwrap_or_else(|| Path::new("."))
     }
 
-    /// Get the session file path (relative to `base_dir`).
-    fn session_path(&self) -> PathBuf {
-        self.base_dir().join(session::SESSION_FILE_PATH)
+    /// Get the session state file path (relative to `base_dir`).
+    fn session_state_path(&self) -> PathBuf {
+        self.base_dir().join(session::SESSION_STATE_PATH)
     }
 }
 
@@ -128,7 +128,7 @@ pub fn run_stop_hook(
     // Check for problem mode - if active, allow unconditional stop
     if session::is_problem_mode_active(config.base_dir()) {
         session::exit_problem_mode(config.base_dir())?;
-        session::cleanup_session_file(&config.session_path())?;
+        session::cleanup_session_files(config.base_dir())?;
         return Ok(StopHookResult::allow()
             .with_message("# Problem Mode Exit")
             .with_message("")
@@ -151,8 +151,8 @@ pub fn run_stop_hook(
     }
 
     // Check if just-keep-working session is active
-    let session_path = config.session_path();
-    let session_config = session::parse_session_file(&session_path)?;
+    let session_state_path = config.session_state_path();
+    let session_config = session::parse_session_state(&session_state_path)?;
 
     // Fast path: if no just-keep-working session and no git changes, allow immediate exit
     if session_config.is_none() && config.git_repo {
@@ -209,7 +209,7 @@ pub fn run_stop_hook(
                 }
             }
             // Bypass allowed
-            session::cleanup_session_file(&session_path)?;
+            session::cleanup_session_files(config.base_dir())?;
             return Ok(StopHookResult::allow());
         }
     }
@@ -641,7 +641,7 @@ fn handle_jkw_mode(
     sub_agent: &dyn SubAgent,
     transcript_info: &TranscriptInfo,
 ) -> Result<StopHookResult> {
-    let session_path = config.session_path();
+    let session_state_path = config.session_state_path();
 
     // Increment iteration
     session.iteration += 1;
@@ -675,13 +675,13 @@ fn handle_jkw_mode(
         }
     }
 
-    // Update session file
-    session::write_session_file(&session_path, session)?;
+    // Update session state file
+    session::write_session_state(&session_state_path, session)?;
 
     // Check staleness
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
-        session::cleanup_session_file(&session_path)?;
+        session::cleanup_session_files(config.base_dir())?;
         let change_type = if beads_available { "issue" } else { "git" };
         return Ok(StopHookResult::allow()
             .with_message("# Staleness Detected")
@@ -1693,11 +1693,11 @@ mod tests {
     }
 
     // Helper to create a session file for just-keep-working mode tests
-    fn create_session_file(base: &std::path::Path, iteration: u32, last_change: u32) {
-        create_session_file_with_issues(base, iteration, last_change, &[]);
+    fn create_session_state(base: &std::path::Path, iteration: u32, last_change: u32) {
+        create_session_state_with_issues(base, iteration, last_change, &[]);
     }
 
-    fn create_session_file_with_issues(
+    fn create_session_state_with_issues(
         base: &std::path::Path,
         iteration: u32,
         last_change: u32,
@@ -1713,10 +1713,11 @@ mod tests {
                 issues.iter().map(|i| format!("  - {i}")).collect::<Vec<_>>().join("\n")
             )
         };
+        // Write plain YAML (no frontmatter) to the state file
         let content = format!(
-            "---\niteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: {issues_yaml}\n---\n# Session"
+            "iteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: {issues_yaml}\n"
         );
-        std::fs::write(session_dir.join("jkw-session.local.md"), content).unwrap();
+        std::fs::write(session_dir.join("jkw-state.local.yaml"), content).unwrap();
     }
 
     #[test]
@@ -1727,7 +1728,7 @@ mod tests {
         let base = dir.path();
 
         // Create session file (iteration 3, last change at 2)
-        create_session_file(base, 3, 2);
+        create_session_state(base, 3, 2);
 
         let mut runner = MockCommandRunner::new();
         runner.set_available("bd");
@@ -1778,7 +1779,7 @@ mod tests {
 
         // Create session file with high staleness (iteration 10, last change at 3)
         // This means iterations_since_change = 10-3 = 7, and after increment = 11-3 = 8 >= 5
-        create_session_file(base, 10, 3);
+        create_session_state(base, 10, 3);
 
         // Create .beads directory so beads is "available" - this allows testing issue-based staleness
         std::fs::create_dir_all(base.join(".beads")).unwrap();
@@ -1826,7 +1827,7 @@ mod tests {
         let base = dir.path();
 
         // Create session file (iteration 1, last change at 1)
-        create_session_file(base, 1, 1);
+        create_session_state(base, 1, 1);
 
         // Create .beads directory so beads is "available"
         std::fs::create_dir_all(base.join(".beads")).unwrap();
@@ -1888,7 +1889,7 @@ mod tests {
         let base = dir.path();
 
         // Create session file (iteration 1, last change at 1)
-        create_session_file(base, 1, 1);
+        create_session_state(base, 1, 1);
 
         // Create .beads directory so beads is "available"
         std::fs::create_dir_all(base.join(".beads")).unwrap();
@@ -1948,7 +1949,7 @@ mod tests {
         // Create session file with matching issues so staleness counter continues
         // (iteration 5, last change at 2 - gives 3 iterations since change)
         // After increment it becomes iteration 6, so iterations_since_change = 4 > 2
-        create_session_file_with_issues(base, 5, 2, &["issue-1"]);
+        create_session_state_with_issues(base, 5, 2, &["issue-1"]);
 
         // Create .beads directory so beads is "available"
         std::fs::create_dir_all(base.join(".beads")).unwrap();
@@ -1999,7 +2000,7 @@ mod tests {
         let base = dir.path();
 
         // Create session file and .beads directory
-        create_session_file(base, 1, 1);
+        create_session_state(base, 1, 1);
         std::fs::create_dir_all(base.join(".beads")).unwrap();
 
         let mut runner = MockCommandRunner::new();

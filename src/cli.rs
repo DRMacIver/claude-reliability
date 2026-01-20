@@ -536,6 +536,10 @@ mod tests {
     fn test_run_stop_with_mocks() {
         use crate::testing::{MockCommandRunner, MockSubAgent};
         use crate::traits::CommandOutput;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
 
         let mut runner = MockCommandRunner::new();
         let empty_success =
@@ -550,7 +554,8 @@ mod tests {
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
         let sub_agent = MockSubAgent::new();
-        let config = StopHookConfig::default();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop("{}", &config, &runner, &sub_agent);
         assert!(result.is_ok());
