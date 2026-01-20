@@ -132,6 +132,9 @@ class ToolSimulator:
                 result[key] = value
         return result
 
+    # Tools that don't affect file system state and should skip comparison
+    PASSTHROUGH_TOOLS = {"Task", "TodoWrite", "Skill", "AskUserQuestion"}
+
     def simulate(
         self,
         tool_name: str,
@@ -155,6 +158,15 @@ class ToolSimulator:
                 output="",
                 error=f"Unknown tool: {tool_name}",
                 matched_expected=False,
+            )
+
+        # For passthrough tools, skip execution and comparison
+        if tool_name in self.PASSTHROUGH_TOOLS:
+            return SimulationResult(
+                success=True,
+                output="[passthrough]",
+                error=None,
+                matched_expected=True,
             )
 
         # Substitute paths in tool input (e.g., /tmp/old_session -> /tmp/new_session)
@@ -202,6 +214,11 @@ class ToolSimulator:
             "Edit": self._handle_edit,
             "Glob": self._handle_glob,
             "Grep": self._handle_grep,
+            # Pass-through tools that don't affect file system state
+            "Task": self._handle_passthrough,
+            "TodoWrite": self._handle_passthrough,
+            "Skill": self._handle_passthrough,
+            "AskUserQuestion": self._handle_passthrough,
         }
         return handlers.get(tool_name)
 
@@ -320,6 +337,15 @@ class ToolSimulator:
 
         matches = sorted(path.glob(pattern))
         return "\n".join(str(m) for m in matches)
+
+    def _handle_passthrough(self, tool_input: dict[str, Any]) -> str:
+        """Handle tools that don't affect file system state.
+
+        Tools like Task, TodoWrite, Skill, and AskUserQuestion don't modify
+        files - they're for orchestration and user interaction. During replay,
+        we skip execution and always report success.
+        """
+        return "[passthrough - no execution needed]"
 
     def _handle_grep(self, tool_input: dict[str, Any]) -> str:
         """Search for patterns in files."""

@@ -29,9 +29,11 @@ Each module has a simple function with corresponding tests achieving 100% covera
 4. Agent ports each Python function to idiomatic Rust
 5. Agent writes Rust tests for each function
 6. Agent configures coverage (tarpaulin or llvm-cov)
-7. Agent updates Justfile with Rust test command
-8. Agent deletes all Python code
+7. Agent updates Justfile to run Rust tests (not Python tests)
+8. Agent deletes Python source files (.py files in src/ and tests/)
 9. Agent verifies `just check` passes with 100% coverage
+
+**Important**: The Justfile must be updated, not deleted. It should run Rust tests with coverage.
 
 ## Post-Condition
 
@@ -43,5 +45,5 @@ Each module has a simple function with corresponding tests achieving 100% covera
 ## Prompt
 
 ```
-Port this Python project to Rust. Create a standalone Rust library (no Python bindings needed). Delete all the Python code when you're done. Don't stop until all functions are ported, tests pass, and you have 100% coverage. You can ask me questions if you need clarification.
+Port this Python project to Rust. Create a standalone Rust library (no Python bindings needed). Delete all the Python source files when you're done (but keep the Justfile - update it to run Rust tests instead). Don't stop until all functions are ported, tests pass, and you have 100% coverage. You can ask me questions if you need clarification.
 ```

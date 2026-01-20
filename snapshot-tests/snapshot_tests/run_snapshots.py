@@ -170,6 +170,14 @@ def get_venv_env(venv_dir: Path, home_dir: Path | None = None) -> dict[str, str]
     env.pop("PYTHONHOME", None)
     # Isolate HOME to prevent test instances from sharing state
     if home_dir:
+        # Preserve Rust toolchain access before changing HOME
+        # rustup/cargo look for config in $HOME/.rustup and $HOME/.cargo
+        original_home = env.get("HOME", "")
+        if original_home:
+            if "RUSTUP_HOME" not in env:
+                env["RUSTUP_HOME"] = f"{original_home}/.rustup"
+            if "CARGO_HOME" not in env:
+                env["CARGO_HOME"] = f"{original_home}/.cargo"
         env["HOME"] = str(home_dir)
     return env
 
@@ -284,7 +292,9 @@ def run_replay(
     simulator = ToolSimulator(registry=registry, cwd=temp_dir, path_mappings=path_mappings)
 
     # Simulate each tool call
-    errors = []
+    # Track true errors (execution failures) separately from mismatches (different output)
+    execution_errors = []
+    mismatches = []
     for i, (tool_use, expected_result) in enumerate(tool_calls):
         if verbose:
             print(f"  [{i+1}/{len(tool_calls)}] {tool_use.name}: {_summarize_input(tool_use)}")
@@ -298,13 +308,14 @@ def run_replay(
         )
 
         if not result.success:
-            errors.append(f"Tool {tool_use.name} failed: {result.error}")
+            execution_errors.append(f"Tool {tool_use.name} failed: {result.error}")
             if verbose:
                 print(f"    ERROR: {result.error}")
         elif not result.matched_expected and expected_output is not None:
-            # Show the substituted expected for debugging
+            # Output mismatches are warnings, not errors
+            # The post-condition determines if the test passes
             substituted_expected = simulator.substitute_paths(expected_output)
-            errors.append(
+            mismatches.append(
                 f"Tool {tool_use.name} output mismatch:\n"
                 f"  Expected: {substituted_expected[:200]}\n"
                 f"  Actual: {result.output[:200]}"
@@ -312,11 +323,12 @@ def run_replay(
             if verbose:
                 print(f"    MISMATCH")
 
-    if errors:
+    # Execution errors are fatal - the tool failed to run
+    if execution_errors:
         return TestResult(
             name=test.name,
             passed=False,
-            error="\n".join(errors),
+            error="\n".join(execution_errors),
         )
 
     # Get virtualenv environment with isolated HOME
@@ -340,12 +352,21 @@ def run_replay(
             if verbose and post_condition_output:
                 print(f"  Post-condition output:\n{post_condition_output}")
         except subprocess.CalledProcessError as e:
+            error_msg = f"Post-condition failed (exit code {e.returncode}):\n"
+            if e.stdout:
+                error_msg += f"stdout: {e.stdout}\n"
+            if e.stderr:
+                error_msg += f"stderr: {e.stderr}"
             return TestResult(
                 name=test.name,
                 passed=False,
-                error=f"Post-condition failed: {e.stderr}",
-                post_condition_output=e.stdout,
+                error=error_msg,
+                post_condition_output=e.stdout or "",
             )
+
+    # Include mismatch warnings in the result but still pass
+    if mismatches and verbose:
+        print(f"  {len(mismatches)} output mismatches (non-fatal, post-condition passed)")
 
     return TestResult(name=test.name, passed=True, post_condition_output=post_condition_output)
 
@@ -506,11 +527,16 @@ def run_record(
             output_file = test.test_dir / "post-condition-output.txt"
             output_file.write_text(post_condition_output)
         except subprocess.CalledProcessError as e:
+            error_msg = f"Post-condition failed (exit code {e.returncode}):\n"
+            if e.stdout:
+                error_msg += f"stdout: {e.stdout}\n"
+            if e.stderr:
+                error_msg += f"stderr: {e.stderr}"
             return TestResult(
                 name=test.name,
                 passed=False,
-                error=f"Post-condition failed: {e.stderr}",
-                post_condition_output=e.stdout,
+                error=error_msg,
+                post_condition_output=e.stdout or "",
             )
 
     return TestResult(name=test.name, passed=True, post_condition_output=post_condition_output)

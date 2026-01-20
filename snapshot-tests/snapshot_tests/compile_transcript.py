@@ -102,6 +102,21 @@ def format_tool_result(
 ) -> list[str]:
     """Format a tool result as Markdown lines."""
     content = result.content
+
+    # Handle case where content is a list (multiple content blocks)
+    if isinstance(content, list):
+        # Extract text from content blocks
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif "content" in item:
+                    text_parts.append(str(item["content"]))
+            elif isinstance(item, str):
+                text_parts.append(item)
+        content = "\n".join(text_parts)
+
     # Strip system-reminder tags from output
     content = strip_system_reminders(content)
 
