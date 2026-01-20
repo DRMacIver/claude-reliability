@@ -32,6 +32,8 @@ pub const USER_RECENCY_MINUTES: u32 = 5;
 /// Configuration for the stop hook.
 #[derive(Debug, Clone, Default)]
 pub struct StopHookConfig {
+    /// Whether we're in a git repository.
+    pub git_repo: bool,
     /// Skip quality checks (no-op by default until user configures).
     pub quality_check_enabled: bool,
     /// Command to run for quality checks.
@@ -153,7 +155,7 @@ pub fn run_stop_hook(
     let session_config = session::parse_session_file(&session_path)?;
 
     // Fast path: if no just-keep-working session and no git changes, allow immediate exit
-    if session_config.is_none() {
+    if session_config.is_none() && config.git_repo {
         let git_status = git::check_uncommitted_changes(runner)?;
         if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
             return Ok(StopHookResult::allow());
@@ -212,30 +214,32 @@ pub fn run_stop_hook(
         }
     }
 
-    // Check for uncommitted changes
-    let git_status = git::check_uncommitted_changes(runner)?;
+    // Check for uncommitted changes (only in git repos)
+    if config.git_repo {
+        let git_status = git::check_uncommitted_changes(runner)?;
 
-    if git_status.uncommitted.has_changes() {
-        return handle_uncommitted_changes(
-            &git_status,
-            config,
-            runner,
-            &transcript_info,
-            sub_agent,
-        );
-    }
+        if git_status.uncommitted.has_changes() {
+            return handle_uncommitted_changes(
+                &git_status,
+                config,
+                runner,
+                &transcript_info,
+                sub_agent,
+            );
+        }
 
-    // Check if need to push
-    if config.require_push && git_status.ahead_of_remote {
-        return Ok(StopHookResult::block()
-            .with_message("# Unpushed Commits")
-            .with_message("")
-            .with_message(format!(
-                "You have {} commit(s) that haven't been pushed.",
-                git_status.commits_ahead
-            ))
-            .with_message("")
-            .with_message("Run `git push` to publish your changes."));
+        // Check if need to push
+        if config.require_push && git_status.ahead_of_remote {
+            return Ok(StopHookResult::block()
+                .with_message("# Unpushed Commits")
+                .with_message("")
+                .with_message(format!(
+                    "You have {} commit(s) that haven't been pushed.",
+                    git_status.commits_ahead
+                ))
+                .with_message("")
+                .with_message("Run `git push` to publish your changes."));
+        }
     }
 
     // Check if agent is asking a question and user is recently active
@@ -478,9 +482,13 @@ fn check_self_reflection(
     }
 
     // Check if there were any changes made this session
-    // Use git if available, otherwise use tool use tracking
-    let has_changes = if let Ok(git_status) = git::check_uncommitted_changes(runner) {
-        git_status.uncommitted.has_changes() || git_status.ahead_of_remote
+    // Use git if available and in a git repo, otherwise use tool use tracking
+    let has_changes = if config.git_repo {
+        if let Ok(git_status) = git::check_uncommitted_changes(runner) {
+            git_status.uncommitted.has_changes() || git_status.ahead_of_remote
+        } else {
+            transcript_info.has_modifying_tool_use
+        }
     } else {
         transcript_info.has_modifying_tool_use
     };
@@ -494,8 +502,12 @@ fn check_self_reflection(
         transcript_info.last_assistant_output.as_deref().unwrap_or("(No output available)");
     let assistant_output = truncate_for_context(assistant_output, 3000);
 
-    // Get the git diff for context
-    let git_diff = git::combined_diff(runner).unwrap_or_default();
+    // Get the git diff for context (only if in a git repo)
+    let git_diff = if config.git_repo {
+        git::combined_diff(runner).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let git_diff = if git_diff.len() > 5000 {
         format!("{}...(truncated)", &git_diff[..5000])
     } else {
@@ -888,12 +900,30 @@ mod tests {
         let runner = mock_uncommitted_changes();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig::default();
+        let config = StopHookConfig { git_repo: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert_eq!(result.exit_code, 2);
         assert!(result.messages.iter().any(|m| m.contains("Uncommitted Changes")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_skips_git_when_not_git_repo() {
+        // When git_repo is false, git checks should be skipped entirely.
+        // This test verifies that NO git commands are called when git_repo: false.
+        let runner = MockCommandRunner::new(); // No git expectations set
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: false, // Not a git repo - git checks should be skipped
+            ..Default::default()
+        };
+
+        // Should succeed without calling any git commands
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        runner.verify(); // Verify no unexpected commands were called
     }
 
     #[test]
@@ -1046,7 +1076,7 @@ mod tests {
         let runner = mock_clean_with_ahead();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { require_push: true, ..Default::default() };
+        let config = StopHookConfig { git_repo: true, require_push: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1067,6 +1097,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             require_push: false,
             base_dir: Some(base.to_path_buf()),
             ..Default::default()
@@ -1122,7 +1153,7 @@ mod tests {
         let runner = mock_uncommitted_with_untracked();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig::default();
+        let config = StopHookConfig { git_repo: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1186,6 +1217,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             ..Default::default()
@@ -1374,8 +1406,11 @@ mod tests {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config =
-            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Problem phrase now blocks and enters problem mode
@@ -1448,7 +1483,11 @@ mod tests {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1514,7 +1553,11 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1542,6 +1585,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             base_dir: Some(dir.path().to_path_buf()),
@@ -1596,6 +1640,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             require_push: false, // Don't block on unpushed commits
@@ -1672,7 +1717,11 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1718,7 +1767,11 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
@@ -1774,6 +1827,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             base_dir: Some(base.to_path_buf()),
@@ -1832,6 +1886,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             base_dir: Some(base.to_path_buf()),
@@ -1883,7 +1938,11 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1935,7 +1994,11 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1987,7 +2050,7 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig::default();
+        let config = StopHookConfig { git_repo: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -2042,8 +2105,11 @@ mod tests {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config =
-            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Should allow stop despite uncommitted changes due to API error loop
@@ -2107,7 +2173,7 @@ mod tests {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig::default();
+        let config = StopHookConfig { git_repo: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Single API error should NOT trigger the escape hatch
@@ -2155,7 +2221,7 @@ mod tests {
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { require_push: true, ..Default::default() };
+        let config = StopHookConfig { git_repo: true, require_push: true, ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -2227,6 +2293,7 @@ mod tests {
         };
         // require_push = false so we don't block on unpushed commits
         let config = StopHookConfig {
+            git_repo: true,
             require_push: false,
             base_dir: Some(dir.path().to_path_buf()),
             ..Default::default()
@@ -2289,6 +2356,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
+            git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             ..Default::default()

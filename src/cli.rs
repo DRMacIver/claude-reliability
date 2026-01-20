@@ -274,6 +274,7 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
 
     // Build hook config from project config
     let config = StopHookConfig {
+        git_repo: project_config.git_repo,
         quality_check_enabled: project_config.check_command.is_some(),
         quality_check_command: project_config.check_command,
         require_push: project_config.require_push,
@@ -616,7 +617,10 @@ mod tests {
 
         let runner = FailingCommandRunner::new("simulated error");
         let sub_agent = MockSubAgent::new();
-        let config = StopHookConfig::default();
+        let config = StopHookConfig {
+            git_repo: true, // Enable git checks so they will fail
+            ..Default::default()
+        };
 
         // Valid JSON that will pass parsing but cause hook to fail when calling git commands
         let result = run_stop("{}", &config, &runner, &sub_agent);
