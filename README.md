@@ -4,6 +4,8 @@ Claude is great, except when it's not. I routinely got frustrated when it did am
 
 Then I got frustrated when I didn't have my elaborate personal infrastructure at work, so I decided to make it open source. This is a mostly-from-scratch rewrite of that, with a lot of the weirder bits fixed, some of the rest hardened up, and some attempt to make it useful to people who are not literally me.
 
+**Warning**: One way in which this is highly specialised to my use cases is that it is likely to be quite token hungry. If you are on a cheap plan, please pay careful attention to usage as it may blow through your limits fast. I use 20xMax for most of my development and am happy to trade tokens for my time as a result if it gets me good software. If you have radically different preferences from me, you might still find this useful, but you might want to have a think about how to adapt it to you. I'm generally happy for it to be configurable, so if there are changes that would make it more useful to you please do feel free to request them or submit issues.
+
 Main features:
 
 1. A *lot* of guard rails on when Claude is allowed to stop. Tests and linting should pass (or whatever you want to configure here), code should be committed and pushed.
