@@ -21,7 +21,7 @@ def get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def install_plugin(target_dir: Path) -> None:
+def install_plugin(target_dir: Path, home_dir: Path | None = None) -> None:
     """Install the claude-reliability plugin into a test directory.
 
     This sets up the plugin structure so that Claude Code will recognize
@@ -29,6 +29,9 @@ def install_plugin(target_dir: Path) -> None:
 
     Args:
         target_dir: The test directory to install the plugin into
+        home_dir: Optional HOME directory (for isolated tests). If provided,
+                  the binary is also copied to $HOME/.claude-reliability/bin/
+                  where ensure-binary.sh expects to find it.
     """
     project_root = get_project_root()
 
@@ -73,6 +76,16 @@ def install_plugin(target_dir: Path) -> None:
     if binary_src.exists():
         shutil.copy(binary_src, bin_dir / "claude-reliability")
         os.chmod(bin_dir / "claude-reliability", 0o755)
+
+        # Also copy to the global cache location where ensure-binary.sh expects it
+        # This is needed because the hook scripts call ensure-binary.sh which
+        # looks in ~/.claude-reliability/bin/ for the binary
+        effective_home = home_dir or Path.home()
+        global_cache_dir = effective_home / ".claude-reliability" / "bin"
+        global_cache_dir.mkdir(parents=True, exist_ok=True)
+        global_binary = global_cache_dir / "claude-reliability"
+        shutil.copy(binary_src, global_binary)
+        os.chmod(global_binary, 0o755)
 
     # Update the plugin.json to point to the local scripts
     # The scripts use ${CLAUDE_PLUGIN_ROOT} which should resolve correctly

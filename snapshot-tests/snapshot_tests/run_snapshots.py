@@ -151,14 +151,15 @@ def create_virtualenv(temp_dir: Path) -> Path:
     return venv_dir
 
 
-def get_venv_env(venv_dir: Path) -> dict[str, str]:
+def get_venv_env(venv_dir: Path, home_dir: Path | None = None) -> dict[str, str]:
     """Get environment variables for running commands in the virtualenv.
 
     Args:
         venv_dir: Path to the virtualenv directory
+        home_dir: Optional isolated HOME directory for test isolation
 
     Returns:
-        Environment dict with PATH and VIRTUAL_ENV set
+        Environment dict with PATH, VIRTUAL_ENV, and optionally HOME set
     """
     env = os.environ.copy()
     venv_bin = venv_dir / "bin"
@@ -166,7 +167,27 @@ def get_venv_env(venv_dir: Path) -> dict[str, str]:
     env["VIRTUAL_ENV"] = str(venv_dir)
     # Remove PYTHONHOME if set, as it can interfere with venv
     env.pop("PYTHONHOME", None)
+    # Isolate HOME to prevent test instances from sharing state
+    if home_dir:
+        env["HOME"] = str(home_dir)
     return env
+
+
+def create_isolated_home(temp_dir: Path) -> Path:
+    """Create an isolated HOME directory for test isolation.
+
+    This prevents Claude Code instances from sharing state like
+    ~/.claude-reliability/ cache or ~/.claude/ configuration.
+
+    Args:
+        temp_dir: Base temp directory
+
+    Returns:
+        Path to the isolated home directory
+    """
+    home_dir = temp_dir.parent / f"{temp_dir.name}_home"
+    home_dir.mkdir(exist_ok=True)
+    return home_dir
 
 
 def setup_test_environment(
@@ -174,6 +195,7 @@ def setup_test_environment(
     test: TestConfig,
     project_dir: Path,
     venv_dir: Path,
+    home_dir: Path,
 ) -> None:
     """Set up the test environment in a temp directory.
 
@@ -182,14 +204,16 @@ def setup_test_environment(
         test: Test configuration
         project_dir: Project root directory
         venv_dir: Path to the virtualenv directory
+        home_dir: Isolated HOME directory for test isolation
     """
     os.chdir(temp_dir)
 
     # Install the claude-reliability plugin
-    install_plugin(temp_dir)
+    # Pass home_dir so the binary is copied to the right location for ensure-binary.sh
+    install_plugin(temp_dir, home_dir=None)  # Use real HOME for now to avoid auth issues
 
-    # Get virtualenv environment
-    env = get_venv_env(venv_dir)
+    # Get virtualenv environment with isolated HOME
+    env = get_venv_env(venv_dir, home_dir)
 
     # Run setup script - this handles git init if needed
     if test.setup_script.suffix == ".py":
@@ -213,6 +237,7 @@ def run_replay(
     test: TestConfig,
     project_dir: Path,
     venv_dir: Path,
+    home_dir: Path,
     verbose: bool = False,
 ) -> TestResult:
     """Run a test in replay mode.
@@ -224,6 +249,7 @@ def run_replay(
         test: Test configuration
         project_dir: Project root directory
         venv_dir: Path to the virtualenv directory
+        home_dir: Isolated HOME directory for test isolation
         verbose: Show detailed output
 
     Returns:
@@ -292,8 +318,8 @@ def run_replay(
             error="\n".join(errors),
         )
 
-    # Get virtualenv environment
-    env = get_venv_env(venv_dir)
+    # Get virtualenv environment with isolated HOME
+    env = get_venv_env(venv_dir, home_dir)
 
     # Run post-condition if present
     post_condition_output = ""
@@ -361,6 +387,7 @@ def run_record(
     test: TestConfig,
     project_dir: Path,
     venv_dir: Path,
+    home_dir: Path,
     verbose: bool = False,
 ) -> TestResult:
     """Run a test in record mode.
@@ -371,6 +398,8 @@ def run_record(
         temp_dir: Temporary directory for test
         test: Test configuration
         project_dir: Project root directory
+        venv_dir: Path to the virtualenv directory
+        home_dir: Isolated HOME directory for test isolation
         verbose: Show detailed output
 
     Returns:
@@ -396,18 +425,24 @@ def run_record(
     if verbose:
         print(f"  Session ID: {session_id}")
 
-    # Run Claude Code
+    # Plugin directory for hooks
+    plugin_dir = temp_dir / ".claude" / "plugins" / "claude-reliability"
+
+    # Run Claude Code with the plugin loaded
+    # Note: We use real HOME for auth, but load plugin from test directory
     cmd = [
         "claude",
         "--print",
         "--session-id", session_id,
         "--dangerously-skip-permissions",
+        "--plugin-dir", str(plugin_dir),
         "--model", "opus",  # Use opus for first message
         "-p", prompt,
     ]
 
     if verbose:
         print(f"  Running Claude Code...")
+        print(f"  Plugin dir: {plugin_dir}")
 
     try:
         result = subprocess.run(
@@ -428,11 +463,13 @@ def run_record(
         print(f"  Claude Code exit code: {result.returncode}")
         if result.stdout:
             print(f"  Output: {result.stdout[:500]}...")
+        if result.stderr:
+            print(f"  Stderr: {result.stderr[:500]}...")
 
     # Find and copy the transcript
     # Claude stores transcripts in ~/.claude/projects/<project-path-hash>/<session-id>.jsonl
-    home = Path.home()
-    claude_projects = home / ".claude" / "projects"
+    real_home = Path.home()
+    claude_projects = real_home / ".claude" / "projects"
 
     transcript_found = False
     for project_dir_hash in claude_projects.iterdir():
@@ -455,8 +492,8 @@ def run_record(
             error=f"Transcript not found for session {session_id}",
         )
 
-    # Get virtualenv environment
-    env = get_venv_env(venv_dir)
+    # Get virtualenv environment with isolated HOME
+    env = get_venv_env(venv_dir, home_dir)
 
     # Run post-condition if present
     post_condition_output = ""
@@ -506,17 +543,21 @@ def run_test(
     with tempfile.TemporaryDirectory() as temp_dir_str:
         temp_dir = Path(temp_dir_str)
         venv_dir = None
+        home_dir = None
 
         try:
             # Create virtualenv for test isolation (outside test dir)
             venv_dir = create_virtualenv(temp_dir)
 
-            setup_test_environment(temp_dir, test, project_dir, venv_dir)
+            # Create isolated HOME directory for test isolation
+            home_dir = create_isolated_home(temp_dir)
+
+            setup_test_environment(temp_dir, test, project_dir, venv_dir, home_dir)
 
             if mode == "replay":
-                return run_replay(temp_dir, test, project_dir, venv_dir, verbose)
+                return run_replay(temp_dir, test, project_dir, venv_dir, home_dir, verbose)
             elif mode == "record":
-                return run_record(temp_dir, test, project_dir, venv_dir, verbose)
+                return run_record(temp_dir, test, project_dir, venv_dir, home_dir, verbose)
             else:
                 return TestResult(
                     name=test.name,
@@ -531,9 +572,11 @@ def run_test(
                 error=str(e),
             )
         finally:
-            # Clean up venv directory (it's outside the temp dir)
+            # Clean up directories created outside the temp dir
             if venv_dir and venv_dir.exists():
                 shutil.rmtree(venv_dir)
+            if home_dir and home_dir.exists():
+                shutil.rmtree(home_dir)
 
 
 def compile_all_transcripts(tests: list[TestConfig], verbose: bool = False) -> None:
