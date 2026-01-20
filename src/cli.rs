@@ -12,7 +12,6 @@ use crate::{
     subagent::RealSubAgent,
     traits::{CommandRunner, SubAgent},
 };
-use std::env;
 use std::process::ExitCode;
 
 /// CLI command to execute.
@@ -262,7 +261,6 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         quality_check_enabled: project_config.check_command.is_some(),
         quality_check_command: project_config.check_command,
         require_push: project_config.require_push,
-        repo_critique_mode: env::var("REPO_CRITIQUE_MODE").is_ok(),
         base_dir: None,
     };
 
@@ -299,7 +297,7 @@ fn run_code_review_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         eprintln!("Warning: Could not ensure config: {e}");
     }
 
-    let config = CodeReviewConfig { skip_review: env::var("SKIP_CODE_REVIEW").is_ok() };
+    let config = CodeReviewConfig::default();
 
     match run_code_review(stdin, &config, &runner, &sub_agent) {
         Ok(result) => (result.exit_code, result.messages),
@@ -529,7 +527,8 @@ mod tests {
 
         let runner = MockCommandRunner::new();
         let sub_agent = MockSubAgent::new();
-        let config = CodeReviewConfig { skip_review: true };
+        // Empty input {} means no tool_name, so hook returns early with success
+        let config = CodeReviewConfig::default();
 
         let result = run_code_review("{}", &config, &runner, &sub_agent);
         assert!(result.is_ok());
@@ -707,18 +706,14 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        // Set SKIP_CODE_REVIEW to bypass the actual review (we just want to cover the Ok path)
-        std::env::set_var("SKIP_CODE_REVIEW", "1");
-
         let (code, _messages) = run(
             &args(&["prog", "pre-tool-use", "code-review"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "git commit -m 'test'"}}"#,
         );
 
-        std::env::remove_var("SKIP_CODE_REVIEW");
         std::env::set_current_dir(original_dir).unwrap();
 
-        // Should succeed (skip_review is set)
+        // Should succeed - no staged files means no review needed
         assert_eq!(code, ExitCode::SUCCESS);
     }
 }

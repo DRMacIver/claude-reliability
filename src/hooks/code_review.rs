@@ -108,8 +108,7 @@ static GIT_COMMIT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bgit\s+commit\
 /// Configuration for the code review hook.
 #[derive(Debug, Clone, Default)]
 pub struct CodeReviewConfig {
-    /// Whether to skip the review (e.g., `SKIP_CODE_REVIEW` env var).
-    pub skip_review: bool,
+    // Reserved for future configuration options
 }
 
 /// Check if a file is source code based on heuristics.
@@ -181,15 +180,10 @@ fn extract_code_review_section(content: &str) -> Option<String> {
 /// Returns an error if git commands or sub-agent calls fail.
 pub fn run_code_review_hook(
     input: &HookInput,
-    config: &CodeReviewConfig,
+    _config: &CodeReviewConfig,
     runner: &dyn CommandRunner,
     sub_agent: &dyn SubAgent,
 ) -> Result<i32> {
-    // Skip if disabled
-    if config.skip_review {
-        return Ok(0);
-    }
-
     // Only run for Bash tool calls
     if input.tool_name.as_deref() != Some("Bash") {
         return Ok(0);
@@ -309,25 +303,6 @@ mod tests {
     #[test]
     fn test_is_source_code_file_egg_info() {
         assert!(!is_source_code_file("mypackage.egg-info/PKG-INFO"));
-    }
-
-    #[test]
-    fn test_run_code_review_hook_skip_review() {
-        use crate::testing::{MockCommandRunner, MockSubAgent};
-
-        let runner = MockCommandRunner::new();
-        let sub_agent = MockSubAgent::new();
-        let input = HookInput {
-            tool_name: Some("Bash".to_string()),
-            tool_input: Some(crate::hooks::ToolInput {
-                command: Some("git commit -m 'test'".to_string()),
-            }),
-            ..Default::default()
-        };
-        let config = CodeReviewConfig { skip_review: true };
-
-        let result = run_code_review_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert_eq!(result, 0);
     }
 
     #[test]

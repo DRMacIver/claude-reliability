@@ -37,8 +37,6 @@ pub struct StopHookConfig {
     pub quality_check_command: Option<String>,
     /// Whether to require pushing before exit.
     pub require_push: bool,
-    /// Whether we're in a repo critique mode (bypass hook).
-    pub repo_critique_mode: bool,
     /// Base directory for beads checks (defaults to current directory).
     /// Used by tests to avoid changing global CWD.
     pub base_dir: Option<PathBuf>,
@@ -117,11 +115,6 @@ pub fn run_stop_hook(
     runner: &dyn CommandRunner,
     sub_agent: &dyn SubAgent,
 ) -> Result<StopHookResult> {
-    // Bypass the stop hook during repo critique
-    if config.repo_critique_mode {
-        return Ok(StopHookResult::allow());
-    }
-
     // Parse transcript if available
     let transcript_info = input
         .transcript_path
@@ -693,17 +686,6 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
         assert_eq!(result.exit_code, 0);
-    }
-
-    #[test]
-    fn test_run_stop_hook_repo_critique_mode_bypasses() {
-        let runner = MockCommandRunner::new(); // No expectations - shouldn't be called
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { repo_critique_mode: true, ..Default::default() };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
     }
 
     fn mock_uncommitted_changes() -> MockCommandRunner {
