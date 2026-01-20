@@ -1,4 +1,5 @@
 git_repo: true
-beads_installed: false
+beads_installed: true
+check_command: just check
 code_review_section: true
 require_push: true
