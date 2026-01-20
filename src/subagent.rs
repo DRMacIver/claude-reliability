@@ -187,7 +187,7 @@ impl SubAgent for RealSubAgent<'_> {
 
         let output = self.runner.run(
             self.claude_cmd(),
-            &["-p", &prompt, "--model", "haiku", "--output-format", "json"],
+            &["--print", "--model", "haiku", "-p", &prompt],
             Some(REFLECTION_TIMEOUT),
         )?;
 
