@@ -173,7 +173,10 @@ impl ProjectConfig {
         let check_command = detect_check_command(runner, base_dir);
         let code_review_section = has_code_review_section(base_dir);
 
-        Self { git_repo, beads_installed, check_command, code_review_section, require_push: true }
+        // Only require push if there's a remote configured
+        let require_push = git_repo && has_git_remote(runner);
+
+        Self { git_repo, beads_installed, check_command, code_review_section, require_push }
     }
 
     /// Get the config file path for a base directory.
@@ -204,6 +207,19 @@ fn detect_check_command(runner: &dyn CommandRunner, base_dir: &Path) -> Option<S
         Some("just check".to_string())
     } else {
         None
+    }
+}
+
+/// Check if there's a git remote configured.
+///
+/// This is used to determine whether to require pushing before exit.
+/// If there's no remote, there's nowhere to push.
+fn has_git_remote(runner: &dyn CommandRunner) -> bool {
+    // List remotes - if any exist, we have a remote
+    let output = runner.run("git", &["remote"], None);
+    match output {
+        Ok(out) if out.success() => !out.stdout.trim().is_empty(),
+        _ => false,
     }
 }
 
@@ -635,12 +651,23 @@ mod tests {
 
     #[test]
     fn test_project_config_detect_with_git() {
+        use crate::traits::CommandOutput;
+
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        let runner = MockCommandRunner::new();
+        let mut runner = MockCommandRunner::new();
+        // Mock git remote returning empty (no remote configured)
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
 
         let config = ProjectConfig::detect_in(&runner, dir.path());
         assert!(config.git_repo);
+        // No remote, so require_push should be false
+        assert!(!config.require_push);
+        runner.verify();
     }
 
     #[test]
@@ -771,11 +798,19 @@ mod tests {
 
     #[test]
     fn test_ensure_config_creates_new() {
+        use crate::traits::CommandOutput;
+
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".git")).unwrap();
 
         let mut runner = MockCommandRunner::new();
         runner.set_available("bd");
+        // Mock git remote returning empty (no remote configured)
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
 
         let config = ensure_config_in(&runner, dir.path()).unwrap();
 
@@ -784,6 +819,7 @@ mod tests {
 
         // Verify file was created
         assert!(dir.path().join(CONFIG_FILE_PATH).exists());
+        runner.verify();
     }
 
     #[test]
@@ -820,6 +856,7 @@ mod tests {
 
     #[test]
     fn test_ensure_config_auto_commits_in_git_repo() {
+        use crate::traits::CommandOutput;
         use std::process::Command;
 
         let dir = TempDir::new().unwrap();
@@ -843,7 +880,13 @@ mod tests {
         Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
         Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
 
-        let runner = MockCommandRunner::new();
+        let mut runner = MockCommandRunner::new();
+        // Mock git remote returning empty (no remote configured in fresh repo)
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
 
         // This should create the config AND auto-commit it
         let config = ensure_config_in(&runner, base).unwrap();
@@ -872,6 +915,7 @@ mod tests {
             log_output.contains("claude-reliability"),
             "Expected commit messages to contain 'claude-reliability', got: {log_output}"
         );
+        runner.verify();
     }
 
     #[test]

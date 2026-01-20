@@ -376,19 +376,26 @@ fn handle_uncommitted_changes(
         result.messages.push(String::new());
     }
 
-    // Instructions
+    // Instructions - dynamically number steps based on what's enabled
     result.messages.push("Before stopping, please:".to_string());
     result.messages.push(String::new());
+    let mut step = 1;
     result
         .messages
-        .push("1. Run `git status` to check for files that should be gitignored".to_string());
+        .push(format!("{step}. Run `git status` to check for files that should be gitignored"));
+    step += 1;
     if config.quality_check_enabled {
-        result.messages.push("2. Run quality checks to verify they pass".to_string());
+        result.messages.push(format!("{step}. Run quality checks to verify they pass"));
+        step += 1;
     }
-    result.messages.push("3. Stage your changes: `git add <files>`".to_string());
-    result.messages.push("4. Commit with a descriptive message: `git commit -m '...'`".to_string());
+    result.messages.push(format!("{step}. Stage your changes: `git add <files>`"));
+    step += 1;
+    result
+        .messages
+        .push(format!("{step}. Commit with a descriptive message: `git commit -m '...'`"));
+    step += 1;
     if config.require_push {
-        result.messages.push("5. Push to remote: `git push`".to_string());
+        result.messages.push(format!("{step}. Push to remote: `git push`"));
         result.messages.push(String::new());
         result.messages.push("Work is incomplete until `git push` succeeds.".to_string());
     }
@@ -860,7 +867,8 @@ mod tests {
         let runner = mock_clean_git();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
