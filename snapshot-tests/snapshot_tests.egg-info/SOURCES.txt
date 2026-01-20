@@ -1,0 +1,17 @@
+pyproject.toml
+snapshot_tests/__init__.py
+snapshot_tests/commit_tracker.py
+snapshot_tests/compile_transcript.py
+snapshot_tests/fake_claude.py
+snapshot_tests/placeholder.py
+snapshot_tests/plugin_setup.py
+snapshot_tests/pty_runner.py
+snapshot_tests/run_snapshots.py
+snapshot_tests/simulator.py
+snapshot_tests/transcript.py
+snapshot_tests.egg-info/PKG-INFO
+snapshot_tests.egg-info/SOURCES.txt
+snapshot_tests.egg-info/dependency_links.txt
+snapshot_tests.egg-info/entry_points.txt
+snapshot_tests.egg-info/requires.txt
+snapshot_tests.egg-info/top_level.txt

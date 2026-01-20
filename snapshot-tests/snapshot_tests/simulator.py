@@ -44,6 +44,73 @@ def filter_infrastructure_paths(text: str) -> str:
     return "\n".join(sorted(filtered))  # Sort for consistent comparison
 
 
+def normalize_bash_output(text: str) -> str:
+    """Normalize Bash output that varies between runs.
+
+    Handles:
+    - ls -la timestamps: "Jan 20 13:19" -> "<timestamp>"
+    - ISO timestamps: "2026-01-20T13:19:00" -> "<timestamp>"
+    - Cargo timing: "in 0.25s" -> "in <time>"
+    - Cargo binary hashes: "rust_utils-878eb25838ec6d42" -> "rust_utils-<hash>"
+    - Cargo coverage hashes: "rust_utils-c39e1837dc782f1a" -> "rust_utils-<hash>"
+    """
+    # ls -la timestamp: "Jan 20 13:19" or "Jan  1 09:00"
+    text = re.sub(
+        r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{1,2}:\d{2}',
+        '<timestamp>',
+        text
+    )
+    # ISO timestamp in output
+    text = re.sub(
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}',
+        '<timestamp>',
+        text
+    )
+    # Cargo compilation/test timing: "in 0.25s" or "in 1.23s"
+    text = re.sub(
+        r'in \d+\.\d+s',
+        'in <time>',
+        text
+    )
+    # Cargo binary hashes in test output paths (varies in length)
+    text = re.sub(
+        r'(rust_utils|deps/[a-z_]+)-[0-9a-f]{8,16}',
+        r'\1-<hash>',
+        text
+    )
+    # Doc test line numbers: "(line 15)" -> "(line <n>)"
+    text = re.sub(
+        r'\(line \d+\)',
+        '(line <n>)',
+        text
+    )
+    # Normalize test result order by sorting test lines
+    # Lines like "test foo::bar ... ok" should be sorted for comparison
+    lines = text.split('\n')
+    test_lines = []
+    other_lines = []
+    for line in lines:
+        if line.strip().startswith('test ') and ' ... ' in line:
+            test_lines.append(line)
+        else:
+            other_lines.append(line)
+    # If there are test lines, sort them and reconstruct
+    if test_lines:
+        test_lines.sort()
+        # Find where test lines start and reconstruct
+        result_lines = []
+        test_inserted = False
+        for line in lines:
+            if line.strip().startswith('test ') and ' ... ' in line:
+                if not test_inserted:
+                    result_lines.extend(test_lines)
+                    test_inserted = True
+            else:
+                result_lines.append(line)
+        text = '\n'.join(result_lines)
+    return text
+
+
 def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
     """Normalize text for lenient comparison.
 
@@ -52,6 +119,7 @@ def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
     - Normalizes line endings
     - For Glob: filters out .venv paths
     - For Edit: normalizes output format
+    - For Bash: normalizes timestamps
 
     Note: Git SHA normalization is handled separately via normalize_git_output()
     which needs both expected and actual to properly canonicalize placeholders.
@@ -62,12 +130,25 @@ def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
     if tool_name == "Glob":
         text = filter_infrastructure_paths(text)
 
-    # For Edit outputs, just check for success indicator
+    # For Edit outputs, normalize to success/error categories
+    # We can't perfectly replicate Claude Code's read-tracking behavior,
+    # so we normalize outputs to comparable categories
     if tool_name == "Edit":
-        # Normalize different edit output formats to a common form
+        if "<tool_use_error>" in text:
+            return "edit_error"
         if "has been updated" in text.lower() or "edited file" in text.lower():
-            # Extract just the file path for comparison
             return "edit_success"
+
+    # For Write outputs, normalize to success/error categories
+    if tool_name == "Write":
+        if "<tool_use_error>" in text:
+            return "write_error"
+        if "file created successfully" in text.lower() or "has been updated" in text.lower():
+            return "write_success"
+
+    # For Bash outputs, normalize variable content
+    if tool_name == "Bash":
+        text = normalize_bash_output(text)
 
     lines = [line.rstrip() for line in text.splitlines()]
     return "\n".join(lines).strip()
@@ -100,6 +181,17 @@ class ToolSimulator:
     cwd: Path = field(default_factory=Path.cwd)
     dry_run: bool = False
     path_mappings: dict[str, str] = field(default_factory=dict)
+    # Track files that have been read (for enforcing read-before-write)
+    # This should be reset between conversation turns to match Claude Code behavior
+    files_read: set[str] = field(default_factory=set)
+
+    def reset_read_state(self) -> None:
+        """Reset the read tracking state.
+
+        Claude Code tracks which files have been read within a single turn.
+        Call this between turns to match that behavior.
+        """
+        self.files_read.clear()
 
     def substitute_paths(self, text: str) -> str:
         """Substitute old paths with new paths in text.
@@ -246,7 +338,10 @@ class ToolSimulator:
         return output.rstrip()
 
     def _handle_write(self, tool_input: dict[str, Any]) -> str:
-        """Write content to a file."""
+        """Write content to a file.
+
+        Enforces read-before-write for existing files, matching Claude Code behavior.
+        """
         file_path = tool_input.get("file_path", "")
         content = tool_input.get("content", "")
 
@@ -257,9 +352,16 @@ class ToolSimulator:
         if not path.is_absolute():
             path = self.cwd / path
 
+        # Claude Code enforces read-before-write for existing files
+        file_exists = path.exists()
+        if file_exists and str(path) not in self.files_read:
+            return "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
+
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
+        if file_exists:
+            return f"The file {file_path} has been updated successfully."
         return f"File created successfully at: {file_path}"
 
     def _handle_read(self, tool_input: dict[str, Any]) -> str:
@@ -280,6 +382,9 @@ class ToolSimulator:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
+        # Track that this file has been read (for read-before-write enforcement)
+        self.files_read.add(str(path))
+
         content = path.read_text(encoding="utf-8")
         # Use split('\n') to match Claude Code's behavior with trailing newlines
         lines = content.split('\n')
@@ -295,7 +400,10 @@ class ToolSimulator:
         return "\n".join(result_lines)
 
     def _handle_edit(self, tool_input: dict[str, Any]) -> str:
-        """Edit a file by replacing text."""
+        """Edit a file by replacing text.
+
+        Enforces read-before-edit, matching Claude Code behavior.
+        """
         file_path = tool_input.get("file_path", "")
         old_string = tool_input.get("old_string", "")
         new_string = tool_input.get("new_string", "")
@@ -310,6 +418,10 @@ class ToolSimulator:
 
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Claude Code enforces read-before-edit
+        if str(path) not in self.files_read:
+            return "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>"
 
         content = path.read_text()
 

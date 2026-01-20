@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: snapshot-tests
+Version: 0.1.0
+Summary: Snapshot testing infrastructure for claude-reliability hooks
+Requires-Python: >=3.11
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: pexpect>=4.9

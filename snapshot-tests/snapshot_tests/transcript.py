@@ -206,17 +206,21 @@ def parse_transcript(path: Path) -> list[TranscriptEntry]:
     return entries
 
 
-def extract_tool_calls(transcript: list[TranscriptEntry]) -> list[tuple[ToolUse, ToolResult | None]]:
-    """Extract tool use/result pairs from a transcript.
+def extract_tool_calls(
+    transcript: list[TranscriptEntry],
+) -> list[tuple[ToolUse, ToolResult | None, bool]]:
+    """Extract tool use/result pairs from a transcript with entry boundaries.
 
-    Returns pairs of (ToolUse, ToolResult) where ToolResult may be None
-    if the result wasn't captured.
+    Returns tuples of (ToolUse, ToolResult, is_new_entry) where:
+    - ToolResult may be None if the result wasn't captured
+    - is_new_entry is True for the first tool call in each entry (used to
+      reset read state between turns, matching Claude Code behavior)
 
     Args:
         transcript: Parsed transcript entries
 
     Returns:
-        List of (tool_use, tool_result) tuples
+        List of (tool_use, tool_result, is_new_entry) tuples
     """
     # Build a map of tool_use_id -> ToolResult
     results_by_id: dict[str, ToolResult] = {}
@@ -224,12 +228,14 @@ def extract_tool_calls(transcript: list[TranscriptEntry]) -> list[tuple[ToolUse,
         for result in entry.tool_results:
             results_by_id[result.tool_use_id] = result
 
-    # Collect all tool uses with their results
-    pairs: list[tuple[ToolUse, ToolResult | None]] = []
+    # Collect all tool uses with their results and entry boundary markers
+    pairs: list[tuple[ToolUse, ToolResult | None, bool]] = []
     for entry in transcript:
-        for tool_use in entry.tool_uses:
+        tool_uses = entry.tool_uses
+        for i, tool_use in enumerate(tool_uses):
             result = results_by_id.get(tool_use.id)
-            pairs.append((tool_use, result))
+            is_new_entry = i == 0  # First tool call in this entry
+            pairs.append((tool_use, result, is_new_entry))
 
     return pairs
 

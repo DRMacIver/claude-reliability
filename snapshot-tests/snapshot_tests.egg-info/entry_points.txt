@@ -1,0 +1,3 @@
+[console_scripts]
+compile-transcript = snapshot_tests.compile_transcript:main
+run-snapshots = snapshot_tests.run_snapshots:main

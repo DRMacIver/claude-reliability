@@ -10,6 +10,35 @@ just format          # Format code
 just check           # Run all checks
 ```
 
+## Snapshot Testing
+
+The `snapshot-tests/` directory contains infrastructure for testing Claude Code behavior by recording and replaying tool call transcripts. See [snapshot-tests/SNAPSHOT_TESTING.md](snapshot-tests/SNAPSHOT_TESTING.md) for full documentation.
+
+### Quick Reference
+
+```bash
+cd snapshot-tests
+
+# Run all tests in replay mode (default)
+python -m snapshot_tests.run_snapshots
+
+# Run specific test with verbose output
+python -m snapshot_tests.run_snapshots --verbose my-test
+
+# Record a new transcript (runs Claude Code)
+python -m snapshot_tests.run_snapshots --mode=record my-test
+
+# Save directory snapshot from successful replay
+python -m snapshot_tests.run_snapshots --save-snapshot my-test
+```
+
+### Key Concepts
+
+- **Replay mode**: Executes recorded tool calls without running Claude Code
+- **Directory snapshot**: Verifies Write/Edit produce byte-wise identical files
+- **Post-conditions**: Custom verification scripts for test success criteria
+- **Output normalization**: Handles timestamps, hashes, and other variable content
+
 ## Quality Standards
 
 - All code must have tests

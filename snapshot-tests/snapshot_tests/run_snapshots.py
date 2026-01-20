@@ -22,6 +22,7 @@ Each test is a directory under tests/ containing:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,144 @@ from snapshot_tests.simulator import ToolSimulator
 from snapshot_tests.compile_transcript import compile_transcript
 from snapshot_tests.plugin_setup import install_plugin
 from snapshot_tests.pty_runner import run_claude_pty
+
+
+# Patterns for paths to exclude from directory snapshots
+SNAPSHOT_EXCLUDE_PATTERNS = {
+    ".git",
+    ".venv",
+    ".claude",
+    "__pycache__",
+    ".pyc",
+    ".pyo",
+    "target",  # Rust build directory
+    "Cargo.lock",  # Varies between builds
+}
+
+
+def should_exclude_path(path: Path) -> bool:
+    """Check if a path should be excluded from directory snapshot.
+
+    Args:
+        path: Path to check (relative to project root)
+
+    Returns:
+        True if the path should be excluded
+    """
+    parts = path.parts
+    for pattern in SNAPSHOT_EXCLUDE_PATTERNS:
+        if pattern in parts:
+            return True
+        # Check for file extension patterns
+        if pattern.startswith(".") and str(path).endswith(pattern):
+            return True
+    return False
+
+
+def capture_directory_snapshot(root_dir: Path) -> dict[str, str]:
+    """Capture a snapshot of all files in a directory.
+
+    Args:
+        root_dir: Directory to snapshot
+
+    Returns:
+        Dictionary mapping relative file paths to content hashes (SHA256)
+    """
+    snapshot = {}
+
+    for file_path in root_dir.rglob("*"):
+        if not file_path.is_file():
+            continue
+
+        rel_path = file_path.relative_to(root_dir)
+        if should_exclude_path(rel_path):
+            continue
+
+        try:
+            content = file_path.read_bytes()
+            content_hash = hashlib.sha256(content).hexdigest()
+            snapshot[str(rel_path)] = content_hash
+        except (PermissionError, OSError):
+            # Skip files we can't read
+            continue
+
+    return snapshot
+
+
+def compare_directory_snapshots(
+    expected: dict[str, str],
+    actual: dict[str, str],
+    root_dir: Path,
+) -> list[str]:
+    """Compare two directory snapshots and report differences.
+
+    Args:
+        expected: Expected file hashes from recorded snapshot
+        actual: Actual file hashes from current directory
+        root_dir: Root directory (for reporting file content on mismatch)
+
+    Returns:
+        List of difference descriptions (empty if identical)
+    """
+    differences = []
+
+    # Check for files in expected but not in actual (deleted)
+    for path in expected:
+        if path not in actual:
+            differences.append(f"Missing file: {path}")
+
+    # Check for files in actual but not in expected (created)
+    for path in actual:
+        if path not in expected:
+            differences.append(f"Unexpected file: {path}")
+
+    # Check for files with different content
+    for path in expected:
+        if path in actual and expected[path] != actual[path]:
+            # Try to show diff if it's a text file
+            file_path = root_dir / path
+            try:
+                actual_content = file_path.read_text()
+                differences.append(
+                    f"Content mismatch: {path}\n"
+                    f"  Expected hash: {expected[path]}\n"
+                    f"  Actual hash: {actual[path]}\n"
+                    f"  First 200 chars: {actual_content[:200]}"
+                )
+            except (UnicodeDecodeError, OSError):
+                differences.append(
+                    f"Content mismatch (binary): {path}\n"
+                    f"  Expected hash: {expected[path]}\n"
+                    f"  Actual hash: {actual[path]}"
+                )
+
+    return differences
+
+
+def save_directory_snapshot(snapshot: dict[str, str], snapshot_path: Path) -> None:
+    """Save a directory snapshot to a JSON file.
+
+    Args:
+        snapshot: Directory snapshot to save
+        snapshot_path: Path to save the snapshot
+    """
+    # Sort keys for deterministic output
+    sorted_snapshot = dict(sorted(snapshot.items()))
+    snapshot_path.write_text(json.dumps(sorted_snapshot, indent=2) + "\n")
+
+
+def load_directory_snapshot(snapshot_path: Path) -> dict[str, str] | None:
+    """Load a directory snapshot from a JSON file.
+
+    Args:
+        snapshot_path: Path to the snapshot file
+
+    Returns:
+        Directory snapshot or None if file doesn't exist
+    """
+    if not snapshot_path.exists():
+        return None
+    return json.loads(snapshot_path.read_text())
 
 
 @dataclass
@@ -248,6 +387,7 @@ def run_replay(
     venv_dir: Path,
     home_dir: Path,
     verbose: bool = False,
+    save_snapshot: bool = False,
 ) -> TestResult:
     """Run a test in replay mode.
 
@@ -295,7 +435,10 @@ def run_replay(
     # Track true errors (execution failures) separately from mismatches (different output)
     execution_errors = []
     mismatches = []
-    for i, (tool_use, expected_result) in enumerate(tool_calls):
+    for i, (tool_use, expected_result, _is_new_entry) in enumerate(tool_calls):
+        # Note: We track reads at session level, not per-entry, based on observed
+        # Claude Code behavior (tool 20 succeeded after tool 19 in different entries)
+
         if verbose:
             print(f"  [{i+1}/{len(tool_calls)}] {tool_use.name}: {_summarize_input(tool_use)}")
 
@@ -330,6 +473,33 @@ def run_replay(
             passed=False,
             error="\n".join(execution_errors),
         )
+
+    # Compare directory snapshot to ensure file states are byte-wise identical
+    snapshot_path = test.test_dir / "directory-snapshot.json"
+    expected_snapshot = load_directory_snapshot(snapshot_path)
+    actual_snapshot = capture_directory_snapshot(temp_dir)
+
+    if expected_snapshot:
+        snapshot_diffs = compare_directory_snapshots(
+            expected_snapshot, actual_snapshot, temp_dir
+        )
+        if snapshot_diffs:
+            # File state differences are errors - Write/Edit must produce identical files
+            return TestResult(
+                name=test.name,
+                passed=False,
+                error="Directory state mismatch (Write/Edit produced different files):\n"
+                + "\n".join(snapshot_diffs[:5]),  # Limit to first 5 diffs
+            )
+        if verbose:
+            print(f"  Directory snapshot verified ({len(actual_snapshot)} files match)")
+    elif save_snapshot:
+        # Bootstrap: save snapshot from successful replay
+        save_directory_snapshot(actual_snapshot, snapshot_path)
+        if verbose:
+            print(f"  Saved directory snapshot ({len(actual_snapshot)} files)")
+    elif verbose:
+        print("  No directory snapshot to compare (use --save-snapshot to create)")
 
     # Get virtualenv environment with isolated HOME
     env = get_venv_env(venv_dir, home_dir)
@@ -503,6 +673,14 @@ def run_record(
             error=f"Transcript not found for session {session_id}",
         )
 
+    # Capture directory snapshot for replay verification
+    # This ensures Write/Edit operations produce byte-wise identical files
+    snapshot = capture_directory_snapshot(temp_dir)
+    snapshot_path = test.test_dir / "directory-snapshot.json"
+    save_directory_snapshot(snapshot, snapshot_path)
+    if verbose:
+        print(f"  Saved directory snapshot ({len(snapshot)} files)")
+
     # Get virtualenv environment with isolated HOME
     env = get_venv_env(venv_dir, home_dir)
 
@@ -547,6 +725,7 @@ def run_test(
     mode: str,
     project_dir: Path,
     verbose: bool = False,
+    save_snapshot: bool = False,
 ) -> TestResult:
     """Run a single test.
 
@@ -574,7 +753,7 @@ def run_test(
             setup_test_environment(temp_dir, test, project_dir, venv_dir, home_dir)
 
             if mode == "replay":
-                return run_replay(temp_dir, test, project_dir, venv_dir, home_dir, verbose)
+                return run_replay(temp_dir, test, project_dir, venv_dir, home_dir, verbose, save_snapshot)
             elif mode == "record":
                 return run_record(temp_dir, test, project_dir, venv_dir, home_dir, verbose)
             else:
@@ -655,6 +834,11 @@ def main():
         default=None,
         help="Directory containing tests (default: tests/)",
     )
+    parser.add_argument(
+        "--save-snapshot",
+        action="store_true",
+        help="Save directory snapshot from replay (for bootstrapping)",
+    )
 
     args = parser.parse_args()
 
@@ -684,7 +868,7 @@ def main():
     for test in tests:
         print(f"Test: {test.name}")
 
-        result = run_test(test, args.mode, project_dir, args.verbose)
+        result = run_test(test, args.mode, project_dir, args.verbose, args.save_snapshot)
         results.append(result)
 
         if result.passed:
