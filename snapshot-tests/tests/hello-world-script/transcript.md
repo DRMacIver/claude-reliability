@@ -25,4 +25,4 @@ chmod +x $CLAUDE_PROJECT_DIR/hello.sh && $CLAUDE_PROJECT_DIR/hello.sh
 Hello world
 ```
 
-**Assistant:** Done. I created `hello.sh` with a simple script that prints "Hello world" and ran it successfully.
+**Assistant:** Done. I created `hello.sh` and ran it successfully, outputting "Hello world".

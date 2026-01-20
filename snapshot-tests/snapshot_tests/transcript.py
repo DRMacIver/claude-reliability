@@ -234,6 +234,24 @@ def extract_tool_calls(transcript: list[TranscriptEntry]) -> list[tuple[ToolUse,
     return pairs
 
 
+def get_project_directory(transcript: list[TranscriptEntry]) -> str | None:
+    """Extract the original project directory from transcript.
+
+    Looks for the 'cwd' field in transcript entries which indicates
+    the working directory when the session was recorded.
+
+    Args:
+        transcript: Parsed transcript entries
+
+    Returns:
+        The original project directory path, or None if not found
+    """
+    for entry in transcript:
+        if cwd := entry.raw.get("cwd"):
+            return cwd
+    return None
+
+
 def filter_by_role(transcript: list[TranscriptEntry], role: str) -> list[TranscriptEntry]:
     """Filter transcript entries by role (user, assistant, system)."""
     return [e for e in transcript if e.role == role]

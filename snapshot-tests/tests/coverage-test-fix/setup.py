@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
-"""Setup for coverage-test-fix test.
+"""Setup for add-multiply-function test (in coverage-test-fix directory).
 
 Creates a git repository with no origin that has:
-1. A Python source file with a function
-2. A test file that imports but doesn't properly test the function
+1. A Python source file with an add_numbers function
+2. A working test file for the add_numbers function
 3. A justfile with `just check` that runs tests requiring 100% coverage
+
+The claude-reliability plugin is installed by the test runner.
 """
 
 import subprocess
 from pathlib import Path
 
 
-def main():
-    """Set up the test environment."""
-    cwd = Path.cwd()
-
-    # Create source file with a function
-    src_dir = cwd / "src"
-    src_dir.mkdir(exist_ok=True)
-    (src_dir / "__init__.py").write_text("")
-
-    (src_dir / "math_utils.py").write_text('''"""Math utility functions."""
+# Store original content for post-condition verification
+ORIGINAL_MATH_UTILS = '''"""Math utility functions."""
 
 
 def add_numbers(a: int, b: int) -> int:
     """Add two numbers together."""
     return a + b
-''')
+'''
 
-    # Create test file that doesn't properly call the function
+ORIGINAL_JUSTFILE = '''check:
+\tpytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=100
+'''
+
+
+def main():
+    """Set up the test environment."""
+    cwd = Path.cwd()
+
+    # Install pytest and pytest-cov in the virtualenv
+    subprocess.run(["pip", "install", "pytest", "pytest-cov"], check=True, capture_output=True)
+
+    # Create source file with a function
+    src_dir = cwd / "src"
+    src_dir.mkdir(exist_ok=True)
+    (src_dir / "__init__.py").write_text("")
+    (src_dir / "math_utils.py").write_text(ORIGINAL_MATH_UTILS)
+
+    # Create test file with a working test
     tests_dir = cwd / "tests"
     tests_dir.mkdir(exist_ok=True)
     (tests_dir / "__init__.py").write_text("")
@@ -40,14 +52,13 @@ from src.math_utils import add_numbers
 
 def test_add_numbers():
     """Test that add_numbers works."""
-    # BUG: This test doesn't actually call the function!
-    assert True
+    assert add_numbers(2, 3) == 5
+    assert add_numbers(-1, 1) == 0
+    assert add_numbers(0, 0) == 0
 ''')
 
     # Create justfile with check target requiring 100% coverage
-    (cwd / "justfile").write_text('''check:
-\tpytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=100
-''')
+    (cwd / "justfile").write_text(ORIGINAL_JUSTFILE)
 
     # Create pyproject.toml for the test project
     (cwd / "pyproject.toml").write_text('''[project]

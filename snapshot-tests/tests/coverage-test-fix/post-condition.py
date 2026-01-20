@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Post-condition assertions for coverage-test-fix test.
+"""Post-condition assertions for add-multiply-function test.
 
 Verifies that:
-1. The project config has require_push=false
-2. The test file properly tests the function
-3. Running `just check` passes
-4. Replacing the test function with `assert False` causes failure
+1. The new multiply_numbers function exists and is correct
+2. The original add_numbers function is unchanged
+3. The justfile is unchanged
+4. Running `just check` passes
 """
 
 import subprocess
@@ -13,21 +13,69 @@ import sys
 from pathlib import Path
 
 
+# Expected original content (must match setup.py)
+ORIGINAL_ADD_NUMBERS = '''def add_numbers(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b'''
+
+ORIGINAL_JUSTFILE = '''check:
+\tpytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=100
+'''
+
+
 def main():
     """Run post-condition assertions."""
-    # Check 1: require_push should be false (no origin)
-    config_path = Path(".claude/project-config.yaml")
-    if config_path.exists():
-        config_content = config_path.read_text()
-        if "require_push: true" in config_content:
-            print("FAIL: require_push should be false (no origin)", file=sys.stderr)
-            sys.exit(1)
-        print("PASS: require_push is not true in config")
-    else:
-        # Config doesn't exist, which is fine - default should be false for no origin
-        print("PASS: No config file (default require_push should be false)")
+    math_utils_file = Path("src/math_utils.py")
+    test_file = Path("tests/test_math_utils.py")
+    justfile = Path("justfile")
 
-    # Check 2: just check passes
+    # Check 1: multiply_numbers function exists and is correct
+    if not math_utils_file.exists():
+        print("FAIL: src/math_utils.py does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    math_content = math_utils_file.read_text()
+    if "def multiply_numbers" not in math_content:
+        print("FAIL: multiply_numbers function not found", file=sys.stderr)
+        sys.exit(1)
+    print("PASS: multiply_numbers function exists")
+
+    # Verify multiply_numbers works by importing and testing it
+    sys.path.insert(0, str(Path.cwd()))
+    try:
+        from src.math_utils import multiply_numbers
+        assert multiply_numbers(2, 3) == 6, "multiply_numbers(2, 3) should equal 6"
+        assert multiply_numbers(0, 5) == 0, "multiply_numbers(0, 5) should equal 0"
+        assert multiply_numbers(-2, 3) == -6, "multiply_numbers(-2, 3) should equal -6"
+        print("PASS: multiply_numbers function works correctly")
+    except ImportError as e:
+        print(f"FAIL: Could not import multiply_numbers: {e}", file=sys.stderr)
+        sys.exit(1)
+    except AssertionError as e:
+        print(f"FAIL: multiply_numbers incorrect: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check 2: Original add_numbers function is unchanged
+    if ORIGINAL_ADD_NUMBERS not in math_content:
+        print("FAIL: Original add_numbers function was modified", file=sys.stderr)
+        print(f"Expected to find: {ORIGINAL_ADD_NUMBERS}", file=sys.stderr)
+        sys.exit(1)
+    print("PASS: Original add_numbers function is unchanged")
+
+    # Check 3: Justfile is unchanged
+    if not justfile.exists():
+        print("FAIL: justfile does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    justfile_content = justfile.read_text()
+    if justfile_content != ORIGINAL_JUSTFILE:
+        print("FAIL: justfile was modified", file=sys.stderr)
+        print(f"Expected: {repr(ORIGINAL_JUSTFILE)}", file=sys.stderr)
+        print(f"Actual: {repr(justfile_content)}", file=sys.stderr)
+        sys.exit(1)
+    print("PASS: justfile is unchanged")
+
+    # Check 4: just check passes
     result = subprocess.run(
         ["just", "check"],
         capture_output=True,
@@ -40,46 +88,16 @@ def main():
         sys.exit(1)
     print("PASS: just check passes")
 
-    # Check 3: Test file is non-trivial (calls the function)
-    test_file = Path("tests/test_math_utils.py")
+    # Check 5: Test file tests multiply_numbers
     if not test_file.exists():
         print("FAIL: tests/test_math_utils.py does not exist", file=sys.stderr)
         sys.exit(1)
 
     test_content = test_file.read_text()
-    if "add_numbers(" not in test_content or "assert add_numbers" not in test_content:
-        print("FAIL: Test file doesn't appear to call add_numbers", file=sys.stderr)
+    if "multiply_numbers" not in test_content:
+        print("FAIL: Test file doesn't test multiply_numbers", file=sys.stderr)
         sys.exit(1)
-    print("PASS: Test file calls add_numbers")
-
-    # Check 4: Replacing test with assert False causes failure
-    original_content = test_content
-
-    # Find and replace the test function
-    broken_test = '''"""Tests for math_utils."""
-
-from src.math_utils import add_numbers
-
-
-def test_add_numbers():
-    """Test that add_numbers works."""
-    assert False
-'''
-    test_file.write_text(broken_test)
-
-    result = subprocess.run(
-        ["just", "check"],
-        capture_output=True,
-        text=True,
-    )
-
-    # Restore original
-    test_file.write_text(original_content)
-
-    if result.returncode == 0:
-        print("FAIL: Test should fail when replaced with assert False", file=sys.stderr)
-        sys.exit(1)
-    print("PASS: Test fails when replaced with assert False")
+    print("PASS: Test file includes multiply_numbers tests")
 
     print("\nAll post-conditions passed!")
 

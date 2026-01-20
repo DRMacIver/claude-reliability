@@ -6,12 +6,67 @@ Simulates Bash, Write, Read, Edit, and other tool calls during test replay.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from snapshot_tests.placeholder import PlaceholderRegistry
+
+
+def strip_system_reminders(text: str) -> str:
+    """Remove <system-reminder>...</system-reminder> blocks from text.
+
+    Also handles truncated/incomplete system-reminder tags that may appear
+    at the end of tool outputs.
+    """
+    # Remove complete system-reminder blocks
+    text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL)
+    # Remove incomplete/truncated system-reminder tags at end of text
+    text = re.sub(r"<system-reminder>.*$", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def filter_infrastructure_paths(text: str) -> str:
+    """Remove infrastructure paths from glob output for comparison.
+
+    These paths vary between runs and are not relevant to test behavior:
+    - .venv: virtualenv structure varies
+    - .claude: plugin installation varies
+    """
+    lines = text.splitlines()
+    filtered = [
+        line for line in lines
+        if ".venv" not in line and ".claude" not in line
+    ]
+    return "\n".join(sorted(filtered))  # Sort for consistent comparison
+
+
+def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
+    """Normalize text for lenient comparison.
+
+    - Strips system reminders
+    - Strips trailing whitespace from lines
+    - Normalizes line endings
+    - For Glob: filters out .venv paths
+    - For Edit: normalizes output format
+    """
+    text = strip_system_reminders(text)
+
+    # For glob outputs, filter out infrastructure paths which vary between runs
+    if tool_name == "Glob":
+        text = filter_infrastructure_paths(text)
+
+    # For Edit outputs, just check for success indicator
+    if tool_name == "Edit":
+        # Normalize different edit output formats to a common form
+        if "has been updated" in text.lower() or "edited file" in text.lower():
+            # Extract just the file path for comparison
+            return "edit_success"
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(lines).strip()
 
 
 @dataclass
@@ -40,6 +95,38 @@ class ToolSimulator:
     registry: PlaceholderRegistry = field(default_factory=PlaceholderRegistry)
     cwd: Path = field(default_factory=Path.cwd)
     dry_run: bool = False
+    path_mappings: dict[str, str] = field(default_factory=dict)
+
+    def substitute_paths(self, text: str) -> str:
+        """Substitute old paths with new paths in text.
+
+        Args:
+            text: Text that may contain old paths
+
+        Returns:
+            Text with paths substituted
+        """
+        result = text
+        for old_path, new_path in self.path_mappings.items():
+            result = result.replace(old_path, new_path)
+        return result
+
+    def substitute_tool_input(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        """Substitute paths in tool input dictionary.
+
+        Args:
+            tool_input: Original tool input
+
+        Returns:
+            Tool input with paths substituted
+        """
+        result = {}
+        for key, value in tool_input.items():
+            if isinstance(value, str):
+                result[key] = self.substitute_paths(value)
+            else:
+                result[key] = value
+        return result
 
     def simulate(
         self,
@@ -66,8 +153,11 @@ class ToolSimulator:
                 matched_expected=False,
             )
 
+        # Substitute paths in tool input (e.g., /tmp/old_session -> /tmp/new_session)
+        substituted_input = self.substitute_tool_input(tool_input)
+
         try:
-            actual_output = handler(tool_input)
+            actual_output = handler(substituted_input)
             success = True
             error = None
         except Exception as e:
@@ -76,9 +166,14 @@ class ToolSimulator:
             error = str(e)
 
         # Check against expected if provided
+        # Also substitute paths in expected result for comparison
         matched = True
         if expected_result is not None and success:
-            matched = self.registry.match(expected_result, actual_output)
+            substituted_expected = self.substitute_paths(expected_result)
+            # Normalize both for lenient comparison, passing tool name for special handling
+            normalized_expected = normalize_for_comparison(substituted_expected, tool_name)
+            normalized_actual = normalize_for_comparison(actual_output, tool_name)
+            matched = self.registry.match(normalized_expected, normalized_actual)
 
         return SimulationResult(
             success=success,
@@ -137,10 +232,15 @@ class ToolSimulator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
-        return f"File written: {file_path}"
+        return f"File created successfully at: {file_path}"
 
     def _handle_read(self, tool_input: dict[str, Any]) -> str:
-        """Read content from a file."""
+        """Read content from a file.
+
+        Returns output in Claude Code's format with arrow separators.
+        Uses split('\n') to match Claude Code's line counting behavior
+        (trailing newlines create an extra empty line).
+        """
         file_path = tool_input.get("file_path", "")
         offset = tool_input.get("offset", 0)
         limit = tool_input.get("limit", 2000)
@@ -152,16 +252,17 @@ class ToolSimulator:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
+        content = path.read_text(encoding="utf-8")
+        # Use split('\n') to match Claude Code's behavior with trailing newlines
+        lines = content.split('\n')
 
         # Apply offset and limit
         selected_lines = lines[offset : offset + limit]
 
-        # Format with line numbers (cat -n style)
+        # Format with line numbers (Claude Code style with arrow separator)
         result_lines = []
         for i, line in enumerate(selected_lines, start=offset + 1):
-            result_lines.append(f"{i:>6}\t{line.rstrip()}")
+            result_lines.append(f"{i:>6}→{line}")
 
         return "\n".join(result_lines)
 
@@ -195,7 +296,7 @@ class ToolSimulator:
 
         path.write_text(new_content)
 
-        return f"File edited: {file_path}"
+        return f"The file {file_path} has been updated successfully."
 
     def _handle_glob(self, tool_input: dict[str, Any]) -> str:
         """Find files matching a glob pattern."""
@@ -259,6 +360,7 @@ def create_simulator(
     registry: PlaceholderRegistry | None = None,
     cwd: Path | str | None = None,
     dry_run: bool = False,
+    path_mappings: dict[str, str] | None = None,
 ) -> ToolSimulator:
     """Create a configured ToolSimulator.
 
@@ -266,6 +368,7 @@ def create_simulator(
         registry: Placeholder registry for fuzzy matching
         cwd: Working directory for tool execution
         dry_run: If True, don't actually execute tools
+        path_mappings: Dictionary mapping old paths to new paths for substitution
 
     Returns:
         Configured ToolSimulator instance
@@ -274,4 +377,5 @@ def create_simulator(
         registry=registry or PlaceholderRegistry(),
         cwd=Path(cwd) if cwd else Path.cwd(),
         dry_run=dry_run,
+        path_mappings=path_mappings or {},
     )

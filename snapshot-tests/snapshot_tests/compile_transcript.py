@@ -99,6 +99,9 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
     Returns:
         Markdown formatted string
     """
+    import os
+    import re
+
     lines = ["# Transcript", ""]
 
     # Find the project directory from the first user entry
@@ -108,11 +111,30 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
             project_dir = entry.raw["cwd"]
             break
 
-    def substitute_project_dir(text: str) -> str:
-        """Replace the project directory with $CLAUDE_PROJECT_DIR."""
-        if project_dir and project_dir in text:
-            return text.replace(project_dir, "$CLAUDE_PROJECT_DIR")
-        return text
+    # Get home directory for substitution
+    home_dir = os.path.expanduser("~")
+
+    def substitute_paths(text: str) -> str:
+        """Replace variable paths with placeholders."""
+        result = text
+
+        # Substitute project directory first (more specific)
+        if project_dir and project_dir in result:
+            result = result.replace(project_dir, "$CLAUDE_PROJECT_DIR")
+
+        # Substitute home directory
+        if home_dir and home_dir in result:
+            result = result.replace(home_dir, "$HOME")
+
+        # Handle .git/objects paths - replace git object SHAs
+        # Pattern: .git/objects/XX/XXXXXXX... where XX is 2 hex chars and rest is hex
+        result = re.sub(
+            r'(\.git/objects/)[0-9a-f]{2}/[0-9a-f]{38}',
+            r'\1<sha>/<sha>',
+            result
+        )
+
+        return result
 
     # Build a map of tool_use_id -> ToolResult for quick lookup
     results_by_id: dict[str, ToolResult] = {}
@@ -126,7 +148,7 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
         if entry.type == "user" and entry.role == "user" and not entry.tool_results:
             user_text = entry.text_content
             if user_text:
-                lines.append(f"**User:** {substitute_project_dir(user_text)}")
+                lines.append(f"**User:** {substitute_paths(user_text)}")
                 lines.append("")
 
         # Assistant message
@@ -134,7 +156,7 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
             # Text content
             text = entry.text_content
             if text:
-                lines.append(f"**Assistant:** {substitute_project_dir(text)}")
+                lines.append(f"**Assistant:** {substitute_paths(text)}")
                 lines.append("")
 
             # Thinking blocks (if verbose)
@@ -148,7 +170,7 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
                             lines.append("<details>")
                             lines.append("<summary>Thinking</summary>")
                             lines.append("")
-                            lines.append(substitute_project_dir(thinking))
+                            lines.append(substitute_paths(thinking))
                             lines.append("")
                             lines.append("</details>")
                             lines.append("")
@@ -156,14 +178,14 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
             # Tool uses with their results
             for tool_use in entry.tool_uses:
                 tool_lines = format_tool_use(tool_use)
-                lines.extend([substitute_project_dir(line) for line in tool_lines])
+                lines.extend([substitute_paths(line) for line in tool_lines])
                 lines.append("")
 
                 # Add the result if we have it
                 if tool_use.id in results_by_id:
                     result = results_by_id[tool_use.id]
                     result_lines = format_tool_result(result)
-                    lines.extend([substitute_project_dir(line) for line in result_lines])
+                    lines.extend([substitute_paths(line) for line in result_lines])
                     lines.append("")
 
     return "\n".join(lines)

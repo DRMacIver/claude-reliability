@@ -3,6 +3,7 @@
 from .placeholder import PlaceholderRegistry
 from .transcript import TranscriptEntry, ToolUse, ToolResult, parse_transcript, extract_tool_calls
 from .simulator import ToolSimulator
+from .plugin_setup import install_plugin, install_plugin_binary_only
 
 __all__ = [
     "PlaceholderRegistry",
@@ -12,4 +13,6 @@ __all__ = [
     "parse_transcript",
     "extract_tool_calls",
     "ToolSimulator",
+    "install_plugin",
+    "install_plugin_binary_only",
 ]

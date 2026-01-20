@@ -35,9 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from snapshot_tests.placeholder import PlaceholderRegistry
-from snapshot_tests.transcript import parse_transcript, extract_tool_calls
+from snapshot_tests.transcript import parse_transcript, extract_tool_calls, get_project_directory
 from snapshot_tests.simulator import ToolSimulator
 from snapshot_tests.compile_transcript import compile_transcript
+from snapshot_tests.plugin_setup import install_plugin
 
 
 @dataclass
@@ -60,6 +61,7 @@ class TestResult:
     passed: bool
     error: str | None = None
     output: str = ""
+    post_condition_output: str = ""
 
 
 def find_tests(tests_dir: Path, selected: list[str] | None = None) -> list[TestConfig]:
@@ -122,34 +124,87 @@ def find_tests(tests_dir: Path, selected: list[str] | None = None) -> list[TestC
     return tests
 
 
-def setup_test_environment(temp_dir: Path, test: TestConfig, project_dir: Path) -> None:
+def create_virtualenv(temp_dir: Path) -> Path:
+    """Create a virtualenv for the test using uv.
+
+    The venv is created OUTSIDE the test directory (as a sibling) so that
+    glob operations in the test directory won't find .venv files.
+
+    Args:
+        temp_dir: Temporary directory for test
+
+    Returns:
+        Path to the virtualenv directory
+    """
+    # Create venv as a sibling to the test directory, not inside it
+    # This prevents globs from finding .venv files
+    venv_dir = temp_dir.parent / f"{temp_dir.name}_venv"
+
+    # Create virtualenv with uv, including pip
+    subprocess.run(
+        ["uv", "venv", str(venv_dir), "--seed"],
+        check=True,
+        cwd=temp_dir,
+        capture_output=True,
+    )
+
+    return venv_dir
+
+
+def get_venv_env(venv_dir: Path) -> dict[str, str]:
+    """Get environment variables for running commands in the virtualenv.
+
+    Args:
+        venv_dir: Path to the virtualenv directory
+
+    Returns:
+        Environment dict with PATH and VIRTUAL_ENV set
+    """
+    env = os.environ.copy()
+    venv_bin = venv_dir / "bin"
+    env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    # Remove PYTHONHOME if set, as it can interfere with venv
+    env.pop("PYTHONHOME", None)
+    return env
+
+
+def setup_test_environment(
+    temp_dir: Path,
+    test: TestConfig,
+    project_dir: Path,
+    venv_dir: Path,
+) -> None:
     """Set up the test environment in a temp directory.
 
     Args:
         temp_dir: Temporary directory for test
         test: Test configuration
         project_dir: Project root directory
+        venv_dir: Path to the virtualenv directory
     """
     os.chdir(temp_dir)
 
-    # Copy project binary if it exists
-    binary_path = project_dir / "target" / "release" / "claude-reliability"
-    if binary_path.exists():
-        (temp_dir / ".claude" / "bin").mkdir(parents=True, exist_ok=True)
-        shutil.copy(binary_path, temp_dir / ".claude" / "bin" / "claude-reliability")
+    # Install the claude-reliability plugin
+    install_plugin(temp_dir)
+
+    # Get virtualenv environment
+    env = get_venv_env(venv_dir)
 
     # Run setup script - this handles git init if needed
     if test.setup_script.suffix == ".py":
         subprocess.run(
-            ["python3", str(test.setup_script)],
+            ["python", str(test.setup_script)],
             check=True,
             cwd=temp_dir,
+            env=env,
         )
     else:
         subprocess.run(
             ["bash", str(test.setup_script)],
             check=True,
             cwd=temp_dir,
+            env=env,
         )
 
 
@@ -157,6 +212,7 @@ def run_replay(
     temp_dir: Path,
     test: TestConfig,
     project_dir: Path,
+    venv_dir: Path,
     verbose: bool = False,
 ) -> TestResult:
     """Run a test in replay mode.
@@ -167,6 +223,7 @@ def run_replay(
         temp_dir: Temporary directory for test
         test: Test configuration
         project_dir: Project root directory
+        venv_dir: Path to the virtualenv directory
         verbose: Show detailed output
 
     Returns:
@@ -186,9 +243,18 @@ def run_replay(
     if verbose:
         print(f"  Found {len(tool_calls)} tool calls in transcript")
 
-    # Set up simulator
+    # Get the original project directory from the transcript
+    original_project_dir = get_project_directory(transcript)
+    path_mappings = {}
+    if original_project_dir:
+        # Map original path to current temp dir
+        path_mappings[original_project_dir] = str(temp_dir)
+        if verbose:
+            print(f"  Path mapping: {original_project_dir} -> {temp_dir}")
+
+    # Set up simulator with path mappings
     registry = PlaceholderRegistry()
-    simulator = ToolSimulator(registry=registry, cwd=temp_dir)
+    simulator = ToolSimulator(registry=registry, cwd=temp_dir, path_mappings=path_mappings)
 
     # Simulate each tool call
     errors = []
@@ -209,9 +275,11 @@ def run_replay(
             if verbose:
                 print(f"    ERROR: {result.error}")
         elif not result.matched_expected and expected_output is not None:
+            # Show the substituted expected for debugging
+            substituted_expected = simulator.substitute_paths(expected_output)
             errors.append(
                 f"Tool {tool_use.name} output mismatch:\n"
-                f"  Expected: {expected_output[:200]}\n"
+                f"  Expected: {substituted_expected[:200]}\n"
                 f"  Actual: {result.output[:200]}"
             )
             if verbose:
@@ -224,26 +292,35 @@ def run_replay(
             error="\n".join(errors),
         )
 
+    # Get virtualenv environment
+    env = get_venv_env(venv_dir)
+
     # Run post-condition if present
+    post_condition_output = ""
     if test.post_condition:
         if verbose:
             print("  Running post-condition...")
         try:
-            subprocess.run(
-                ["python3", str(test.post_condition)],
+            result = subprocess.run(
+                ["python", str(test.post_condition)],
                 check=True,
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
+                env=env,
             )
+            post_condition_output = result.stdout
+            if verbose and post_condition_output:
+                print(f"  Post-condition output:\n{post_condition_output}")
         except subprocess.CalledProcessError as e:
             return TestResult(
                 name=test.name,
                 passed=False,
                 error=f"Post-condition failed: {e.stderr}",
+                post_condition_output=e.stdout,
             )
 
-    return TestResult(name=test.name, passed=True)
+    return TestResult(name=test.name, passed=True, post_condition_output=post_condition_output)
 
 
 def _summarize_input(tool_use) -> str:
@@ -283,6 +360,7 @@ def run_record(
     temp_dir: Path,
     test: TestConfig,
     project_dir: Path,
+    venv_dir: Path,
     verbose: bool = False,
 ) -> TestResult:
     """Run a test in record mode.
@@ -377,26 +455,35 @@ def run_record(
             error=f"Transcript not found for session {session_id}",
         )
 
+    # Get virtualenv environment
+    env = get_venv_env(venv_dir)
+
     # Run post-condition if present
+    post_condition_output = ""
     if test.post_condition:
         if verbose:
             print("  Running post-condition...")
         try:
-            subprocess.run(
-                ["python3", str(test.post_condition)],
+            result = subprocess.run(
+                ["python", str(test.post_condition)],
                 check=True,
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
+                env=env,
             )
+            post_condition_output = result.stdout
+            if verbose and post_condition_output:
+                print(f"  Post-condition output:\n{post_condition_output}")
         except subprocess.CalledProcessError as e:
             return TestResult(
                 name=test.name,
                 passed=False,
                 error=f"Post-condition failed: {e.stderr}",
+                post_condition_output=e.stdout,
             )
 
-    return TestResult(name=test.name, passed=True)
+    return TestResult(name=test.name, passed=True, post_condition_output=post_condition_output)
 
 
 def run_test(
@@ -418,14 +505,18 @@ def run_test(
     """
     with tempfile.TemporaryDirectory() as temp_dir_str:
         temp_dir = Path(temp_dir_str)
+        venv_dir = None
 
         try:
-            setup_test_environment(temp_dir, test, project_dir)
+            # Create virtualenv for test isolation (outside test dir)
+            venv_dir = create_virtualenv(temp_dir)
+
+            setup_test_environment(temp_dir, test, project_dir, venv_dir)
 
             if mode == "replay":
-                return run_replay(temp_dir, test, project_dir, verbose)
+                return run_replay(temp_dir, test, project_dir, venv_dir, verbose)
             elif mode == "record":
-                return run_record(temp_dir, test, project_dir, verbose)
+                return run_record(temp_dir, test, project_dir, venv_dir, verbose)
             else:
                 return TestResult(
                     name=test.name,
@@ -439,6 +530,10 @@ def run_test(
                 passed=False,
                 error=str(e),
             )
+        finally:
+            # Clean up venv directory (it's outside the temp dir)
+            if venv_dir and venv_dir.exists():
+                shutil.rmtree(venv_dir)
 
 
 def compile_all_transcripts(tests: list[TestConfig], verbose: bool = False) -> None:
