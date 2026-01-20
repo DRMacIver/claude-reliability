@@ -227,14 +227,14 @@ pub fn run_stop_hook(
 
         // Handle "work complete" phrase
         if has_complete_phrase {
-            // Check if there are remaining issues
+            // Check if there are remaining issues that can be worked on
             if beads::is_beads_available_in(runner, config.base_dir()) {
-                let open_count = beads::get_open_issues_count(runner)?;
-                if open_count > 0 {
+                let ready_count = beads::get_ready_issues_count(runner)?;
+                if ready_count > 0 {
                     return Ok(StopHookResult::block()
                         .with_message("# Exit Phrase Rejected")
                         .with_message("")
-                        .with_message(format!("There are {open_count} open issue(s) remaining."))
+                        .with_message(format!("There are {ready_count} issue(s) ready to work on."))
                         .with_message("")
                         .with_message("Please work on the remaining issues before exiting.")
                         .with_message("Run `bd ready` to see available work.")
@@ -1490,13 +1490,13 @@ mod tests {
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
         // beads availability check happens in bypass check
-        // get_open_issues_count - returns 2 open issues
+        // get_ready_issues_count - returns 2 ready issues
         runner.expect(
             "bd",
-            &["list", "--status=open", "--format=json"],
+            &["ready"],
             CommandOutput {
                 exit_code: 0,
-                stdout: r#"[{"id": "a"}, {"id": "b"}]"#.to_string(),
+                stdout: "1 [P1] Ready issue one\n2 [P2] Ready issue two\n".to_string(),
                 stderr: String::new(),
             },
         );
@@ -1515,7 +1515,7 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
-        assert!(result.messages.iter().any(|m| m.contains("2 open issue")));
+        assert!(result.messages.iter().any(|m| m.contains("2 issue(s) ready")));
     }
 
     #[test]

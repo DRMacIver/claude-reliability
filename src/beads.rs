@@ -176,6 +176,36 @@ pub fn get_open_issues_count(runner: &dyn CommandRunner) -> Result<u32> {
     Ok(0)
 }
 
+/// Get the count of issues that are ready to work on (no blockers).
+///
+/// Uses `bd ready` which only shows issues without blockers.
+///
+/// # Errors
+///
+/// Returns an error if bd commands fail.
+#[allow(clippy::cast_possible_truncation)] // Issue counts won't exceed u32::MAX
+pub fn get_ready_issues_count(runner: &dyn CommandRunner) -> Result<u32> {
+    let output = runner.run("bd", &["ready"], None)?;
+
+    if !output.success() {
+        return Ok(0);
+    }
+
+    // Count lines that look like issue entries (start with digit and contain '[')
+    let count = output
+        .stdout
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && line.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && line.contains('[')
+        })
+        .count();
+
+    Ok(count as u32)
+}
+
 /// Get current open and in-progress issue IDs.
 ///
 /// # Errors
@@ -366,6 +396,56 @@ mod tests {
         );
 
         let count = get_open_issues_count(&runner).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_ready_issues_count() {
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+        runner.expect(
+            "bd",
+            &["ready"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "1 [P1] Ready issue one\n2 [P2] Ready issue two\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let count = get_ready_issues_count(&runner).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_get_ready_issues_count_no_issues() {
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+        runner.expect(
+            "bd",
+            &["ready"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "No ready issues\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let count = get_ready_issues_count(&runner).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_ready_issues_count_command_fails() {
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+        runner.expect(
+            "bd",
+            &["ready"],
+            CommandOutput { exit_code: 1, stdout: String::new(), stderr: "error".to_string() },
+        );
+
+        let count = get_ready_issues_count(&runner).unwrap();
         assert_eq!(count, 0);
     }
 
