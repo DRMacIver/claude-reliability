@@ -207,6 +207,19 @@ release-version:
 run *ARGS:
 	cargo run --features cli -- {{ARGS}}
 
+# Snapshot test commands
+# Run snapshot tests (creates new transcripts if missing)
+snapshot-tests *ARGS:
+	./snapshot-tests/run-snapshots.sh --create {{ARGS}}
+
+# Confirm current snapshots match expected
+confirm-snapshots:
+	./snapshot-tests/run-snapshots.sh
+
+# Update all snapshot transcripts
+update-snapshot-tests:
+	./snapshot-tests/run-snapshots.sh --update
+
 smoke-test:
 	#!/usr/bin/env bash
 	set -e
