@@ -19,3 +19,4 @@ lcov.info
 # Python cache
 __pycache__/
 *.pyc
+.beads/sync_base.jsonl
