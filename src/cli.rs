@@ -23,6 +23,8 @@ pub enum Command {
     EnsureConfig,
     /// Ensure gitignore has required entries.
     EnsureGitignore,
+    /// Print session intro message.
+    Intro,
     /// Run the stop hook.
     Stop,
     /// Run the user-prompt-submit hook.
@@ -46,9 +48,11 @@ impl Command {
     #[must_use]
     pub const fn needs_stdin(self) -> bool {
         match self {
-            Self::Version | Self::EnsureConfig | Self::EnsureGitignore | Self::UserPromptSubmit => {
-                false
-            }
+            Self::Version
+            | Self::EnsureConfig
+            | Self::EnsureGitignore
+            | Self::Intro
+            | Self::UserPromptSubmit => false,
             Self::Stop
             | Self::PreToolUseNoVerify
             | Self::PreToolUseCodeReview
@@ -86,6 +90,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "version" | "--version" | "-v" => ParseResult::Command(Command::Version),
         "ensure-config" => ParseResult::Command(Command::EnsureConfig),
         "ensure-gitignore" => ParseResult::Command(Command::EnsureGitignore),
+        "intro" => ParseResult::Command(Command::Intro),
         "stop" => ParseResult::Command(Command::Stop),
         "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
         "pre-tool-use" => {
@@ -114,6 +119,7 @@ pub fn usage(program: &str) -> String {
          Commands:\n  \
          ensure-config              Ensure config file exists\n  \
          ensure-gitignore           Ensure .gitignore has required entries\n  \
+         intro                      Print session intro message\n  \
          stop                       Run the stop hook\n  \
          user-prompt-submit         Run the user prompt submit hook\n  \
          pre-tool-use no-verify     Check for --no-verify usage\n  \
@@ -231,6 +237,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         }
         Command::EnsureConfig => run_ensure_config_cmd(),
         Command::EnsureGitignore => run_ensure_gitignore_cmd(),
+        Command::Intro => run_intro_cmd(),
         Command::Stop => run_stop_cmd(stdin),
         Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
@@ -281,6 +288,16 @@ fn run_ensure_gitignore_cmd() -> (ExitCode, Vec<String>) {
         }
         Err(e) => (ExitCode::from(1), vec![format!("Error updating .gitignore: {e}")]),
     }
+}
+
+fn run_intro_cmd() -> (ExitCode, Vec<String>) {
+    use crate::templates;
+    use tera::Context;
+
+    // Template is embedded and verified by test_all_embedded_templates_render
+    let message = templates::render("messages/session_intro.tera", &Context::new())
+        .expect("session_intro.tera template should always render");
+    (ExitCode::SUCCESS, vec![message])
 }
 
 fn run_user_prompt_submit_cmd() -> (ExitCode, Vec<String>) {
@@ -462,6 +479,11 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_intro() {
+        assert_eq!(parse_args(&args(&["prog", "intro"])), ParseResult::Command(Command::Intro));
+    }
+
+    #[test]
     fn test_parse_args_pre_tool_use() {
         assert_eq!(
             parse_args(&args(&["prog", "pre-tool-use", "no-verify"])),
@@ -528,6 +550,7 @@ mod tests {
         assert!(!Command::Version.needs_stdin());
         assert!(!Command::EnsureConfig.needs_stdin());
         assert!(!Command::EnsureGitignore.needs_stdin());
+        assert!(!Command::Intro.needs_stdin());
         assert!(!Command::UserPromptSubmit.needs_stdin());
 
         // Commands that need stdin (hooks that receive JSON input)
@@ -949,6 +972,15 @@ mod tests {
         assert!(messages2.iter().any(|m| m.contains("already has")));
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_run_intro_via_cli() {
+        let (code, messages) = run(&args(&["prog", "intro"]), "");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!messages.is_empty());
+        // Should contain the intro message
+        assert!(messages[0].contains("Claude Reliability Mode"));
     }
 
     #[test]

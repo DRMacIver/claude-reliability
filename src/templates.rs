@@ -91,6 +91,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/no_verify_block.tera",
         include_str!("../templates/messages/no_verify_block.tera"),
     );
+    m.insert(
+        "messages/session_intro.tera",
+        include_str!("../templates/messages/session_intro.tera"),
+    );
 
     m
 });
@@ -388,7 +392,7 @@ mod tests {
     fn test_embedded_template_count() {
         // Ensure we have all expected templates
         let names = embedded_template_names();
-        assert!(names.len() >= 13, "Expected at least 13 templates, got {}", names.len());
+        assert!(names.len() >= 14, "Expected at least 14 templates, got {}", names.len());
     }
 
     #[test]

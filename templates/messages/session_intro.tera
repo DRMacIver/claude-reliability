@@ -1,0 +1,14 @@
+# Claude Reliability Mode
+
+This session has reliability features enabled:
+
+- **Stop hook**: Validates work completion before allowing exit
+- **Code review**: Automated review on git commits
+- **Quality gates**: Must pass before stopping (if configured)
+- **Issue tracking**: Use `bd` commands to track and manage work
+
+Use `/just-keep-working` to enter autonomous work mode.
+
+Say an exit phrase when done:
+- "I have completed all work that I can and require human input to proceed."
+- "I have run into a problem I can't solve without user input."
