@@ -117,13 +117,44 @@ download_binary() {
     return 1
 }
 
+# Install Rust using rustup
+install_rust() {
+    echo "Installing Rust..." >&2
+
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >&2
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://sh.rustup.rs | sh -s -- -y >&2
+    else
+        echo "Neither curl nor wget available - cannot install Rust" >&2
+        return 1
+    fi
+
+    # Source the cargo env to make it available in this session
+    if [[ -f "${HOME}/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "${HOME}/.cargo/env"
+    fi
+
+    if command -v cargo >/dev/null 2>&1; then
+        echo "Rust installed successfully" >&2
+        return 0
+    fi
+
+    echo "Rust installation failed" >&2
+    return 1
+}
+
 # Build from source using cargo (from the plugin repo)
 build_from_source() {
     local target_path="$1"
 
+    # Install Rust if not available
     if ! command -v cargo >/dev/null 2>&1; then
-        echo "cargo not found - cannot build from source" >&2
-        return 1
+        echo "cargo not found - attempting to install Rust..." >&2
+        if ! install_rust; then
+            return 1
+        fi
     fi
 
     # The plugin is installed from the repo, so PLUGIN_ROOT has the source
@@ -200,11 +231,10 @@ main() {
     echo "" >&2
     echo "Tried:" >&2
     echo "  1. Download from GitHub releases (${REPO})" >&2
-    echo "  2. Build from source with cargo" >&2
+    echo "  2. Build from source (with automatic Rust installation)" >&2
     echo "" >&2
     echo "To fix, either:" >&2
-    echo "  - Ensure you have internet access for downloads" >&2
-    echo "  - Install Rust/cargo and try again" >&2
+    echo "  - Ensure you have internet access" >&2
     echo "  - Manually place the binary at: ${binary_path}" >&2
     exit 1
 }

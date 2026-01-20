@@ -96,6 +96,34 @@ download_from_release() {
     return 0
 }
 
+# Install Rust using rustup
+install_rust() {
+    echo "Installing Rust..." >&2
+
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >&2
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://sh.rustup.rs | sh -s -- -y >&2
+    else
+        echo "Neither curl nor wget available - cannot install Rust" >&2
+        return 1
+    fi
+
+    # Source the cargo env to make it available in this session
+    if [[ -f "${HOME}/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "${HOME}/.cargo/env"
+    fi
+
+    if command -v cargo >/dev/null 2>&1; then
+        echo "Rust installed successfully" >&2
+        return 0
+    fi
+
+    echo "Rust installation failed" >&2
+    return 1
+}
+
 # Try to build from source
 build_from_source() {
     echo "Building claude-reliability from source..." >&2
@@ -105,7 +133,17 @@ build_from_source() {
     if command -v just >/dev/null 2>&1 && [[ -f "justfile" ]]; then
         just update-my-hooks >&2
         return $?
-    elif command -v cargo >/dev/null 2>&1 && [[ -f "Cargo.toml" ]]; then
+    fi
+
+    # Install Rust if not available
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "cargo not found - attempting to install Rust..." >&2
+        if ! install_rust; then
+            return 1
+        fi
+    fi
+
+    if [[ -f "Cargo.toml" ]]; then
         cargo build --release --features cli >&2
         mkdir -p .claude/bin
         cp target/release/claude-reliability .claude/bin/
