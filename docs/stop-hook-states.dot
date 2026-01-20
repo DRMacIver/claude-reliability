@@ -46,8 +46,8 @@ digraph StopHookStateMachine {
 
     // Complete phrase path
     CompletePhraseDetected [label="Complete Phrase\nDetected"];
-    CheckOpenIssues [label="Check beads:\nopen issues count?"];
-    ExitPhraseRejected [label="Exit Phrase Rejected\n(issues remain)"];
+    CheckReadyIssues [label="Check beads:\nready issues count?\n(bd ready)"];
+    ExitPhraseRejected [label="Exit Phrase Rejected\n(workable issues remain)"];
     BypassAllowed [label="Bypass Allowed\n(cleanup session)"];
 
     // 7. Uncommitted Changes Check
@@ -99,8 +99,6 @@ digraph StopHookStateMachine {
         CheckAllDone [label="Check:\nbeads available &&\nno outstanding issues?"];
         JKWQualityCheck [label="Run quality checks"];
         JKWQualityFailed [label="Quality Gates Failed"];
-        JKWReflection [label="Run self-reflection\n(in jkw mode)"];
-        JKWReflectionBlock [label="Self-Reflection\nCheck (JKW)"];
         JKWAllDoneBlock [label="All Done:\nShow options\n(/ideate or exit phrase)"];
         JKWWorkRemains [label="Work Remains:\nShow status"];
     }
@@ -109,12 +107,11 @@ digraph StopHookStateMachine {
     NonJKWQuality [label="Run quality checks\n(if enabled, non-JKW)"];
     NonJKWQualityFailed [label="Quality Gates Failed\n(non-JKW)"];
 
-    // 12. Self-Reflection Check
-    CheckReflection [label="Check:\nreflection_marker exists?"];
-    CheckHadChanges [label="Check:\nhad_changes marker OR\ncurrent git changes OR\nmodifying tool use?"];
-    RunReflection [label="Sub-agent:\nreflect_on_work"];
-    MarkReflectionDone [label="Mark reflection done\nClear had_changes"];
-    ReflectionBlock [label="Self-Reflection Check\n(show assessment)"];
+    // 12. Simple Reflection Check (marker-based)
+    CheckReflectMarker [label="Check:\nmust_reflect marker?"];
+    ClearReflectMarker [label="Clear reflect marker\n(second stop attempt)"];
+    CheckModifyingTools [label="Check transcript:\nmodifying tool use?\n(Write/Edit/Delete)"];
+    SetReflectMarker [label="Set reflect marker\nPrompt for reflection"];
 
     // ========== Transitions ==========
 
@@ -163,10 +160,10 @@ digraph StopHookStateMachine {
     ProblemPhraseDetected -> EnterProblemMode;
     EnterProblemMode -> BlockStop [label="tools blocked"];
 
-    CompletePhraseDetected -> CheckOpenIssues [label="beads available"];
+    CompletePhraseDetected -> CheckReadyIssues [label="beads available"];
     CompletePhraseDetected -> BypassAllowed [label="no beads"];
-    CheckOpenIssues -> ExitPhraseRejected [label="issues > 0"];
-    CheckOpenIssues -> BypassAllowed [label="issues == 0"];
+    CheckReadyIssues -> ExitPhraseRejected [label="ready > 0"];
+    CheckReadyIssues -> BypassAllowed [label="ready == 0"];
     ExitPhraseRejected -> BlockStop;
     BypassAllowed -> AllowStop;
 
@@ -213,27 +210,23 @@ digraph StopHookStateMachine {
     CheckAllDone -> JKWQualityCheck [label="all done"];
     CheckAllDone -> JKWWorkRemains [label="work remains"];
     JKWQualityCheck -> JKWQualityFailed [label="failed"];
-    JKWQualityCheck -> JKWReflection [label="passed"];
+    JKWQualityCheck -> JKWAllDoneBlock [label="passed"];
     JKWQualityFailed -> BlockStop;
-    JKWReflection -> JKWReflectionBlock [label="reflection\nneeded"];
-    JKWReflection -> JKWAllDoneBlock [label="no reflection\n(already done)"];
-    JKWReflectionBlock -> BlockStop;
     JKWAllDoneBlock -> BlockStop;
     JKWWorkRemains -> BlockStop;
 
     // 11. Non-JKW Quality
     NonJKWQuality -> NonJKWQualityFailed [label="failed"];
-    NonJKWQuality -> CheckReflection [label="passed or\nnot enabled"];
+    NonJKWQuality -> CheckReflectMarker [label="passed or\nnot enabled"];
     NonJKWQualityFailed -> BlockStop;
 
-    // 12. Self-Reflection
-    CheckReflection -> AllowStop [label="already done"];
-    CheckReflection -> CheckHadChanges [label="not done"];
-    CheckHadChanges -> AllowStop [label="no changes"];
-    CheckHadChanges -> RunReflection [label="has changes"];
-    RunReflection -> MarkReflectionDone;
-    MarkReflectionDone -> ReflectionBlock;
-    ReflectionBlock -> BlockStop;
+    // 12. Simple Reflection (marker-based)
+    CheckReflectMarker -> ClearReflectMarker [label="marker exists\n(second stop)"];
+    CheckReflectMarker -> CheckModifyingTools [label="no marker"];
+    ClearReflectMarker -> AllowStop;
+    CheckModifyingTools -> SetReflectMarker [label="has modifying\ntool use"];
+    CheckModifyingTools -> AllowStop [label="no modifying\ntool use"];
+    SetReflectMarker -> BlockStop [label="prompt reflection"];
 
     // ========== Legend ==========
     subgraph cluster_legend {
@@ -262,8 +255,7 @@ digraph StopHookStateMachine {
     // - RunQualityOnChanges: Bash(sh -c "quality_command")
     // - RunValidation: Bash(sh -c "quality_command")
     // - CheckBeadsInteraction: Bash(bd show, bd list)
-    // - CheckOpenIssues: Bash(bd list --status=open)
+    // - CheckReadyIssues: Bash(bd ready)
     // - GetIssueState: Bash(bd list --status=open, bd list --status=in_progress) OR Bash(git diff --stat)
     // - SubAgentDecision: Sub-agent API call (decide_on_question)
-    // - RunReflection: Sub-agent API call (reflect_on_work) + Bash(git diff)
 }
