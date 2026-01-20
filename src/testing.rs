@@ -160,7 +160,12 @@ impl SubAgent for MockSubAgent {
         Ok(review)
     }
 
-    fn reflect_on_work(&self, _assistant_output: &str, _git_diff: &str) -> Result<(bool, String)> {
+    fn reflect_on_work(
+        &self,
+        _assistant_output: &str,
+        _git_diff: &str,
+        _in_jkw_mode: bool,
+    ) -> Result<(bool, String)> {
         let mut index = self.reflection_index.borrow_mut();
         let reflections = self.reflections.borrow();
 
@@ -276,7 +281,7 @@ mod tests {
         let mut agent = MockSubAgent::new();
         agent.expect_reflection(true, "Work looks complete");
 
-        let (complete, feedback) = agent.reflect_on_work("output", "diff").unwrap();
+        let (complete, feedback) = agent.reflect_on_work("output", "diff", false).unwrap();
         assert!(complete);
         assert_eq!(feedback, "Work looks complete");
     }
@@ -286,7 +291,7 @@ mod tests {
         let mut agent = MockSubAgent::new();
         agent.expect_reflection(false, "Missing test coverage");
 
-        let (complete, feedback) = agent.reflect_on_work("output", "diff").unwrap();
+        let (complete, feedback) = agent.reflect_on_work("output", "diff", false).unwrap();
         assert!(!complete);
         assert_eq!(feedback, "Missing test coverage");
     }
@@ -295,6 +300,6 @@ mod tests {
     #[should_panic(expected = "No more reflections expected")]
     fn test_mock_sub_agent_reflect_on_work_no_expectation() {
         let agent = MockSubAgent::new();
-        let _ = agent.reflect_on_work("output", "diff");
+        let _ = agent.reflect_on_work("output", "diff", false);
     }
 }

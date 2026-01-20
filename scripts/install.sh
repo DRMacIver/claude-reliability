@@ -162,7 +162,7 @@ install_scripts() {
     download "${RAW_URL}/.claude/scripts/startup-hook.py" "${scripts_dir}/startup-hook.py"
     download "${RAW_URL}/.claude/scripts/precompact-beads-hook.py" "${scripts_dir}/precompact-beads-hook.py"
     download "${RAW_URL}/.claude/scripts/quality-check.sh" "${scripts_dir}/quality-check.sh"
-    download "${RAW_URL}/.claude/scripts/autonomous-stop-hook.py" "${scripts_dir}/autonomous-stop-hook.py"
+    download "${RAW_URL}/.claude/scripts/jkw-stop-hook.py" "${scripts_dir}/jkw-stop-hook.py"
     download "${RAW_URL}/.claude/scripts/code-review-hook.py" "${scripts_dir}/code-review-hook.py"
 
     # Hook wrappers
@@ -175,8 +175,8 @@ install_scripts() {
     chmod +x "${hooks_dir}"/*.sh
 
     # Commands (slash commands)
-    download "${RAW_URL}/.claude/commands/autonomous-mode.md" "${commands_dir}/autonomous-mode.md"
-    download "${RAW_URL}/.claude/commands/cancel-autonomous.md" "${commands_dir}/cancel-autonomous.md"
+    download "${RAW_URL}/.claude/commands/just-keep-working.md" "${commands_dir}/just-keep-working.md"
+    download "${RAW_URL}/.claude/commands/cancel-just-keep-working.md" "${commands_dir}/cancel-just-keep-working.md"
     download "${RAW_URL}/.claude/commands/quality-check.md" "${commands_dir}/quality-check.md"
     download "${RAW_URL}/.claude/commands/checkpoint.md" "${commands_dir}/checkpoint.md"
     download "${RAW_URL}/.claude/commands/self-review.md" "${commands_dir}/self-review.md"

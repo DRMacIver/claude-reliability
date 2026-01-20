@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stop hook for Claude Code autonomous mode.
+# Stop hook for Claude Code just-keep-working mode.
 # This script wraps the Rust binary for portability.
 #
 # Usage: Configure in .claude/settings.local.json:

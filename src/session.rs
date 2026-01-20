@@ -1,7 +1,7 @@
-//! Session file parsing for autonomous mode.
+//! Session file parsing for just-keep-working mode.
 //!
-//! The session file (`.claude/autonomous-session.local.md`) tracks the state
-//! of an autonomous development session using YAML frontmatter.
+//! The session file (`.claude/jkw-session.local.md`) tracks the state
+//! of a just-keep-working development session using YAML frontmatter.
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 /// Default path for the session file.
-pub const SESSION_FILE_PATH: &str = ".claude/autonomous-session.local.md";
+pub const SESSION_FILE_PATH: &str = ".claude/jkw-session.local.md";
 
 /// Staleness threshold - iterations without issue changes before stopping.
 pub const STALENESS_THRESHOLD: u32 = 5;
@@ -27,6 +27,10 @@ pub struct SessionConfig {
     /// Snapshot of issue IDs from the last check.
     #[serde(default)]
     pub issue_snapshot: Vec<String>,
+    /// Hash of git diff for staleness detection when beads is not available.
+    /// This provides a fallback mechanism to detect progress via code changes.
+    #[serde(default)]
+    pub git_diff_hash: Option<String>,
 }
 
 impl SessionConfig {
@@ -103,7 +107,7 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionConfig>> {
 pub fn write_session_file(path: &Path, config: &SessionConfig) -> Result<()> {
     let yaml = serde_yaml::to_string(config)?;
     let content = format!(
-        "---\n{yaml}---\n\n# Autonomous Session Log\n\nThis file tracks the autonomous development session.\n"
+        "---\n{yaml}---\n\n# Just-Keep-Working Session Log\n\nThis file tracks the just-keep-working development session.\n"
     );
 
     // Ensure parent directory exists
@@ -123,6 +127,45 @@ pub fn write_session_file(path: &Path, config: &SessionConfig) -> Result<()> {
 pub fn cleanup_session_file(path: &Path) -> Result<()> {
     if path.exists() {
         fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Default path for the problem mode marker file.
+pub const PROBLEM_MODE_MARKER_PATH: &str = ".claude/problem-mode.local";
+
+/// Check if problem mode is active (marker file exists).
+#[must_use]
+pub fn is_problem_mode_active(base_dir: &Path) -> bool {
+    base_dir.join(PROBLEM_MODE_MARKER_PATH).exists()
+}
+
+/// Enter problem mode by creating the marker file.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be created.
+pub fn enter_problem_mode(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(PROBLEM_MODE_MARKER_PATH);
+
+    // Ensure parent directory exists
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&marker_path, "Problem mode active - tool use blocked until next stop")?;
+    Ok(())
+}
+
+/// Exit problem mode by removing the marker file.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be removed.
+pub fn exit_problem_mode(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(PROBLEM_MODE_MARKER_PATH);
+    if marker_path.exists() {
+        fs::remove_file(marker_path)?;
     }
     Ok(())
 }
@@ -203,6 +246,7 @@ iteration: 1
             iteration: 3,
             last_issue_change_iteration: 2,
             issue_snapshot: vec!["issue-1".to_string(), "issue-2".to_string()],
+            ..Default::default()
         };
 
         write_session_file(&path, &config).unwrap();
@@ -234,18 +278,18 @@ iteration: 1
     #[test]
     fn test_session_config_iterations_since_change() {
         let config =
-            SessionConfig { iteration: 10, last_issue_change_iteration: 7, issue_snapshot: vec![] };
+            SessionConfig { iteration: 10, last_issue_change_iteration: 7, ..Default::default() };
         assert_eq!(config.iterations_since_change(), 3);
     }
 
     #[test]
     fn test_session_config_is_stale() {
         let stale =
-            SessionConfig { iteration: 10, last_issue_change_iteration: 4, issue_snapshot: vec![] };
+            SessionConfig { iteration: 10, last_issue_change_iteration: 4, ..Default::default() };
         assert!(stale.is_stale()); // 6 iterations since change
 
         let not_stale =
-            SessionConfig { iteration: 10, last_issue_change_iteration: 8, issue_snapshot: vec![] };
+            SessionConfig { iteration: 10, last_issue_change_iteration: 8, ..Default::default() };
         assert!(!not_stale.is_stale()); // 2 iterations since change
     }
 
@@ -255,6 +299,7 @@ iteration: 1
             iteration: 1,
             last_issue_change_iteration: 1,
             issue_snapshot: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+            ..Default::default()
         };
         let set = config.issue_snapshot_set();
         assert_eq!(set.len(), 2);
@@ -291,12 +336,62 @@ iteration: 1
         assert!(!nested.exists());
 
         let config =
-            SessionConfig { iteration: 1, last_issue_change_iteration: 1, issue_snapshot: vec![] };
+            SessionConfig { iteration: 1, last_issue_change_iteration: 1, ..Default::default() };
 
         write_session_file(&path, &config).unwrap();
 
         // Verify both parent and file now exist
         assert!(nested.exists());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn test_problem_mode_not_active_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!is_problem_mode_active(dir.path()));
+    }
+
+    #[test]
+    fn test_enter_problem_mode() {
+        let dir = TempDir::new().unwrap();
+
+        // Enter problem mode
+        enter_problem_mode(dir.path()).unwrap();
+
+        // Verify marker file exists
+        assert!(is_problem_mode_active(dir.path()));
+        assert!(dir.path().join(PROBLEM_MODE_MARKER_PATH).exists());
+    }
+
+    #[test]
+    fn test_exit_problem_mode() {
+        let dir = TempDir::new().unwrap();
+
+        // Enter and then exit problem mode
+        enter_problem_mode(dir.path()).unwrap();
+        assert!(is_problem_mode_active(dir.path()));
+
+        exit_problem_mode(dir.path()).unwrap();
+        assert!(!is_problem_mode_active(dir.path()));
+    }
+
+    #[test]
+    fn test_exit_problem_mode_when_not_active() {
+        let dir = TempDir::new().unwrap();
+
+        // Should not error when exiting without entering
+        exit_problem_mode(dir.path()).unwrap();
+        assert!(!is_problem_mode_active(dir.path()));
+    }
+
+    #[test]
+    fn test_enter_problem_mode_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        // Base dir is the temp dir, .claude subdirectory doesn't exist yet
+
+        enter_problem_mode(dir.path()).unwrap();
+
+        assert!(dir.path().join(".claude").exists());
+        assert!(is_problem_mode_active(dir.path()));
     }
 }

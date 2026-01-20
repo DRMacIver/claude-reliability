@@ -31,6 +31,8 @@ pub enum Command {
     PreToolUseNoVerify,
     /// Run the code-review pre-tool-use hook.
     PreToolUseCodeReview,
+    /// Run the problem-mode pre-tool-use hook.
+    PreToolUseProblemMode,
 }
 
 /// Result of parsing CLI arguments.
@@ -68,6 +70,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
             match args[2].as_str() {
                 "no-verify" => ParseResult::Command(Command::PreToolUseNoVerify),
                 "code-review" => ParseResult::Command(Command::PreToolUseCodeReview),
+                "problem-mode" => ParseResult::Command(Command::PreToolUseProblemMode),
                 other => ParseResult::UnknownSubcommand(other.to_string()),
             }
         }
@@ -201,6 +204,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
+        Command::PreToolUseProblemMode => run_problem_mode_cmd(stdin),
     }
 }
 
@@ -317,6 +321,24 @@ fn run_code_review_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     }
 }
 
+fn run_problem_mode_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::hooks::{parse_hook_input, run_problem_mode_hook};
+    use std::path::Path;
+
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    let output = run_problem_mode_hook(&input, Path::new("."));
+    let json = match serde_json::to_string(&output) {
+        Ok(json) => json,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to serialize output: {e}")]),
+    };
+
+    (ExitCode::SUCCESS, vec![json])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +392,10 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["prog", "pre-tool-use", "code-review"])),
             ParseResult::Command(Command::PreToolUseCodeReview)
+        );
+        assert_eq!(
+            parse_args(&args(&["prog", "pre-tool-use", "problem-mode"])),
+            ParseResult::Command(Command::PreToolUseProblemMode)
         );
     }
 

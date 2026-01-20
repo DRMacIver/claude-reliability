@@ -1,7 +1,7 @@
-//! Stop hook for autonomous mode and code quality checks.
+//! Stop hook for just-keep-working mode and code quality checks.
 //!
 //! This hook runs when Claude attempts to stop/exit. It implements:
-//! - Autonomous mode management with staleness detection
+//! - Just-keep-working mode management with staleness detection
 //! - Uncommitted changes detection and blocking
 //! - Code quality checks on the diff
 //! - Interactive question handling with sub-agent
@@ -123,6 +123,17 @@ pub fn run_stop_hook(
         .and_then(|p| transcript::parse_transcript(Path::new(p)).ok())
         .unwrap_or_default();
 
+    // Check for problem mode - if active, allow unconditional stop
+    if session::is_problem_mode_active(config.base_dir()) {
+        session::exit_problem_mode(config.base_dir())?;
+        session::cleanup_session_file(&config.session_path())?;
+        return Ok(StopHookResult::allow()
+            .with_message("# Problem Mode Exit")
+            .with_message("")
+            .with_message("Agent has explained their problem and stopped.")
+            .with_message("Please review and provide guidance."));
+    }
+
     // Check for API error loop - if we've seen multiple consecutive API errors,
     // allow the stop to prevent infinite loops
     if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
@@ -130,23 +141,18 @@ pub fn run_stop_hook(
             .with_message("# API Error Loop Detected")
             .with_message("")
             .with_message(format!(
-                "Detected {} consecutive API errors. Allowing stop to prevent infinite loop.",
+                "Detected {} consecutive API errors. Stopping to prevent infinite loop.",
                 transcript_info.consecutive_api_errors
             ))
-            .with_message("")
-            .with_message("This typically happens when:")
-            .with_message("- The conversation state has become corrupted")
-            .with_message("- The API is experiencing issues")
-            .with_message("- There was a long pause that caused a timeout")
             .with_message("")
             .with_message("Please start a new conversation to continue."));
     }
 
-    // Check if autonomous session is active
+    // Check if just-keep-working session is active
     let session_path = config.session_path();
     let session_config = session::parse_session_file(&session_path)?;
 
-    // Fast path: if no autonomous session and no git changes, allow immediate exit
+    // Fast path: if no just-keep-working session and no git changes, allow immediate exit
     if session_config.is_none() {
         let git_status = git::check_uncommitted_changes(runner)?;
         if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
@@ -159,13 +165,30 @@ pub fn run_stop_hook(
         let has_complete_phrase = output.contains(HUMAN_INPUT_REQUIRED);
         let has_problem_phrase = output.contains(PROBLEM_NEEDS_USER);
 
-        if has_complete_phrase || has_problem_phrase {
-            // For the "work complete" phrase, check if there are remaining issues
-            // The "problem" phrase allows exit even with open issues
-            if has_complete_phrase
-                && !has_problem_phrase
-                && beads::is_beads_available_in(runner, config.base_dir())
-            {
+        // Handle "I have run into a problem" - enter problem mode
+        if has_problem_phrase {
+            // Enter problem mode - this blocks all tool use until next stop
+            session::enter_problem_mode(config.base_dir())?;
+            return Ok(StopHookResult::block()
+                .with_message("# Problem Mode Activated")
+                .with_message("")
+                .with_message("You've indicated you've hit a problem. **All tool use is now blocked.**")
+                .with_message("")
+                .with_message("## What to do now:")
+                .with_message("")
+                .with_message("1. **Explain the problem clearly** - What exactly went wrong?")
+                .with_message("2. **Describe what you tried** - What approaches did you attempt?")
+                .with_message("3. **State what you need** - What specific help or decision do you need from the user?")
+                .with_message("")
+                .with_message("Once you've explained the problem, you will be able to stop and wait for the user's response.")
+                .with_message("")
+                .with_message("**Do not attempt to use any tools until you've stopped and the user has responded.**"));
+        }
+
+        // Handle "work complete" phrase
+        if has_complete_phrase {
+            // Check if there are remaining issues
+            if beads::is_beads_available_in(runner, config.base_dir()) {
                 let open_count = beads::get_open_issues_count(runner)?;
                 if open_count > 0 {
                     return Ok(StopHookResult::block()
@@ -185,12 +208,7 @@ pub fn run_stop_hook(
             }
             // Bypass allowed
             session::cleanup_session_file(&session_path)?;
-            let reason = if has_problem_phrase {
-                "Problem requiring user input acknowledged. Allowing stop."
-            } else {
-                "Human input required acknowledged. Allowing stop."
-            };
-            return Ok(StopHookResult::allow().with_message(reason));
+            return Ok(StopHookResult::allow());
         }
     }
 
@@ -225,12 +243,12 @@ pub fn run_stop_hook(
         return Ok(result);
     }
 
-    // Check autonomous mode
+    // Check just-keep-working mode
     if let Some(mut session) = session_config {
-        return handle_autonomous_mode(&mut session, config, runner, sub_agent);
+        return handle_jkw_mode(&mut session, config, runner, sub_agent, &transcript_info);
     }
 
-    // Not in autonomous mode - run quality checks if enabled
+    // Not in just-keep-working mode - run quality checks if enabled
     if config.quality_check_enabled {
         if let Some(ref cmd) = config.quality_check_command {
             let output = runner.run("sh", &["-c", cmd], None)?;
@@ -247,7 +265,9 @@ pub fn run_stop_hook(
 
     // Self-reflection check: on first attempt to stop after making changes,
     // ask the LLM to reflect on whether work was completed properly
-    if let Some(result) = check_self_reflection(config, runner, &transcript_info, sub_agent)? {
+    // (not in jkw mode at this point - jkw mode returned earlier)
+    if let Some(result) = check_self_reflection(config, runner, &transcript_info, sub_agent, false)?
+    {
         return Ok(result);
     }
 
@@ -448,6 +468,7 @@ fn check_self_reflection(
     runner: &dyn CommandRunner,
     transcript_info: &TranscriptInfo,
     sub_agent: &dyn SubAgent,
+    in_jkw_mode: bool,
 ) -> Result<Option<StopHookResult>> {
     let base_dir = config.base_dir();
 
@@ -482,7 +503,8 @@ fn check_self_reflection(
     };
 
     // Ask the LLM to reflect
-    let (complete, feedback) = sub_agent.reflect_on_work(assistant_output, &git_diff)?;
+    let (complete, feedback) =
+        sub_agent.reflect_on_work(assistant_output, &git_diff, in_jkw_mode)?;
 
     // Mark reflection as done so we don't run again
     reflection::mark_reflection_done_in(base_dir)?;
@@ -556,12 +578,11 @@ fn check_interactive_question(
     match decision {
         SubAgentDecision::AllowStop(reason) => {
             let mut result = StopHookResult::allow()
-                .with_message("# Allowing stop for user interaction")
+                .with_message("# Allowing Stop for User Interaction")
                 .with_message("")
-                .with_message("The agent appears to be asking a question and you were active.")
-                .with_message("Please respond to continue the conversation.");
+                .with_message("Agent appears to be asking a question.");
             if let Some(r) = reason {
-                result.messages.insert(2, format!("Reason: {r}"));
+                result.messages.push(format!("Reason: {r}"));
             }
             Ok(Some(result))
         }
@@ -572,20 +593,21 @@ fn check_interactive_question(
                 .with_message(&answer)
                 .with_message("")
                 .with_message("---")
-                .with_message("Continuing autonomous work...")
+                .with_message("Continuing work...")
                 .with_inject(answer),
         )),
         SubAgentDecision::Continue => Ok(None),
     }
 }
 
-/// Handle autonomous mode.
+/// Handle just-keep-working mode.
 #[allow(clippy::too_many_lines)] // Complex logic with many status checks
-fn handle_autonomous_mode(
+fn handle_jkw_mode(
     session: &mut SessionConfig,
     config: &StopHookConfig,
     runner: &dyn CommandRunner,
-    _sub_agent: &dyn SubAgent,
+    sub_agent: &dyn SubAgent,
+    transcript_info: &TranscriptInfo,
 ) -> Result<StopHookResult> {
     let session_path = config.session_path();
 
@@ -594,7 +616,8 @@ fn handle_autonomous_mode(
     let iteration = session.iteration;
 
     // Get current issue state (if beads is available)
-    let (open_ids, in_progress_ids) = if beads::is_beads_available_in(runner, config.base_dir()) {
+    let beads_available = beads::is_beads_available_in(runner, config.base_dir());
+    let (open_ids, in_progress_ids) = if beads_available {
         beads::get_current_issues(runner)?
     } else {
         (HashSet::new(), HashSet::new())
@@ -604,35 +627,43 @@ fn handle_autonomous_mode(
     let previous_snapshot = session.issue_snapshot_set();
     let total_outstanding = current_snapshot.len();
 
-    // Check if issues changed
-    if current_snapshot != previous_snapshot {
-        session.last_issue_change_iteration = iteration;
+    // Check for changes - use beads issues if available, otherwise use git state hash
+    if beads_available {
+        // Track issue changes
+        if current_snapshot != previous_snapshot {
+            session.last_issue_change_iteration = iteration;
+        }
+        session.issue_snapshot = current_snapshot.into_iter().collect();
+    } else {
+        // Fallback: track git working state changes
+        let current_git_hash = git::working_state_hash(runner)?;
+        if session.git_diff_hash.as_ref() != Some(&current_git_hash) {
+            session.last_issue_change_iteration = iteration;
+            session.git_diff_hash = Some(current_git_hash);
+        }
     }
 
     // Update session file
-    session.issue_snapshot = current_snapshot.into_iter().collect();
     session::write_session_file(&session_path, session)?;
 
     // Check staleness
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
         session::cleanup_session_file(&session_path)?;
+        let change_type = if beads_available { "issue" } else { "git" };
         return Ok(StopHookResult::allow()
             .with_message("# Staleness Detected")
             .with_message("")
-            .with_message(format!("No issue changes for {iterations_since_change} iterations."))
-            .with_message("Autonomous mode is stopping due to lack of progress.")
+            .with_message(format!(
+                "No {change_type} changes for {iterations_since_change} iterations."
+            ))
+            .with_message("Just-keep-working mode stopped due to lack of progress.")
             .with_message("")
-            .with_message("This could mean:")
-            .with_message("- The remaining work requires human decisions")
-            .with_message("- There's a blocker that needs manual intervention")
-            .with_message("- The loop is stuck in an unproductive pattern")
-            .with_message("")
-            .with_message("Run `/autonomous-mode` to start a new session with fresh goals."));
+            .with_message("Run `/just-keep-working` to start a new session."));
     }
 
-    // Check if all work is done
-    if total_outstanding == 0 {
+    // Check if all work is done (only when beads is available to track issues)
+    if beads_available && total_outstanding == 0 {
         let mut result = StopHookResult::block()
             .with_message("# Checking Completion")
             .with_message("")
@@ -643,6 +674,17 @@ fn handle_autonomous_mode(
             if let Some(ref cmd) = config.quality_check_command {
                 let output = runner.run("sh", &["-c", cmd], None)?;
                 if output.success() {
+                    // Run self-reflection check before allowing completion
+                    if let Some(reflection_result) = check_self_reflection(
+                        config,
+                        runner,
+                        transcript_info,
+                        sub_agent,
+                        true, // in jkw mode
+                    )? {
+                        return Ok(reflection_result);
+                    }
+
                     result.messages.push(String::new());
                     result.messages.push("All quality gates passed!".to_string());
                     result.messages.push("No open issues remain.".to_string());
@@ -668,32 +710,54 @@ fn handle_autonomous_mode(
     }
 
     // Work remains
-    let mut result = StopHookResult::block()
-        .with_message("# Autonomous Mode Active")
-        .with_message("")
-        .with_message(format!(
-            "**Iteration {iteration}** | Outstanding issues: {total_outstanding}"
-        ))
-        .with_message(format!("Iterations since last issue change: {iterations_since_change}"))
-        .with_message("")
-        .with_message("## Current State")
-        .with_message(format!("- Open issues: {}", open_ids.len()))
-        .with_message(format!("- In progress: {}", in_progress_ids.len()))
-        .with_message("")
-        .with_message("## Action Required")
-        .with_message("")
-        .with_message("Continue working on outstanding issues:")
-        .with_message("")
-        .with_message("1. Run `bd ready` to see available work")
-        .with_message("2. Pick an issue and work on it")
-        .with_message("3. Run quality checks after completing work")
-        .with_message("4. Close completed issues with `bd close <id>`");
+    let mut result =
+        StopHookResult::block().with_message("# Just-Keep-Working Mode Active").with_message("");
+
+    if beads_available {
+        result
+            .messages
+            .push(format!("**Iteration {iteration}** | Outstanding issues: {total_outstanding}"));
+        result
+            .messages
+            .push(format!("Iterations since last issue change: {iterations_since_change}"));
+        result.messages.push(String::new());
+        result.messages.push("## Current State".to_string());
+        result.messages.push(format!("- Open issues: {}", open_ids.len()));
+        result.messages.push(format!("- In progress: {}", in_progress_ids.len()));
+        result.messages.push(String::new());
+        result.messages.push("## Action Required".to_string());
+        result.messages.push(String::new());
+        result.messages.push("Continue working on outstanding issues:".to_string());
+        result.messages.push(String::new());
+        result.messages.push("1. Run `bd ready` to see available work".to_string());
+        result.messages.push("2. Pick an issue and work on it".to_string());
+        result.messages.push("3. Run quality checks after completing work".to_string());
+        result.messages.push("4. Close completed issues with `bd close <id>`".to_string());
+    } else {
+        result.messages.push(format!("**Iteration {iteration}**"));
+        result
+            .messages
+            .push(format!("Iterations since last git change: {iterations_since_change}"));
+        result.messages.push(String::new());
+        result.messages.push("## Progress Tracking".to_string());
+        result.messages.push("- Tracking progress via git working state".to_string());
+        result.messages.push("- Install `bd` (beads) for issue-based tracking".to_string());
+        result.messages.push(String::new());
+        result.messages.push("## Action Required".to_string());
+        result.messages.push(String::new());
+        result.messages.push("Continue working:".to_string());
+        result.messages.push(String::new());
+        result.messages.push("1. Make progress on your current task".to_string());
+        result.messages.push("2. Stage changes to indicate progress".to_string());
+        result.messages.push("3. Run quality checks after completing work".to_string());
+    }
 
     if iterations_since_change > 2 {
         result.messages.push(String::new());
-        result
-            .messages
-            .push(format!("**Warning**: No issue changes for {iterations_since_change} loops."));
+        let change_type = if beads_available { "issue" } else { "git" };
+        result.messages.push(format!(
+            "**Warning**: No {change_type} changes for {iterations_since_change} loops."
+        ));
         result.messages.push(format!("Staleness threshold: {STALENESS_THRESHOLD}"));
     }
 
@@ -1214,7 +1278,10 @@ mod tests {
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("user interaction")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.contains("User Interaction") || m.contains("asking")));
     }
 
     #[test]
@@ -1295,19 +1362,27 @@ mod tests {
     }
 
     #[test]
-    fn test_bypass_problem_phrase_allows_exit() {
+    fn test_bypass_problem_phrase_enters_problem_mode() {
+        use tempfile::TempDir;
+
         let transcript_file = create_transcript_with_output(PROBLEM_NEEDS_USER);
         let runner = mock_with_uncommitted_for_bypass();
         let sub_agent = MockSubAgent::new();
+
+        let dir = TempDir::new().unwrap();
         let input = crate::hooks::HookInput {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig::default();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Problem requiring user input")));
+        // Problem phrase now blocks and enters problem mode
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Problem Mode Activated")));
+        // Verify problem mode marker was created
+        assert!(crate::session::is_problem_mode_active(dir.path()));
     }
 
     #[test]
@@ -1323,7 +1398,6 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Human input required")));
     }
 
     #[test]
@@ -1449,6 +1523,9 @@ mod tests {
 
     #[test]
     fn test_quality_check_passes() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
         let mut runner = MockCommandRunner::new();
 
         let empty_success =
@@ -1467,6 +1544,7 @@ mod tests {
         let config = StopHookConfig {
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
+            base_dir: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
 
@@ -1476,10 +1554,13 @@ mod tests {
     }
 
     #[test]
-    fn test_quality_check_fails_not_autonomous() {
-        // Test quality check failure when NOT in autonomous mode
+    fn test_quality_check_fails_not_jkw_mode() {
+        use tempfile::TempDir;
+
+        // Test quality check failure when NOT in just-keep-working mode
         // This requires: no session, ahead of remote (skip fast path),
         // require_push=false, quality check enabled and fails
+        let dir = TempDir::new().unwrap();
         let mut runner = MockCommandRunner::new();
 
         let empty_success =
@@ -1518,7 +1599,7 @@ mod tests {
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
             require_push: false, // Don't block on unpushed commits
-            ..Default::default()
+            base_dir: Some(dir.path().to_path_buf()),
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
@@ -1526,18 +1607,35 @@ mod tests {
         assert!(result.messages.iter().any(|m| m.contains("Quality Gates Failed")));
     }
 
-    // Helper to create a session file for autonomous mode tests
+    // Helper to create a session file for just-keep-working mode tests
     fn create_session_file(base: &std::path::Path, iteration: u32, last_change: u32) {
+        create_session_file_with_issues(base, iteration, last_change, &[]);
+    }
+
+    fn create_session_file_with_issues(
+        base: &std::path::Path,
+        iteration: u32,
+        last_change: u32,
+        issues: &[&str],
+    ) {
         let session_dir = base.join(".claude");
         std::fs::create_dir_all(&session_dir).unwrap();
+        let issues_yaml = if issues.is_empty() {
+            "[]".to_string()
+        } else {
+            format!(
+                "\n{}",
+                issues.iter().map(|i| format!("  - {i}")).collect::<Vec<_>>().join("\n")
+            )
+        };
         let content = format!(
-            "---\niteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: []\n---\n# Session"
+            "---\niteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: {issues_yaml}\n---\n# Session"
         );
-        std::fs::write(session_dir.join("autonomous-session.local.md"), content).unwrap();
+        std::fs::write(session_dir.join("jkw-session.local.md"), content).unwrap();
     }
 
     #[test]
-    fn test_autonomous_mode_work_remaining() {
+    fn test_jkw_mode_work_remaining() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -1553,15 +1651,24 @@ mod tests {
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let sha =
+            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
 
         // check_uncommitted_changes (fast path skipped due to session file)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // get_current_issues (beads not available since no .beads dir)
-        // So no beads commands expected
+        // working_state_hash (beads not available since no .beads dir)
+        runner.expect("git", &["rev-parse", "HEAD"], sha);
+        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
+        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -1569,12 +1676,12 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
         assert!(result.messages.iter().any(|m| m.contains("Iteration 4")));
     }
 
     #[test]
-    fn test_autonomous_mode_staleness_detected() {
+    fn test_jkw_mode_staleness_detected() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -1584,39 +1691,11 @@ mod tests {
         // This means iterations_since_change = 10-3 = 7, and after increment = 11-3 = 8 >= 5
         create_session_file(base, 10, 3);
 
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Staleness Detected")));
-    }
-
-    #[test]
-    fn test_autonomous_mode_all_done_quality_passes() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file (iteration 1, last change at 1)
-        create_session_file(base, 1, 1);
+        // Create .beads directory so beads is "available" - this allows testing issue-based staleness
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
 
         let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
@@ -1633,8 +1712,64 @@ mod tests {
         );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
+        // get_current_issues returns empty (same as issue_snapshot in session - no change)
+        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
+        runner.expect("bd", &["list", "--status=in_progress"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Staleness Detected")));
+    }
+
+    #[test]
+    fn test_jkw_mode_all_done_quality_passes() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create session file (iteration 1, last change at 1)
+        create_session_file(base, 1, 1);
+
+        // Create .beads directory so beads is "available"
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path skipped)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // get_current_issues (returns empty - all done)
+        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
+        runner.expect("bd", &["list", "--status=in_progress"], empty_success.clone());
+
         // Quality check passes
-        runner.expect("sh", &["-c", "just check"], empty_success);
+        runner.expect("sh", &["-c", "just check"], empty_success.clone());
+
+        // check_self_reflection calls git::check_uncommitted_changes
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // check_self_reflection skips git::combined_diff since no changes were detected
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -1652,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn test_autonomous_mode_all_done_quality_fails() {
+    fn test_jkw_mode_all_done_quality_fails() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -1661,7 +1796,11 @@ mod tests {
         // Create session file (iteration 1, last change at 1)
         create_session_file(base, 1, 1);
 
+        // Create .beads directory so beads is "available"
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
+
         let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
@@ -1676,8 +1815,16 @@ mod tests {
         // check_uncommitted_changes (fast path skipped)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // get_current_issues (returns empty - all done)
+        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
+        runner.expect("bd", &["list", "--status=in_progress"], empty_success);
 
         // Quality check fails
         runner.expect("sh", &["-c", "just check"], quality_fail);
@@ -1697,22 +1844,32 @@ mod tests {
     }
 
     #[test]
-    fn test_autonomous_mode_with_staleness_warning() {
+    fn test_jkw_mode_with_staleness_warning() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create session file (iteration 5, last change at 2 - gives 3 iterations since change)
+        // Create session file with matching issues so staleness counter continues
+        // (iteration 5, last change at 2 - gives 3 iterations since change)
         // After increment it becomes iteration 6, so iterations_since_change = 4 > 2
-        create_session_file(base, 5, 2);
+        create_session_file_with_issues(base, 5, 2, &["issue-1"]);
+
+        // Create .beads directory so beads is "available"
+        std::fs::create_dir_all(base.join(".beads")).unwrap();
 
         let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let issues_output = CommandOutput {
+            exit_code: 0,
+            stdout: "issue-1\n".to_string(), // Same as snapshot so no change detected
+            stderr: String::new(),
+        };
 
         // check_uncommitted_changes (fast path skipped)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
@@ -1720,19 +1877,23 @@ mod tests {
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
+        // get_current_issues - returns same issues as snapshot so no change detected
+        runner.expect("bd", &["list", "--status=open"], issues_output.clone());
+        runner.expect("bd", &["list", "--status=in_progress"], issues_output);
+
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
         // Check for staleness warning (iterations > 2)
         assert!(result.messages.iter().any(|m| m.contains("Warning")));
     }
 
     #[test]
-    fn test_autonomous_mode_with_beads_issues() {
+    fn test_jkw_mode_with_beads_issues() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -1778,7 +1939,7 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Autonomous Mode Active")));
+        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
         assert!(result.messages.iter().any(|m| m.contains("Outstanding issues: 1")));
         assert!(result.messages.iter().any(|m| m.contains("Open issues: 1")));
     }
@@ -1875,12 +2036,14 @@ mod tests {
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
+        let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig::default();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Should allow stop despite uncommitted changes due to API error loop
@@ -2052,6 +2215,7 @@ mod tests {
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit);
 
+        let dir = TempDir::new().unwrap();
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
             "User preference needed".to_string(),
@@ -2062,11 +2226,18 @@ mod tests {
             ..Default::default()
         };
         // require_push = false so we don't block on unpushed commits
-        let config = StopHookConfig { require_push: false, ..Default::default() };
+        let config = StopHookConfig {
+            require_push: false,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("user interaction")));
+        assert!(result
+            .messages
+            .iter()
+            .any(|m| m.contains("User Interaction") || m.contains("asking")));
     }
 
     #[test]

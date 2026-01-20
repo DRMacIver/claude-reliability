@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Autonomous mode stop hook.
+Just-keep-working mode stop hook.
 
-This hook runs when Claude attempts to stop/exit. It implements the autonomous
+This hook runs when Claude attempts to stop/exit. It implements the just-keep-working
 development loop by:
-1. Checking if autonomous mode is active
+1. Checking if just-keep-working mode is active
 2. Evaluating stopping conditions
 3. Blocking exit if work should continue
 4. Providing guidance on what to do next
@@ -40,7 +40,7 @@ HUMAN_INPUT_REQUIRED = (
 # Number of iterations without issue changes before stopping
 STALENESS_THRESHOLD = 5
 
-SESSION_FILE = Path(".claude/autonomous-session.local.md")
+SESSION_FILE = Path(".claude/jkw-session.local.md")
 BUILD_FAILING_MARKER = Path(".claude/build-already-failing.local")
 BEADS_WARNING_MARKER = Path(".claude/beads-warning-given.local")
 
@@ -216,7 +216,7 @@ def run_subagent_decision(
         eprint()
         return False, "Yes, please continue."
 
-    prompt = f"""You are a sub-agent helping to manage an autonomous session.
+    prompt = f"""You are a sub-agent helping to manage an just-keep-working session.
 
 The main agent has stopped and its last output appears to contain a question.
 The user has been active recently (within the last {USER_RECENCY_MINUTES} minutes).
@@ -385,7 +385,7 @@ def run_command(cmd: list[str]) -> tuple[int, str]:
 
 
 def parse_session_file() -> dict[str, Any] | None:
-    """Parse the autonomous session configuration file."""
+    """Parse the just-keep-working session configuration file."""
     if not SESSION_FILE.exists():
         return None
 
@@ -421,9 +421,9 @@ def update_session_file(config: dict[str, Any]) -> None:
     content = f"""---
 {yaml.dump(config, default_flow_style=False)}---
 
-# Autonomous Session Log
+# Just-Keep-Working Session Log
 
-This file tracks the autonomous development session.
+This file tracks the just-keep-working development session.
 """
     SESSION_FILE.write_text(content)
 
@@ -819,7 +819,7 @@ def main() -> int:
     except Exception:
         pass
 
-    # Fast path: if no autonomous session and no git changes, allow immediate exit
+    # Fast path: if no just-keep-working session and no git changes, allow immediate exit
     # This must come before any subagent calls to avoid slowness
     if not SESSION_FILE.exists():
         has_changes, _ = check_uncommitted_changes()
@@ -843,7 +843,7 @@ def main() -> int:
         eprint()
         return 2
 
-    # Always check for uncommitted changes (even outside autonomous mode)
+    # Always check for uncommitted changes (even outside just-keep-working mode)
     has_changes, change_desc = check_uncommitted_changes()
 
     if has_changes:
@@ -1026,14 +1026,14 @@ def main() -> int:
         eprint(sub_agent_response)
         eprint()
         eprint("---")
-        eprint("Continuing autonomous work...")
+        eprint("Continuing just-keep-working work...")
         eprint()
-        # Don't return - continue with autonomous mode
+        # Don't return - continue with just-keep-working mode
 
-    # Check if autonomous mode is active
+    # Check if just-keep-working mode is active
     config = parse_session_file()
     if config is None:
-        # Not in autonomous mode - run quality checks before allowing exit
+        # Not in just-keep-working mode - run quality checks before allowing exit
         # This ensures coverage and other quality gates pass
         eprint("# Pre-exit Quality Check")
         eprint()
@@ -1089,14 +1089,14 @@ def main() -> int:
         eprint("# Staleness Detected")
         eprint()
         eprint(f"No issue changes for {iterations_since_change} iterations.")
-        eprint("Autonomous mode is stopping due to lack of progress.")
+        eprint("Just-keep-working mode is stopping due to lack of progress.")
         eprint()
         eprint("This could mean:")
         eprint("- The remaining work requires human decisions")
         eprint("- There's a blocker that needs manual intervention")
         eprint("- The loop is stuck in an unproductive pattern")
         eprint()
-        eprint("Run `/autonomous-mode` to start a new session with fresh goals.")
+        eprint("Run `/just-keep-working` to start a new session with fresh goals.")
         cleanup_session_file()
         return 0  # Allow exit
 

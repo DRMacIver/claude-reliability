@@ -2,9 +2,9 @@
 description: Enter autonomous development mode with iterative task completion
 ---
 
-# Autonomous Development Mode
+# Just Keep Working Mode
 
-You are entering **autonomous development mode**. This mode allows you to work
+You are entering **just-keep-working mode**. This mode allows you to work
 iteratively on tasks with minimal human intervention, using beads for issue
 tracking and automatic progress detection.
 
@@ -17,7 +17,7 @@ Before starting, gather information from the user:
 3. **Identify Constraints**: Areas to avoid? Scope boundaries?
 4. **Quality Requirements**: What quality gates must pass?
 
-Write the session configuration to `.claude/autonomous-session.local.md`.
+Write the session configuration to `.claude/jkw-session.local.md`.
 
 ## Work Loop
 

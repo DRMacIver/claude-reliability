@@ -2,9 +2,9 @@
 description: Enter autonomous development mode with iterative task completion
 ---
 
-# Autonomous Development Mode
+# Just Keep Working Mode
 
-You are entering **autonomous development mode**. This mode allows you to work
+You are entering **just-keep-working mode**. This mode allows you to work
 iteratively on tasks with minimal human intervention, using beads for issue
 tracking and automatic progress detection.
 
@@ -17,7 +17,7 @@ Before starting, gather information from the user:
 3. **Identify Constraints**: Areas to avoid? Scope boundaries?
 4. **Quality Requirements**: What quality gates must pass?
 
-Write the session configuration to `.claude/autonomous-session.local.md`.
+Write the session configuration to `.claude/jkw-session.local.md`.
 
 ## Work Loop
 
@@ -25,7 +25,7 @@ For each iteration:
 1. Check for available issues with `bd ready`
 2. Pick the highest priority issue
 3. Implement the solution
-4. Run quality checks with `/quality-check`
+4. Run quality checks with `/claude-reliability:quality-check`
 5. If checks pass, close the issue with `bd close <id>`
 6. Repeat until no issues remain or staleness detected
 

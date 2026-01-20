@@ -47,7 +47,7 @@ impl SubAgent for RealSubAgent<'_> {
         user_recency_minutes: u32,
     ) -> Result<SubAgentDecision> {
         let prompt = format!(
-            r#"You are a sub-agent helping to manage an autonomous session.
+            r#"You are a sub-agent helping to manage an just-keep-working session.
 
 The main agent has stopped and its last output appears to contain a question.
 The user has been active recently (within the last {user_recency_minutes} minutes).
@@ -221,7 +221,36 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
         ))
     }
 
-    fn reflect_on_work(&self, assistant_output: &str, git_diff: &str) -> Result<(bool, String)> {
+    fn reflect_on_work(
+        &self,
+        assistant_output: &str,
+        git_diff: &str,
+        in_jkw_mode: bool,
+    ) -> Result<(bool, String)> {
+        let jkw_context = if in_jkw_mode {
+            r"
+
+## Just-Keep-Working Mode Context
+
+You are currently in **just-keep-working mode**. This means you have a session plan that you're working through.
+
+**IMPORTANT**: Double-check your plan for this session:
+1. Review the conditions and success criteria defined in your `.claude/jkw-session.local.md` file
+2. Confirm you have definitely completed ALL conditions of your instructions
+3. Consider if there are any remaining tasks in your plan that haven't been addressed
+
+If you haven't fully completed all the planned work, mark this as incomplete."
+        } else {
+            r#"
+
+## Continuation Guidance
+
+If you believe your work is incomplete, you should invoke `/just-keep-working` with enough information to cover your current task. This will allow you to continue working without requiring further questions to the user.
+
+Example: If you've implemented a feature but haven't run tests, you could invoke:
+`/just-keep-working` with the goal "Complete remaining work: run tests for the new feature and fix any failures""#
+        };
+
         let prompt = format!(
             r#"You are a self-reflection agent. Your task is to reflect on whether the assistant has completed the user's request properly, or whether there might be something incomplete, misunderstood, or shortcuts taken.
 
@@ -234,6 +263,7 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
 <git_diff>
 {git_diff}
 </git_diff>
+{jkw_context}
 
 ## Your Task
 Carefully reflect on whether the work appears complete and correct. Consider:
@@ -680,7 +710,8 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+            let (complete, feedback) =
+                agent.reflect_on_work("test output", "+diff", false).unwrap();
 
             assert!(complete);
             assert!(feedback.contains("looks good"));
@@ -695,7 +726,8 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+            let (complete, feedback) =
+                agent.reflect_on_work("test output", "+diff", false).unwrap();
 
             assert!(!complete);
             assert!(feedback.contains("Missing test"));
@@ -709,7 +741,8 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+            let (complete, feedback) =
+                agent.reflect_on_work("test output", "+diff", false).unwrap();
 
             // Command failure defaults to complete
             assert!(complete);
@@ -724,7 +757,8 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let (complete, feedback) = agent.reflect_on_work("test output", "+diff").unwrap();
+            let (complete, feedback) =
+                agent.reflect_on_work("test output", "+diff", false).unwrap();
 
             // Invalid JSON defaults to complete
             assert!(complete);
@@ -737,7 +771,7 @@ mod tests {
             let agent = RealSubAgent::new(&runner)
                 .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
 
-            let result = agent.reflect_on_work("test output", "+diff");
+            let result = agent.reflect_on_work("test output", "+diff", false);
             assert!(result.is_err());
         }
     }

@@ -6,7 +6,7 @@
 # during updates or other operations.
 #
 # To modify hooks, set the MODIFY_HOOK environment variable:
-#   MODIFY_HOOK="Yes I really meant to edit the autonomous-stop-hook.py hook(s) the user has said it is OK" git commit ...
+#   MODIFY_HOOK="Yes I really meant to edit the jkw-stop-hook.py hook(s) the user has said it is OK" git commit ...
 #
 # The value must include the names of the hooks being modified.
 

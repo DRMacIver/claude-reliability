@@ -4,7 +4,7 @@ description: Generate new features and improvements for the project
 
 # Ideate - Getting Unstuck
 
-Use this when you're in autonomous mode and feel stuck, blocked, or uncertain about next steps.
+Use this when you're in just-keep-working mode and feel stuck, blocked, or uncertain about next steps.
 
 ## Step 1: Assess Current State
 
@@ -36,7 +36,7 @@ Consider these strategies for getting unstuck:
 
 ## Key Principle
 
-In autonomous mode, momentum matters. If blocked on one task:
+In just-keep-working mode, momentum matters. If blocked on one task:
 1. Log the blocker
 2. Move to the next ready task
 3. Return to blocked tasks when conditions change
