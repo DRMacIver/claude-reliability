@@ -499,10 +499,8 @@ fn update_gitignore_content(existing: &str) -> String {
             result.push('\n');
         }
         result.push_str(&managed_section);
+        // Note: managed_section always ends with '\n' so we don't need to add one
         if !after.is_empty() {
-            if !result.ends_with('\n') {
-                result.push('\n');
-            }
             result.push_str(after.trim_start_matches('\n'));
         }
         result
@@ -1656,15 +1654,32 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_code_review_section_write_fails() {
-        // Test when writing to CLAUDE.md fails (read-only directory)
-        // This is hard to test without mocking, so we'll use a directory path
-        // instead of a file path to trigger a write error
+    fn test_ensure_code_review_section_read_fails() {
+        // Test when reading CLAUDE.md fails because it's a directory
         let dir = TempDir::new().unwrap();
         let claude_md = dir.path().join(CLAUDE_MD_PATH);
 
         // Create a directory at CLAUDE.md path instead of a file
         std::fs::create_dir_all(&claude_md).unwrap();
+
+        // This should return false because read will fail
+        let result = ensure_code_review_section(dir.path());
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_write_fails() {
+        // Test when writing to CLAUDE.md fails (file is read-only)
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md as a file without the code review section
+        std::fs::write(&claude_md, "# Project\n\nSome content\n").unwrap();
+
+        // Make the file read-only to trigger write failure
+        let mut perms = std::fs::metadata(&claude_md).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&claude_md, perms).unwrap();
 
         // This should return false because write will fail
         let result = ensure_code_review_section(dir.path());

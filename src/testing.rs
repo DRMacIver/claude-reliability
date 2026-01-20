@@ -206,6 +206,48 @@ impl CommandRunner for FailingCommandRunner {
     }
 }
 
+/// A sub-agent that always fails, for testing error paths.
+#[derive(Debug, Default)]
+pub struct FailingSubAgent {
+    error_message: String,
+}
+
+impl FailingSubAgent {
+    /// Create a new failing sub-agent with the specified error message.
+    #[must_use]
+    pub fn new(error_message: impl Into<String>) -> Self {
+        Self { error_message: error_message.into() }
+    }
+}
+
+impl SubAgent for FailingSubAgent {
+    fn decide_on_question(
+        &self,
+        _assistant_output: &str,
+        _user_recency_minutes: u32,
+    ) -> Result<SubAgentDecision> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn review_code(
+        &self,
+        _diff: &str,
+        _files: &[String],
+        _review_guide: Option<&str>,
+    ) -> Result<(bool, String)> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn reflect_on_work(
+        &self,
+        _assistant_output: &str,
+        _git_diff: &str,
+        _in_jkw_mode: bool,
+    ) -> Result<(bool, String)> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +343,15 @@ mod tests {
     fn test_mock_sub_agent_reflect_on_work_no_expectation() {
         let agent = MockSubAgent::new();
         let _ = agent.reflect_on_work("output", "diff", false);
+    }
+
+    #[test]
+    fn test_failing_sub_agent() {
+        let agent = FailingSubAgent::new("test error");
+
+        // All methods should return errors
+        assert!(agent.decide_on_question("test", 5).is_err());
+        assert!(agent.review_code("diff", &[], None).is_err());
+        assert!(agent.reflect_on_work("output", "diff", false).is_err());
     }
 }

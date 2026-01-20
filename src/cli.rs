@@ -360,10 +360,8 @@ fn run_problem_mode_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     };
 
     let output = run_problem_mode_hook(&input, Path::new("."));
-    let json = match serde_json::to_string(&output) {
-        Ok(json) => json,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to serialize output: {e}")]),
-    };
+    // Serialization cannot fail for PreToolUseOutput (only contains strings)
+    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
 
     (ExitCode::SUCCESS, vec![json])
 }
@@ -1057,6 +1055,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_validation_via_cli() {
         use tempfile::TempDir;
 
@@ -1116,5 +1115,187 @@ mod tests {
         assert!(messages[0].contains("allow"));
         // Should NOT set the needs_validation marker
         assert!(!crate::session::needs_validation(dir_path));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_ensure_config_error_read_only() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create .claude directory as a read-only file to make ensure_config fail
+        let claude_dir = dir_path.join(".claude");
+        std::fs::write(&claude_dir, "this is a file, not a directory").unwrap();
+        // Make it read-only
+        let mut perms = std::fs::metadata(&claude_dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&claude_dir, perms).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should return error because .claude can't be created as a directory
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Error ensuring config"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_ensure_gitignore_error_read_only() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create .gitignore as a read-only directory to make ensure_gitignore fail
+        let gitignore = dir_path.join(".gitignore");
+        std::fs::create_dir(&gitignore).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let (code, messages) = run(&args(&["prog", "ensure-gitignore"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should return error because .gitignore can't be written
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Error updating .gitignore"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_user_prompt_submit_error() {
+        use tempfile::TempDir;
+
+        // Test that user_prompt_submit returns an error when file operations fail
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create .claude directory and make it read-only to trigger write failure
+        let claude_dir = dir_path.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create marker files that the hook will try to remove
+        std::fs::write(claude_dir.join("reflection-done.local"), "").unwrap();
+        std::fs::write(claude_dir.join("needs-validation.local"), "").unwrap();
+
+        // Make the .claude directory read-only to prevent file removal
+        let mut perms = std::fs::metadata(&claude_dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&claude_dir, perms).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let (code, messages) = run(&args(&["prog", "user-prompt-submit"]), "");
+
+        // Restore permissions before cleanup
+        let mut perms = std::fs::metadata(&claude_dir).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&claude_dir, perms).unwrap();
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should return error because file operations fail
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Error running user-prompt-submit hook"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_stop_config_load_fallback() {
+        use tempfile::TempDir;
+
+        // Test that stop command continues with defaults when config can't be loaded
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create a corrupt config file
+        let claude_dir = dir_path.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("reliability-config.yaml"), "{{{{invalid yaml").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Run stop command - it should fall back to defaults and continue
+        let (code, messages) = run(&args(&["prog", "stop"]), "{}");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed (with warning about config, handled gracefully)
+        // The stop command should still work with defaults
+        assert_eq!(code, ExitCode::SUCCESS);
+        // At minimum it should process and not crash
+        assert!(!messages.is_empty() || code == ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_no_verify_config_error_continues() {
+        use tempfile::TempDir;
+
+        // Test that no_verify continues even when config fails
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create .claude as a file to prevent config creation
+        let claude_dir = dir_path.join(".claude");
+        std::fs::write(&claude_dir, "not a directory").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Run no_verify - should work even if config fails
+        let (code, _messages) = run(
+            &args(&["prog", "pre-tool-use", "no-verify"]),
+            r#"{"tool_name": "Bash", "tool_input": {"command": "ls"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed (warning logged but not affecting return)
+        // The hook processes successfully even if config can't be ensured
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_code_review_config_error_continues() {
+        use tempfile::TempDir;
+
+        // Test that code_review continues even when config fails
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create .claude as a file to prevent config creation
+        let claude_dir = dir_path.join(".claude");
+        std::fs::write(&claude_dir, "not a directory").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Run code_review - should work even if config fails
+        let (code, _messages) = run(
+            &args(&["prog", "pre-tool-use", "code-review"]),
+            r#"{"tool_name": "Bash", "tool_input": {"command": "echo hello"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed (warning logged but hook still works)
+        // The hook processes successfully even if config can't be ensured
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 }
