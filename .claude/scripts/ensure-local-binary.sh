@@ -2,10 +2,11 @@
 # ensure-local-binary.sh - Ensures the claude-reliability binary is available locally
 #
 # This script:
-# 1. Checks for binary at .claude/bin/claude-reliability
-# 2. If missing, tries to download from GitHub releases
-# 3. Falls back to building from source if in the source repo
-# 4. Prints the path to the binary on success, exits non-zero on failure
+# 1. In the source repo: rebuilds if source files changed
+# 2. Otherwise checks for binary at .claude/bin/claude-reliability
+# 3. If missing, tries to download from GitHub releases
+# 4. Falls back to building from source if in the source repo
+# 5. Prints the path to the binary on success, exits non-zero on failure
 
 set -euo pipefail
 
@@ -18,16 +19,35 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 BINARY_PATH="${PROJECT_ROOT}/.claude/bin/claude-reliability"
 
-# Check if binary exists and is executable
-if [[ -x "$BINARY_PATH" ]]; then
-    # Verify it works
-    if "$BINARY_PATH" version >/dev/null 2>&1; then
-        echo "$BINARY_PATH"
-        exit 0
+# ============================================================================
+# Function definitions (must be before they're called)
+# ============================================================================
+
+# Check if we're in the source repository (has Cargo.toml with our crate name)
+is_source_repo() {
+    [[ -f "${PROJECT_ROOT}/Cargo.toml" ]] && grep -q 'name = "claude-reliability"' "${PROJECT_ROOT}/Cargo.toml" 2>/dev/null
+}
+
+# Check if source files are newer than the binary
+source_is_newer() {
+    if [[ ! -x "$BINARY_PATH" ]]; then
+        return 0  # No binary, need to build
     fi
-    # Binary is broken, remove it
-    rm -f "$BINARY_PATH"
-fi
+
+    # Check if any Rust source files are newer than the binary
+    local newer_files
+    newer_files=$(find "${PROJECT_ROOT}/src" -name '*.rs' -newer "$BINARY_PATH" 2>/dev/null | head -1)
+    if [[ -n "$newer_files" ]]; then
+        return 0  # Source is newer
+    fi
+
+    # Also check Cargo.toml for dependency changes
+    if [[ "${PROJECT_ROOT}/Cargo.toml" -nt "$BINARY_PATH" ]]; then
+        return 0
+    fi
+
+    return 1  # Binary is up to date
+}
 
 # Detect platform
 detect_platform() {
@@ -154,7 +174,34 @@ build_from_source() {
     return 1
 }
 
+# ============================================================================
 # Main logic
+# ============================================================================
+
+# In the source repo, check if we need to rebuild due to source changes
+if is_source_repo && source_is_newer; then
+    echo "Source files changed, rebuilding..." >&2
+    if build_from_source; then
+        if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
+            echo "$BINARY_PATH"
+            exit 0
+        fi
+    fi
+    echo "Rebuild failed, trying other methods..." >&2
+fi
+
+# Check if binary exists and is executable
+if [[ -x "$BINARY_PATH" ]]; then
+    # Verify it works
+    if "$BINARY_PATH" version >/dev/null 2>&1; then
+        echo "$BINARY_PATH"
+        exit 0
+    fi
+    # Binary is broken, remove it
+    rm -f "$BINARY_PATH"
+fi
+
+# Not in source repo or no binary - try downloading
 artifact_name=$(detect_platform)
 
 if [[ -n "$artifact_name" ]]; then
