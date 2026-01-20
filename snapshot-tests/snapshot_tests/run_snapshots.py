@@ -35,6 +35,7 @@ from typing import Any
 from snapshot_tests.placeholder import PlaceholderRegistry
 from snapshot_tests.transcript import parse_transcript, extract_tool_calls
 from snapshot_tests.simulator import ToolSimulator
+from snapshot_tests.compile_transcript import compile_transcript
 
 
 @dataclass
@@ -324,6 +325,30 @@ def run_test(
             )
 
 
+def compile_all_transcripts(tests: list[TestConfig], verbose: bool = False) -> None:
+    """Compile all transcript.jsonl files to transcript.md.
+
+    Args:
+        tests: List of test configurations
+        verbose: Show detailed output
+    """
+    compiled = 0
+    for test in tests:
+        if not test.transcript_path or not test.transcript_path.exists():
+            continue
+
+        md_path = test.transcript_path.with_suffix(".md")
+        transcript = parse_transcript(test.transcript_path)
+        markdown = compile_transcript(transcript, verbose=False)
+        md_path.write_text(markdown)
+        compiled += 1
+
+        if verbose:
+            print(f"  Compiled {test.name}/transcript.md")
+
+    print(f"Compiled {compiled} transcripts to markdown")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Run snapshot tests")
@@ -393,6 +418,10 @@ def main():
     failed = len(results) - passed
 
     print(f"Results: {passed} passed, {failed} failed")
+    print()
+
+    # Compile transcripts to markdown
+    compile_all_transcripts(tests, args.verbose)
 
     if failed > 0:
         sys.exit(1)
