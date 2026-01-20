@@ -690,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_stop_via_cli_in_temp_repo() {
         use std::process::Command;
         use tempfile::TempDir;
@@ -744,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_code_review_via_cli_in_temp_repo() {
         use std::process::Command;
         use tempfile::TempDir;
@@ -771,5 +773,110 @@ mod tests {
 
         // Should succeed - no staged files means no review needed
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_ensure_config_via_cli() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(messages.iter().any(|m| m.contains("Config ensured")));
+        assert!(messages.iter().any(|m| m.contains("git_repo")));
+        assert!(messages.iter().any(|m| m.contains("beads_installed")));
+        // Check for check_command message (either with value or "(none)")
+        assert!(messages.iter().any(|m| m.contains("check_command")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_ensure_gitignore_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // First call should create/update
+        let (code, messages) = run(&args(&["prog", "ensure-gitignore"]), "");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(messages.iter().any(|m| m.contains(".gitignore")));
+
+        // Second call should report already has entries
+        let (code2, messages2) = run(&args(&["prog", "ensure-gitignore"]), "");
+        assert_eq!(code2, ExitCode::SUCCESS);
+        assert!(messages2.iter().any(|m| m.contains("already has")));
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_user_prompt_submit_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // user-prompt-submit should succeed (no setup file means nothing to do)
+        let (code, messages) = run(&args(&["prog", "user-prompt-submit"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_problem_mode_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Valid JSON input for problem-mode
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "problem-mode"]),
+            r#"{"tool_name": "Bash", "tool_input": {"command": "echo test"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        // Should return JSON output
+        assert!(!messages.is_empty());
+        assert!(messages[0].starts_with('{'));
+    }
+
+    #[test]
+    fn test_run_problem_mode_invalid_json() {
+        let (code, messages) = run(&args(&["prog", "pre-tool-use", "problem-mode"]), "not json");
+
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Failed to parse"));
     }
 }

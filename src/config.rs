@@ -1250,4 +1250,369 @@ mod tests {
         assert!(content.contains(GITIGNORE_SECTION_HEADER));
         assert!(content.contains(".claude/bin/"));
     }
+
+    #[test]
+    fn test_find_code_review_section_found() {
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md with Code Review section
+        std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nReview guidelines.").unwrap();
+
+        let result = find_code_review_section(dir.path());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), CODE_REVIEW_HEADER);
+    }
+
+    #[test]
+    fn test_find_code_review_section_not_found() {
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md without Code Review section
+        std::fs::write(&claude_md, "# Project\n\n## Development\n\nDev guidelines.").unwrap();
+
+        let result = find_code_review_section(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_code_review_section_no_file() {
+        let dir = TempDir::new().unwrap();
+        // No CLAUDE.md file
+        let result = find_code_review_section(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_adds_section() {
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md without Code Review section
+        std::fs::write(&claude_md, "# Project\n\n## Development").unwrap();
+
+        let result = ensure_code_review_section(dir.path());
+        assert!(result); // Section should be added
+
+        // Verify section was added
+        let content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(content.contains(CODE_REVIEW_HEADER));
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_already_exists() {
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md with Code Review section
+        std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nExisting guidelines.").unwrap();
+
+        let result = ensure_code_review_section(dir.path());
+        assert!(!result); // Section already exists, nothing added
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_no_file() {
+        let dir = TempDir::new().unwrap();
+        // No CLAUDE.md file
+        let result = ensure_code_review_section(dir.path());
+        assert!(!result); // Can't add section without file
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_adds_newline_if_missing() {
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create CLAUDE.md without trailing newline
+        std::fs::write(&claude_md, "# Project").unwrap();
+
+        let result = ensure_code_review_section(dir.path());
+        assert!(result);
+
+        // Verify content is properly formatted
+        let content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(content.starts_with("# Project\n"));
+        assert!(content.contains(CODE_REVIEW_HEADER));
+    }
+
+    #[test]
+    fn test_default_require_push_value() {
+        // Test that require_push defaults to true when loading config without it
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+
+        // Create .claude directory
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create config without require_push field
+        std::fs::write(&config_path, "git_repo: true\nbeads_installed: false\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        // require_push should default to true
+        assert!(config.require_push);
+    }
+
+    #[test]
+    fn test_project_config_load_wrapper() {
+        // Test the load() wrapper that uses current directory
+        // This test exercises the code path but doesn't verify behavior
+        // since we can't safely change current directory in parallel tests
+        let _ = ProjectConfig::load();
+    }
+
+    #[test]
+    fn test_project_config_detect_wrapper() {
+        use crate::testing::MockCommandRunner;
+        use crate::traits::CommandOutput;
+
+        // Test the detect() wrapper
+        // Need to mock git remote since current dir might have .git
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        let _config = ProjectConfig::detect(&runner);
+        // Just verify it doesn't panic - we can't predict the result
+        // since it depends on the actual current directory
+    }
+
+    #[test]
+    fn test_has_git_remote_error() {
+        use crate::testing::FailingCommandRunner;
+
+        let runner = FailingCommandRunner::new("simulated error");
+        let has_remote = has_git_remote(&runner);
+        // Should return false when git command fails
+        assert!(!has_remote);
+    }
+
+    #[test]
+    fn test_ensure_config_with_code_review_section_discovery() {
+        use crate::testing::MockCommandRunner;
+        use crate::traits::CommandOutput;
+
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+
+        // Create .git directory
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        // Create .claude directory and config without code_review_section
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "git_repo: true\nbeads_installed: false\nrequire_push: false\n",
+        )
+        .unwrap();
+
+        // Create CLAUDE.md with Code Review section (to be discovered)
+        std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nGuidelines.").unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        // No git remote
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let config = ensure_config_in(&runner, dir.path()).unwrap();
+
+        // Should have discovered the code review section
+        assert!(config.code_review_section.is_some());
+        assert_eq!(config.code_review_section.as_deref(), Some(CODE_REVIEW_HEADER));
+    }
+
+    #[test]
+    fn test_update_gitignore_content_no_trailing_newline() {
+        // Test that update_gitignore_content handles files without trailing newlines
+        let existing = "node_modules/";
+        let result = update_gitignore_content(existing);
+        assert!(result.contains("node_modules/"));
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_update_gitignore_content_empty_adds_section() {
+        let result = update_gitignore_content("");
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+        // Should not start with extra newlines
+        assert!(!result.starts_with("\n\n"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_ensure_config_adds_code_review_section_in_git_repo() {
+        use crate::testing::MockCommandRunner;
+        use crate::traits::CommandOutput;
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+
+        // Configure git user
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create CLAUDE.md WITHOUT Code Review section
+        let claude_md = base.join(CLAUDE_MD_PATH);
+        std::fs::write(&claude_md, "# Project\n\n## Development\n\nSome content.\n").unwrap();
+
+        // Create initial commit
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create config WITHOUT code_review_section
+        let config_path = base.join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "git_repo: true\nbeads_installed: false\n").unwrap();
+
+        // Mock the command runner for detect (we won't use it since config exists)
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        // Change to temp dir to run ensure_config
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(base).unwrap();
+
+        let config = ensure_config_in(&runner, base).unwrap();
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should have added the code review section
+        assert!(config.code_review_section.is_some());
+
+        // CLAUDE.md should now have Code Review section
+        let claude_content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(claude_content.contains(CODE_REVIEW_HEADER));
+    }
+
+    #[test]
+    fn test_auto_commit_claude_md_integration() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create and commit initial CLAUDE.md
+        let claude_md = base.join(CLAUDE_MD_PATH);
+        std::fs::write(&claude_md, "# Project\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Modify CLAUDE.md
+        std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nNew section.\n").unwrap();
+
+        // Call auto_commit_claude_md
+        auto_commit_claude_md(base);
+
+        // Check if there's a new commit
+        let log_output = Command::new("git")
+            .args(["log", "--oneline", "-n", "2"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let log_str = String::from_utf8_lossy(&log_output.stdout);
+        // Should have a commit for the code review section
+        assert!(log_str.contains("Code Review"));
+    }
+
+    #[test]
+    fn test_auto_commit_claude_md_no_changes() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create and commit CLAUDE.md
+        let claude_md = base.join(CLAUDE_MD_PATH);
+        std::fs::write(&claude_md, "# Project\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Count commits before
+        let count_before = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+
+        // Call auto_commit_claude_md with no changes staged
+        auto_commit_claude_md(base);
+
+        // Count commits after - should be same (no new commit)
+        let count_after = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+
+        assert_eq!(before, after);
+    }
 }

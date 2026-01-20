@@ -620,4 +620,27 @@ also not json
         let info = parse_transcript(file.path()).unwrap();
         assert!(!info.has_modifying_tool_use);
     }
+
+    #[test]
+    fn test_parse_transcript_unknown_content_block_type() {
+        // Test that unknown content block types (like "thinking") are handled gracefully
+        // This exercises the ContentBlock::Other arm
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "Final answer"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Should successfully parse, capturing only the text block
+        assert_eq!(info.last_assistant_output, Some("Final answer".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_tool_result_block_ignored() {
+        // Test that tool_result blocks (not text or tool_use) are handled as Other
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_result", "tool_use_id": "123", "content": "result"}, {"type": "text", "text": "Done"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Should successfully parse, capturing only the text block
+        assert_eq!(info.last_assistant_output, Some("Done".to_string()));
+    }
 }

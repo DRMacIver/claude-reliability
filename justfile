@@ -30,7 +30,7 @@ build:
 build-release:
 	cargo build --release
 
-check: lint test
+check: lint test-cov
 
 check-bin-size:
 	#!/usr/bin/env bash
@@ -250,7 +250,7 @@ test *ARGS:
 	cargo test {{ARGS}}
 
 test-cov:
-	cargo llvm-cov --lib --all-features --fail-under-lines 100
+	./scripts/check-coverage.py
 
 update-my-hooks:
 	#!/usr/bin/env bash
