@@ -265,7 +265,10 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         quality_check_command: env::var("QUALITY_CHECK_COMMAND")
             .ok()
             .or(project_config.check_command),
-        require_push: env::var("REQUIRE_PUSH").is_ok(),
+        // require_push defaults to true from config, but can be overridden by env var
+        require_push: env::var("REQUIRE_PUSH")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(project_config.require_push),
         repo_critique_mode: env::var("REPO_CRITIQUE_MODE").is_ok(),
         base_dir: None,
     };

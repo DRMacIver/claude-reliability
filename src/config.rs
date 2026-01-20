@@ -60,7 +60,8 @@ This section provides guidance to the automated code reviewer.
 ";
 
 /// Project configuration for reliability hooks.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Config structs legitimately have many boolean flags
 pub struct ProjectConfig {
     /// Whether this is a git repository.
     #[serde(default)]
@@ -78,6 +79,28 @@ pub struct ProjectConfig {
     /// Whether CLAUDE.md has a "Code Review" section.
     #[serde(default)]
     pub code_review_section: bool,
+
+    /// Whether to require pushing commits before allowing exit.
+    /// Defaults to true for git repos.
+    #[serde(default = "default_require_push")]
+    pub require_push: bool,
+}
+
+/// Default value for `require_push` - true by default.
+const fn default_require_push() -> bool {
+    true
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            git_repo: false,
+            beads_installed: false,
+            check_command: None,
+            code_review_section: false,
+            require_push: true,
+        }
+    }
 }
 
 impl ProjectConfig {
@@ -150,7 +173,7 @@ impl ProjectConfig {
         let check_command = detect_check_command(runner, base_dir);
         let code_review_section = has_code_review_section(base_dir);
 
-        Self { git_repo, beads_installed, check_command, code_review_section }
+        Self { git_repo, beads_installed, check_command, code_review_section, require_push: true }
     }
 
     /// Get the config file path for a base directory.
@@ -571,6 +594,7 @@ mod tests {
             beads_installed: true,
             check_command: Some("just check".to_string()),
             code_review_section: false,
+            require_push: true,
         };
 
         config.save_to(dir.path()).unwrap();
@@ -588,6 +612,7 @@ mod tests {
             beads_installed: false,
             check_command: Some("make test".to_string()),
             code_review_section: false,
+            require_push: true,
         };
 
         config.save_to(dir.path()).unwrap();
@@ -596,6 +621,7 @@ mod tests {
         assert!(content.contains("git_repo: true"));
         assert!(content.contains("beads_installed: false"));
         assert!(content.contains("check_command: make test"));
+        assert!(content.contains("require_push: true"));
     }
 
     #[test]
@@ -770,6 +796,7 @@ mod tests {
             beads_installed: true,
             check_command: Some("make test".to_string()),
             code_review_section: false,
+            require_push: true,
         };
         existing.save_to(dir.path()).unwrap();
 
