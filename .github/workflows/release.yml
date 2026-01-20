@@ -105,6 +105,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install just
+        uses: taiki-e/install-action@just
+
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 

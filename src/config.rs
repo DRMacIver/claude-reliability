@@ -751,7 +751,11 @@ mod tests {
 
         let result = find_justfile(dir.path());
         assert!(result.is_some());
-        assert!(result.unwrap().ends_with("Justfile"));
+        // On case-insensitive filesystems (macOS), the result may be "justfile" even
+        // when we wrote "Justfile", because find_justfile checks "justfile" first.
+        let path = result.unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.eq_ignore_ascii_case("justfile"));
     }
 
     #[test]
