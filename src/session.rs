@@ -135,6 +135,58 @@ pub fn cleanup_session_files(base_dir: &Path) -> Result<()> {
 /// Default path for the problem mode marker file.
 pub const PROBLEM_MODE_MARKER_PATH: &str = ".claude/problem-mode.local";
 
+/// Path for JKW setup required marker file.
+/// This marker is set when JKW is invoked but the session file doesn't exist yet.
+pub const JKW_SETUP_REQUIRED_MARKER_PATH: &str = ".claude/jkw-setup-required.local";
+
+/// Check if JKW setup is required (marker file exists).
+///
+/// When this returns true, Write/Edit operations should be blocked
+/// until the JKW session file exists.
+#[must_use]
+pub fn is_jkw_setup_required(base_dir: &Path) -> bool {
+    base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH).exists()
+}
+
+/// Mark that JKW setup is required (session file doesn't exist yet).
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be created.
+pub fn set_jkw_setup_required(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH);
+
+    // Ensure parent directory exists
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(
+        &marker_path,
+        "JKW setup required - Write/Edit blocked until session file is created",
+    )?;
+    Ok(())
+}
+
+/// Clear the JKW setup required marker (session file now exists).
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be removed.
+pub fn clear_jkw_setup_required(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH);
+    if marker_path.exists() {
+        fs::remove_file(marker_path)?;
+    }
+    Ok(())
+}
+
+/// Check if the JKW session notes file exists.
+#[must_use]
+pub fn jkw_session_file_exists(base_dir: &Path) -> bool {
+    base_dir.join(SESSION_NOTES_PATH).exists()
+}
+
 /// Check if problem mode is active (marker file exists).
 #[must_use]
 pub fn is_problem_mode_active(base_dir: &Path) -> bool {
@@ -384,5 +436,85 @@ issue_snapshot:
 
         assert!(dir.path().join(".claude").exists());
         assert!(is_problem_mode_active(dir.path()));
+    }
+
+    #[test]
+    fn test_jkw_setup_not_required_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!is_jkw_setup_required(dir.path()));
+    }
+
+    #[test]
+    fn test_set_jkw_setup_required() {
+        let dir = TempDir::new().unwrap();
+
+        set_jkw_setup_required(dir.path()).unwrap();
+
+        assert!(is_jkw_setup_required(dir.path()));
+        assert!(dir.path().join(JKW_SETUP_REQUIRED_MARKER_PATH).exists());
+    }
+
+    #[test]
+    fn test_clear_jkw_setup_required() {
+        let dir = TempDir::new().unwrap();
+
+        set_jkw_setup_required(dir.path()).unwrap();
+        assert!(is_jkw_setup_required(dir.path()));
+
+        clear_jkw_setup_required(dir.path()).unwrap();
+        assert!(!is_jkw_setup_required(dir.path()));
+    }
+
+    #[test]
+    fn test_clear_jkw_setup_required_when_not_set() {
+        let dir = TempDir::new().unwrap();
+
+        // Should not error when clearing without setting
+        clear_jkw_setup_required(dir.path()).unwrap();
+        assert!(!is_jkw_setup_required(dir.path()));
+    }
+
+    #[test]
+    fn test_set_jkw_setup_required_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        // .claude subdirectory doesn't exist yet
+
+        set_jkw_setup_required(dir.path()).unwrap();
+
+        assert!(dir.path().join(".claude").exists());
+        assert!(is_jkw_setup_required(dir.path()));
+    }
+
+    #[test]
+    fn test_jkw_session_file_exists() {
+        let dir = TempDir::new().unwrap();
+
+        // Initially doesn't exist
+        assert!(!jkw_session_file_exists(dir.path()));
+
+        // Create the file
+        let session_path = dir.path().join(SESSION_NOTES_PATH);
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        fs::write(&session_path, "# Session notes").unwrap();
+
+        assert!(jkw_session_file_exists(dir.path()));
+    }
+
+    #[test]
+    fn test_set_jkw_setup_required_write_fails() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create the .claude directory
+        let claude_dir = base.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create a directory at the marker path (can't write file over directory)
+        let marker_path = base.join(JKW_SETUP_REQUIRED_MARKER_PATH);
+        fs::create_dir_all(&marker_path).unwrap();
+
+        // Now set_jkw_setup_required should fail because it can't write over a directory
+        let result = set_jkw_setup_required(base);
+        assert!(result.is_err());
     }
 }

@@ -192,7 +192,10 @@ mod tests {
     fn test_run_no_verify_hook_normal_command() {
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(crate::hooks::ToolInput { command: Some("git status".to_string()) }),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git status".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
@@ -204,6 +207,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit --no-verify -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -214,7 +218,7 @@ mod tests {
     fn test_run_no_verify_hook_no_command() {
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(crate::hooks::ToolInput { command: None }),
+            tool_input: Some(crate::hooks::ToolInput { command: None, ..Default::default() }),
             ..Default::default()
         };
         assert_eq!(run_no_verify_hook(&input).unwrap(), 0);
@@ -237,6 +241,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit --no-verify -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };

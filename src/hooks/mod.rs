@@ -1,12 +1,14 @@
 //! Hook implementations for Claude Code.
 
 mod code_review;
+mod jkw_setup;
 mod no_verify;
 mod problem_mode;
 mod stop;
 mod user_prompt_submit;
 
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
+pub use jkw_setup::run_jkw_setup_hook;
 pub use no_verify::run_no_verify_hook;
 pub use problem_mode::run_problem_mode_hook;
 pub use stop::{run_stop_hook, StopHookConfig, StopHookResult};
@@ -29,12 +31,18 @@ pub struct HookInput {
     pub tool_input: Option<ToolInput>,
 }
 
-/// Tool input for Bash commands.
+/// Tool input for various tool types.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ToolInput {
-    /// The command being executed.
+    /// The command being executed (for Bash tool).
     #[serde(default)]
     pub command: Option<String>,
+    /// The skill being invoked (for Skill tool).
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// The file path being written/edited (for Write/Edit tools).
+    #[serde(default)]
+    pub file_path: Option<String>,
 }
 
 /// Output from a `PreToolUse` hook.
@@ -136,5 +144,27 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("block"));
         assert!(!json.contains("additionalContext"));
+    }
+
+    #[test]
+    fn test_parse_hook_input_with_skill() {
+        let input = parse_hook_input(
+            r#"{"tool_name": "Skill", "tool_input": {"skill": "just-keep-working"}}"#,
+        )
+        .unwrap();
+        assert_eq!(input.tool_name, Some("Skill".to_string()));
+        let tool_input = input.tool_input.unwrap();
+        assert_eq!(tool_input.skill, Some("just-keep-working".to_string()));
+    }
+
+    #[test]
+    fn test_parse_hook_input_with_file_path() {
+        let input = parse_hook_input(
+            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
+        )
+        .unwrap();
+        assert_eq!(input.tool_name, Some("Write".to_string()));
+        let tool_input = input.tool_input.unwrap();
+        assert_eq!(tool_input.file_path, Some("src/main.rs".to_string()));
     }
 }

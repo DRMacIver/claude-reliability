@@ -326,7 +326,10 @@ mod tests {
         let sub_agent = MockSubAgent::new();
         let input = HookInput {
             tool_name: Some("Bash".to_string()),
-            tool_input: Some(crate::hooks::ToolInput { command: Some("git status".to_string()) }),
+            tool_input: Some(crate::hooks::ToolInput {
+                command: Some("git status".to_string()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let config = CodeReviewConfig::default();
@@ -345,6 +348,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit --amend -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -370,6 +374,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -399,6 +404,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -433,6 +439,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -473,6 +480,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -513,6 +521,7 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(crate::hooks::ToolInput {
                 command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
             }),
             ..Default::default()
         };

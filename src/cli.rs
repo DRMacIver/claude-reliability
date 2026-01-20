@@ -33,6 +33,8 @@ pub enum Command {
     PreToolUseCodeReview,
     /// Run the problem-mode pre-tool-use hook.
     PreToolUseProblemMode,
+    /// Run the JKW setup enforcement pre-tool-use hook.
+    PreToolUseJkwSetup,
 }
 
 /// Result of parsing CLI arguments.
@@ -71,6 +73,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
                 "no-verify" => ParseResult::Command(Command::PreToolUseNoVerify),
                 "code-review" => ParseResult::Command(Command::PreToolUseCodeReview),
                 "problem-mode" => ParseResult::Command(Command::PreToolUseProblemMode),
+                "jkw-setup" => ParseResult::Command(Command::PreToolUseJkwSetup),
                 other => ParseResult::UnknownSubcommand(other.to_string()),
             }
         }
@@ -84,13 +87,15 @@ pub fn usage(program: &str) -> String {
     format!(
         "Usage: {program} <command> [subcommand]\n\n\
          Commands:\n  \
-         ensure-config           Ensure config file exists\n  \
-         ensure-gitignore        Ensure .gitignore has required entries\n  \
-         stop                    Run the stop hook\n  \
-         user-prompt-submit      Run the user prompt submit hook\n  \
-         pre-tool-use no-verify  Check for --no-verify usage\n  \
-         pre-tool-use code-review Run code review on commits\n  \
-         version                 Show version information"
+         ensure-config              Ensure config file exists\n  \
+         ensure-gitignore           Ensure .gitignore has required entries\n  \
+         stop                       Run the stop hook\n  \
+         user-prompt-submit         Run the user prompt submit hook\n  \
+         pre-tool-use no-verify     Check for --no-verify usage\n  \
+         pre-tool-use code-review   Run code review on commits\n  \
+         pre-tool-use problem-mode  Block tools when in problem mode\n  \
+         pre-tool-use jkw-setup     Enforce JKW session file creation\n  \
+         version                    Show version information"
     )
 }
 
@@ -205,6 +210,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
         Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
         Command::PreToolUseProblemMode => run_problem_mode_cmd(stdin),
+        Command::PreToolUseJkwSetup => run_jkw_setup_cmd(stdin),
     }
 }
 
@@ -336,6 +342,22 @@ fn run_problem_mode_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         Ok(json) => json,
         Err(e) => return (ExitCode::from(1), vec![format!("Failed to serialize output: {e}")]),
     };
+
+    (ExitCode::SUCCESS, vec![json])
+}
+
+fn run_jkw_setup_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::hooks::{parse_hook_input, run_jkw_setup_hook};
+    use std::path::Path;
+
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    let output = run_jkw_setup_hook(&input, Path::new("."));
+    // PreToolUseOutput is a simple struct that always serializes successfully
+    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
 
     (ExitCode::SUCCESS, vec![json])
 }
@@ -905,5 +927,78 @@ mod tests {
         assert_eq!(code, ExitCode::from(1));
         assert!(!messages.is_empty());
         assert!(messages[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    fn test_parse_args_jkw_setup() {
+        assert_eq!(
+            parse_args(&args(&["prog", "pre-tool-use", "jkw-setup"])),
+            ParseResult::Command(Command::PreToolUseJkwSetup)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_jkw_setup_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Valid JSON input for jkw-setup
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "jkw-setup"]),
+            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        // Should return JSON output
+        assert!(!messages.is_empty());
+        assert!(messages[0].starts_with('{'));
+        // Should allow since no JKW setup marker is set
+        assert!(messages[0].contains("allow"));
+    }
+
+    #[test]
+    fn test_run_jkw_setup_invalid_json() {
+        let (code, messages) = run(&args(&["prog", "pre-tool-use", "jkw-setup"]), "not json");
+
+        assert_eq!(code, ExitCode::from(1));
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_jkw_setup_blocks_when_marker_set() {
+        use crate::session::set_jkw_setup_required;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Set the JKW setup marker
+        set_jkw_setup_required(dir_path).unwrap();
+
+        // Try to write to a non-session file
+        let (code, messages) = run(
+            &args(&["prog", "pre-tool-use", "jkw-setup"]),
+            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        // Should block
+        assert!(!messages.is_empty());
+        assert!(messages[0].contains("block"));
     }
 }
