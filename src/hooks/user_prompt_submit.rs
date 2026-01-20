@@ -26,6 +26,9 @@ pub fn run_user_prompt_submit_hook(base_dir: Option<&Path>) -> Result<()> {
     // Clear the reflection marker so the next stop will trigger reflection
     reflection::clear_reflection_marker_in(base)?;
 
+    // Clear the "had uncommitted changes" marker as this is a new prompt
+    reflection::clear_had_uncommitted_changes_in(base)?;
+
     Ok(())
 }
 
@@ -48,6 +51,22 @@ mod tests {
 
         // Marker should be cleared
         assert!(!reflection::has_reflection_marker_in(base));
+    }
+
+    #[test]
+    fn test_user_prompt_submit_clears_had_uncommitted_changes_marker() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create the "had uncommitted changes" marker
+        reflection::mark_had_uncommitted_changes_in(base).unwrap();
+        assert!(reflection::had_uncommitted_changes_in(base));
+
+        // Run the hook
+        run_user_prompt_submit_hook(Some(base)).unwrap();
+
+        // Marker should be cleared
+        assert!(!reflection::had_uncommitted_changes_in(base));
     }
 
     #[test]

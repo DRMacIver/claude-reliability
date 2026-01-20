@@ -288,9 +288,13 @@ fn handle_uncommitted_changes(
     _sub_agent: &dyn SubAgent,
 ) -> Result<StopHookResult> {
     let mut result = StopHookResult::block();
+    let base_dir = config.base_dir();
+
+    // Mark that we had uncommitted changes - used by reflection check later
+    // This ensures reflection runs even if Claude commits+pushes in one command
+    reflection::mark_had_uncommitted_changes_in(base_dir)?;
 
     // Check beads interaction if beads is available
-    let base_dir = config.base_dir();
     if beads::is_beads_available_in(runner, base_dir) {
         let beads_status = beads::check_beads_interaction_in(runner, base_dir)?;
         if !beads_status.has_interaction && !beads_status.already_warned {
@@ -482,8 +486,13 @@ fn check_self_reflection(
     }
 
     // Check if there were any changes made this session
-    // Use git if available and in a git repo, otherwise use tool use tracking
-    let has_changes = if config.git_repo {
+    // We use multiple signals:
+    // 1. The "had_uncommitted_changes" marker (set when we blocked on uncommitted changes)
+    // 2. Current git status (uncommitted changes or ahead of remote)
+    // 3. Tool use tracking from transcript
+    // This ensures reflection runs even if Claude commits+pushes in one command.
+    let had_changes_marker = reflection::had_uncommitted_changes_in(base_dir);
+    let has_current_changes = if config.git_repo {
         if let Ok(git_status) = git::check_uncommitted_changes(runner) {
             git_status.uncommitted.has_changes() || git_status.ahead_of_remote
         } else {
@@ -492,6 +501,8 @@ fn check_self_reflection(
     } else {
         transcript_info.has_modifying_tool_use
     };
+
+    let has_changes = had_changes_marker || has_current_changes;
 
     if !has_changes {
         return Ok(None);
@@ -520,6 +531,8 @@ fn check_self_reflection(
 
     // Mark reflection as done so we don't run again
     reflection::mark_reflection_done_in(base_dir)?;
+    // Clear the "had uncommitted changes" marker since we've now reflected
+    reflection::clear_had_uncommitted_changes_in(base_dir)?;
 
     // Build the result
     let mut result = StopHookResult::block()
@@ -843,10 +856,11 @@ mod tests {
 
     #[test]
     fn test_run_stop_hook_clean_repo_allows_exit() {
+        let dir = tempfile::TempDir::new().unwrap();
         let runner = mock_clean_git();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig::default();
+        let config = StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
@@ -897,10 +911,15 @@ mod tests {
 
     #[test]
     fn test_run_stop_hook_uncommitted_changes_blocks() {
+        let dir = tempfile::TempDir::new().unwrap();
         let runner = mock_uncommitted_changes();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { git_repo: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -912,11 +931,13 @@ mod tests {
     fn test_run_stop_hook_skips_git_when_not_git_repo() {
         // When git_repo is false, git checks should be skipped entirely.
         // This test verifies that NO git commands are called when git_repo: false.
+        let dir = tempfile::TempDir::new().unwrap();
         let runner = MockCommandRunner::new(); // No git expectations set
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
             git_repo: false, // Not a git repo - git checks should be skipped
+            base_dir: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
 
@@ -1073,10 +1094,16 @@ mod tests {
 
     #[test]
     fn test_run_stop_hook_unpushed_commits_blocks() {
+        let dir = TempDir::new().unwrap();
         let runner = mock_clean_with_ahead();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { git_repo: true, require_push: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            require_push: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -1150,10 +1177,15 @@ mod tests {
 
     #[test]
     fn test_run_stop_hook_shows_untracked_files() {
+        let dir = TempDir::new().unwrap();
         let runner = mock_uncommitted_with_untracked();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { git_repo: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -2048,9 +2080,14 @@ mod tests {
         runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
         runner.expect("git", &["diff", "-U0"], empty_success);
 
+        let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { git_repo: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
@@ -2168,12 +2205,17 @@ mod tests {
         runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
         runner.expect("git", &["diff", "-U0"], empty_success);
 
+        let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig { git_repo: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Single API error should NOT trigger the escape hatch
@@ -2219,9 +2261,15 @@ mod tests {
         runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
         runner.expect("git", &["diff", "-U0"], empty_success);
 
+        let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig { git_repo: true, require_push: true, ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: true,
+            require_push: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);

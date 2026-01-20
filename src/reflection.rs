@@ -11,6 +11,10 @@ use std::path::Path;
 /// Marker file for tracking that reflection has been completed (relative to base).
 const REFLECTION_MARKER_REL: &str = ".claude/reflection-done.local";
 
+/// Marker file for tracking that we blocked on uncommitted changes (relative to base).
+/// This is used to ensure reflection runs even if Claude commits and pushes in one command.
+const HAD_CHANGES_MARKER_REL: &str = ".claude/had-changes.local";
+
 /// Check if the reflection marker exists.
 pub fn has_reflection_marker() -> bool {
     has_reflection_marker_in(Path::new("."))
@@ -61,6 +65,38 @@ pub fn clear_reflection_marker() -> Result<()> {
 /// Returns an error if the marker file cannot be removed.
 pub fn clear_reflection_marker_in(base_dir: &Path) -> Result<()> {
     let marker_path = base_dir.join(REFLECTION_MARKER_REL);
+    if marker_path.exists() {
+        std::fs::remove_file(marker_path)?;
+    }
+    Ok(())
+}
+
+/// Check if we blocked on uncommitted changes this session.
+pub fn had_uncommitted_changes_in(base_dir: &Path) -> bool {
+    base_dir.join(HAD_CHANGES_MARKER_REL).exists()
+}
+
+/// Mark that we blocked on uncommitted changes.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be written.
+pub fn mark_had_uncommitted_changes_in(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(HAD_CHANGES_MARKER_REL);
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(marker_path, "")?;
+    Ok(())
+}
+
+/// Clear the "had uncommitted changes" marker.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be removed.
+pub fn clear_had_uncommitted_changes_in(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(HAD_CHANGES_MARKER_REL);
     if marker_path.exists() {
         std::fs::remove_file(marker_path)?;
     }
@@ -144,5 +180,31 @@ mod tests {
         // Clean up
         clear_reflection_marker().unwrap();
         assert!(!has_reflection_marker());
+    }
+
+    #[test]
+    fn test_had_uncommitted_changes_marker() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Initially no marker
+        assert!(!had_uncommitted_changes_in(base));
+
+        // Set the marker
+        mark_had_uncommitted_changes_in(base).unwrap();
+        assert!(had_uncommitted_changes_in(base));
+
+        // Clear it
+        clear_had_uncommitted_changes_in(base).unwrap();
+        assert!(!had_uncommitted_changes_in(base));
+    }
+
+    #[test]
+    fn test_clear_had_uncommitted_changes_not_exists() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Should not error when marker doesn't exist
+        clear_had_uncommitted_changes_in(base).unwrap();
     }
 }
