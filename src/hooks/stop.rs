@@ -14,10 +14,12 @@ use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
 use crate::reflection;
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
+use crate::templates;
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
 use crate::transcript::{self, TranscriptInfo};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tera::Context;
 
 /// Magic string that allows stopping when work is complete but human input is required.
 pub const HUMAN_INPUT_REQUIRED: &str =
@@ -111,6 +113,12 @@ const API_ERROR_THRESHOLD: u32 = 2;
 /// # Errors
 ///
 /// Returns an error if git commands, sub-agent calls, or file operations fail.
+///
+/// # Panics
+///
+/// Panics if embedded templates fail to render. Templates are embedded via
+/// `include_str!` and verified by `test_all_embedded_templates_render`, so
+/// this should only occur if a template has a bug that escaped tests.
 #[allow(clippy::too_many_lines)] // Complex hook logic requires multiple checks
 pub fn run_stop_hook(
     input: &HookInput,
@@ -129,25 +137,19 @@ pub fn run_stop_hook(
     if session::is_problem_mode_active(config.base_dir()) {
         session::exit_problem_mode(config.base_dir())?;
         session::cleanup_session_files(config.base_dir())?;
-        return Ok(StopHookResult::allow()
-            .with_message("# Problem Mode Exit")
-            .with_message("")
-            .with_message("Agent has explained their problem and stopped.")
-            .with_message("Please review and provide guidance."));
+        let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
+            .expect("problem_mode_exit.tera template should always render");
+        return Ok(StopHookResult::allow().with_message(message));
     }
 
     // Check for API error loop - if we've seen multiple consecutive API errors,
     // allow the stop to prevent infinite loops
     if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
-        return Ok(StopHookResult::allow()
-            .with_message("# API Error Loop Detected")
-            .with_message("")
-            .with_message(format!(
-                "Detected {} consecutive API errors. Stopping to prevent infinite loop.",
-                transcript_info.consecutive_api_errors
-            ))
-            .with_message("")
-            .with_message("Please start a new conversation to continue."));
+        let mut ctx = Context::new();
+        ctx.insert("error_count", &transcript_info.consecutive_api_errors);
+        let message = templates::render("messages/stop/api_error_loop.tera", &ctx)
+            .expect("api_error_loop.tera template should always render");
+        return Ok(StopHookResult::allow().with_message(message));
     }
 
     // Fast path: auto-confirm commit/push questions
@@ -218,20 +220,10 @@ pub fn run_stop_hook(
         if has_problem_phrase {
             // Enter problem mode - this blocks all tool use until next stop
             session::enter_problem_mode(config.base_dir())?;
-            return Ok(StopHookResult::block()
-                .with_message("# Problem Mode Activated")
-                .with_message("")
-                .with_message("You've indicated you've hit a problem. **All tool use is now blocked.**")
-                .with_message("")
-                .with_message("## What to do now:")
-                .with_message("")
-                .with_message("1. **Explain the problem clearly** - What exactly went wrong?")
-                .with_message("2. **Describe what you tried** - What approaches did you attempt?")
-                .with_message("3. **State what you need** - What specific help or decision do you need from the user?")
-                .with_message("")
-                .with_message("Once you've explained the problem, you will be able to stop and wait for the user's response.")
-                .with_message("")
-                .with_message("**Do not attempt to use any tools until you've stopped and the user has responded.**"));
+            let message =
+                templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
+                    .expect("problem_mode_activated.tera template should always render");
+            return Ok(StopHookResult::block().with_message(message));
         }
 
         // Handle "work complete" phrase
@@ -277,15 +269,11 @@ pub fn run_stop_hook(
 
         // Check if need to push
         if config.require_push && git_status.ahead_of_remote {
-            return Ok(StopHookResult::block()
-                .with_message("# Unpushed Commits")
-                .with_message("")
-                .with_message(format!(
-                    "You have {} commit(s) that haven't been pushed.",
-                    git_status.commits_ahead
-                ))
-                .with_message("")
-                .with_message("Run `git push` to publish your changes."));
+            let mut ctx = Context::new();
+            ctx.insert("commits_ahead", &git_status.commits_ahead);
+            let message = templates::render("messages/stop/unpushed_commits.tera", &ctx)
+                .expect("unpushed_commits.tera template should always render");
+            return Ok(StopHookResult::block().with_message(message));
         }
     }
 

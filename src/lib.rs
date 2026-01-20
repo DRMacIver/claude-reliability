@@ -14,6 +14,7 @@ pub mod question;
 pub mod reflection;
 pub mod session;
 pub mod subagent;
+pub mod templates;
 pub mod testing;
 pub mod traits;
 pub mod transcript;

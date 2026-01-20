@@ -1,0 +1,14 @@
+{# Message shown when problem mode is activated. #}
+# Problem Mode Activated
+
+You've indicated you've hit a problem. **All tool use is now blocked.**
+
+## What to do now:
+
+1. **Explain the problem clearly** - What exactly went wrong?
+2. **Describe what you tried** - What approaches did you attempt?
+3. **State what you need** - What specific help or decision do you need from the user?
+
+Once you've explained the problem, you will be able to stop and wait for the user's response.
+
+**Do not attempt to use any tools until you've stopped and the user has responded.**

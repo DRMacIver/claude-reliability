@@ -1,0 +1,12 @@
+{# Message shown when staleness is detected in JKW mode.
+
+Variables:
+  - change_type: Type of changes being tracked ("issue" or "git")
+  - iterations_since_change: Number of iterations since last change
+#}
+# Staleness Detected
+
+No {{ change_type }} changes for {{ iterations_since_change }} iterations.
+Just-keep-working mode stopped due to lack of progress.
+
+Run `/just-keep-working` to start a new session.

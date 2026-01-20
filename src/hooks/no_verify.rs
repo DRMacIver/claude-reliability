@@ -5,10 +5,12 @@
 
 use crate::error::Result;
 use crate::hooks::{HookInput, PreToolUseOutput};
+use crate::templates;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::env;
 use std::io::Write;
+use tera::Context;
 
 /// Acknowledgment phrase required in `NO_VERIFY_OK` env var.
 const ACKNOWLEDGMENT: &str = "I promise the user has said I can use --no-verify here";
@@ -84,19 +86,14 @@ fn run_no_verify_hook_with_ack(input: &HookInput, ack_value: Option<&str>) -> Re
             Ok(0)
         }
         NoVerifyResult::Blocked => {
+            let mut ctx = Context::new();
+            ctx.insert("acknowledgment", ACKNOWLEDGMENT);
+
+            let message = templates::render("messages/no_verify_block.tera", &ctx)
+                .expect("no_verify_block.tera template should always render");
+
             let mut stderr = std::io::stderr();
-            writeln!(stderr, "ERROR: Attempting to use git commit with --no-verify.")?;
-            writeln!(stderr)?;
-            writeln!(stderr, "The --no-verify flag skips pre-commit hooks, which are")?;
-            writeln!(stderr, "important for:")?;
-            writeln!(stderr, "- Running quality checks before commits")?;
-            writeln!(stderr, "- Preventing secrets from being committed")?;
-            writeln!(stderr, "- Ensuring beads are properly synced")?;
-            writeln!(stderr)?;
-            writeln!(stderr, "If the user has explicitly said you can skip hooks, set:")?;
-            writeln!(stderr)?;
-            writeln!(stderr, "  NO_VERIFY_OK=\"{ACKNOWLEDGMENT}\"")?;
-            writeln!(stderr)?;
+            write!(stderr, "{message}")?;
             Ok(2)
         }
     }

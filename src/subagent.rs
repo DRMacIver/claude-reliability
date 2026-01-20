@@ -1,8 +1,10 @@
 //! Real sub-agent implementation using the Claude CLI.
 
 use crate::error::Result;
+use crate::templates;
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
 use std::time::Duration;
+use tera::Context;
 
 /// Timeout for sub-agent question decisions (60 seconds).
 const QUESTION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -13,71 +15,25 @@ const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 /// Timeout for reflection checks (90 seconds).
 const REFLECTION_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// Context added to reflection prompt when in just-keep-working mode.
-const JKW_MODE_CONTEXT: &str = r"
-
-## Just-Keep-Working Mode Context
-
-You are currently in **just-keep-working mode**. This means you have a session plan that you're working through.
-
-**IMPORTANT**: Double-check your plan for this session:
-1. Review the conditions and success criteria defined in your `.claude/jkw-session.local.md` file
-2. Confirm you have definitely completed ALL conditions of your instructions
-3. Consider if there are any remaining tasks in your plan that haven't been addressed
-
-If you haven't fully completed all the planned work, mark this as incomplete.";
-
-/// Context added to reflection prompt when NOT in just-keep-working mode.
-const NORMAL_MODE_CONTEXT: &str = r#"
-
-## Continuation Guidance
-
-If you believe your work is incomplete, you should invoke `/just-keep-working` with enough information to cover your current task. This will allow you to continue working without requiring further questions to the user.
-
-Example: If you've implemented a feature but haven't run tests, you could invoke:
-`/just-keep-working` with the goal "Complete remaining work: run tests for the new feature and fix any failures""#;
-
 /// Build the reflection prompt with the given context.
 fn build_reflection_prompt(assistant_output: &str, git_diff: &str, in_jkw_mode: bool) -> String {
-    let jkw_context = if in_jkw_mode { JKW_MODE_CONTEXT } else { NORMAL_MODE_CONTEXT };
+    // Get the context template based on mode
+    let jkw_context = if in_jkw_mode {
+        templates::render("contexts/jkw_mode.tera", &Context::new())
+            .expect("jkw_mode.tera template should always render")
+    } else {
+        templates::render("contexts/normal_mode.tera", &Context::new())
+            .expect("normal_mode.tera template should always render")
+    };
 
-    format!(
-        r#"You are a self-reflection agent. Your task is to reflect on whether the assistant has completed the user's request properly, or whether there might be something incomplete, misunderstood, or shortcuts taken.
+    // Build the full prompt using the template
+    let mut ctx = Context::new();
+    ctx.insert("assistant_output", assistant_output);
+    ctx.insert("git_diff", git_diff);
+    ctx.insert("jkw_context", &jkw_context);
 
-## Assistant's Last Output
-<assistant_output>
-{assistant_output}
-</assistant_output>
-
-## Changes Made (Git Diff)
-<git_diff>
-{git_diff}
-</git_diff>
-{jkw_context}
-
-## Your Task
-Carefully reflect on whether the work appears complete and correct. Consider:
-
-1. **Completeness**: Has everything the user asked for been done? Are there any TODO items or "left for later" comments?
-
-2. **Correctness**: Do the changes look correct and match what was requested? Are there any obvious bugs or issues?
-
-3. **Shortcuts**: Were any corners cut? Any "I'll skip X" or "this should be good enough"?
-
-4. **Misunderstandings**: Could the user's request have been misunderstood in any way?
-
-5. **Edge cases**: Are there obvious edge cases that were missed?
-
-Respond with a JSON object:
-```json
-{{
-    "complete": true or false,
-    "feedback": "Your analysis here. If complete is false, explain what seems incomplete or problematic. If complete is true, briefly confirm why the work looks good."
-}}
-```
-
-Be constructively critical - it's better to flag potential issues than to miss them. However, don't be overly pedantic about trivial matters."#
-    )
+    templates::render("prompts/reflection.tera", &ctx)
+        .expect("reflection.tera template should always render")
 }
 
 /// Real sub-agent implementation using the Claude CLI.
@@ -113,51 +69,12 @@ impl SubAgent for RealSubAgent<'_> {
         assistant_output: &str,
         user_recency_minutes: u32,
     ) -> Result<SubAgentDecision> {
-        let prompt = format!(
-            r#"You are a sub-agent helping to manage an just-keep-working session.
+        let mut ctx = Context::new();
+        ctx.insert("assistant_output", assistant_output);
+        ctx.insert("user_recency_minutes", &user_recency_minutes);
 
-The main agent has stopped and its last output appears to contain a question.
-The user has been active recently (within the last {user_recency_minutes} minutes).
-
-Your task is to decide:
-1. Should we allow the main agent to stop so the user can respond to the question?
-2. Or can you answer the question directly based on the context?
-
-Here is the end of the main agent's last output:
-
-<assistant_output>
-{assistant_output}
-</assistant_output>
-
-Respond with EXACTLY one of these formats:
-
-ALLOW_STOP: <brief reason why user should respond>
-
-or
-
-ANSWER: <your direct answer to the question>
-
-or
-
-CONTINUE: <reason why this doesn't seem like a real question for the user>
-
-Choose ALLOW_STOP if:
-- The question requires user preference or decision
-- The question asks for clarification about requirements
-- The question offers options the user should choose from
-
-Choose ANSWER if:
-- You can provide a reasonable default answer
-- The question is about process/approach and you can decide
-- IMPORTANT: If the question is "Do you want me to continue?", "Should I
-  proceed?", "Do you want me to do the rest?", or any variation asking
-  whether to keep working, ALWAYS answer "Yes, please continue."
-
-Choose CONTINUE if:
-- This doesn't look like a real question for the user
-- It's a rhetorical question
-- The agent should keep working without user input"#
-        );
+        let prompt = templates::render("prompts/question_decision.tera", &ctx)
+            .expect("question_decision.tera template should always render");
 
         let output = self.runner.run(
             self.claude_cmd(),
@@ -195,41 +112,13 @@ Choose CONTINUE if:
         let guide_section = review_guide
             .unwrap_or("No specific review guidelines provided. Use general best practices.");
 
-        let prompt = format!(
-            r#"You are a code reviewer. Review the following git diff and decide whether to APPROVE or REJECT the commit.
+        let mut ctx = Context::new();
+        ctx.insert("guide_section", guide_section);
+        ctx.insert("files_list", &files_list);
+        ctx.insert("diff", diff);
 
-## Review Guidelines
-{guide_section}
-
-## Files Being Committed
-{files_list}
-
-## Diff to Review
-```diff
-{diff}
-```
-
-## Your Task
-1. Review the code changes carefully
-2. Check for:
-   - Logic errors or bugs
-   - Security issues (hardcoded secrets, injection vulnerabilities, etc.)
-   - Code quality problems
-   - Missing error handling
-   - Breaking changes without proper handling
-3. Make a decision: APPROVE or REJECT
-
-## Response Format
-You MUST respond with a JSON object in this exact format:
-```json
-{{
-    "decision": "approve" or "reject",
-    "feedback": "Your detailed review feedback here. Explain what you found, any concerns, and suggestions."
-}}
-```
-
-If rejecting, explain clearly what needs to be fixed. If approving, you can still provide suggestions for improvement."#
-        );
+        let prompt = templates::render("prompts/code_review.tera", &ctx)
+            .expect("code_review.tera template should always render");
 
         let output = self.runner.run(
             self.claude_cmd(),

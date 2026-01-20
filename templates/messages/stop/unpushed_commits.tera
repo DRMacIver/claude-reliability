@@ -1,0 +1,10 @@
+{# Message shown when there are unpushed commits.
+
+Variables:
+  - commits_ahead: Number of commits ahead of remote
+#}
+# Unpushed Commits
+
+You have {{ commits_ahead }} commit(s) that haven't been pushed.
+
+Run `git push` to publish your changes.

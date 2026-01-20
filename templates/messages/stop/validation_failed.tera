@@ -1,0 +1,22 @@
+{# Message shown when validation check fails.
+
+Variables:
+  - check_cmd: The quality check command that was run
+  - stdout: Standard output from the command (optional)
+  - stderr: Standard error from the command (optional)
+#}
+# Validation Failed
+
+The quality check command `{{ check_cmd }}` failed.
+
+Please fix the issues before stopping.
+{% if stdout %}
+
+**stdout:**
+{{ stdout }}
+{% endif %}
+{% if stderr %}
+
+**stderr:**
+{{ stderr }}
+{% endif %}

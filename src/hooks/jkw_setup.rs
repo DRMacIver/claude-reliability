@@ -23,7 +23,9 @@ use crate::session::{
     clear_jkw_setup_required, is_jkw_setup_required, jkw_session_file_exists,
     set_jkw_setup_required, SESSION_NOTES_PATH,
 };
+use crate::templates;
 use std::path::Path;
+use tera::Context;
 
 /// Check if the skill name indicates JKW invocation.
 fn is_jkw_skill(skill: &str) -> bool {
@@ -49,6 +51,12 @@ fn is_jkw_session_path(file_path: &str) -> bool {
 ///
 /// * `input` - The hook input from Claude Code
 /// * `base_dir` - The base directory to check for markers and session files
+///
+/// # Panics
+///
+/// Panics if embedded templates fail to render. Templates are embedded via
+/// `include_str!` and verified by `test_all_embedded_templates_render`, so
+/// this should only occur if a template has a bug that escaped tests.
 pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
     let tool_input = input.tool_input.as_ref();
@@ -85,14 +93,13 @@ pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutpu
         if tool_name == "Write" || tool_name == "Edit" {
             if let Some(file_path) = tool_input.and_then(|t| t.file_path.as_deref()) {
                 if !is_jkw_session_path(file_path) {
-                    return PreToolUseOutput::block(Some(format!(
-                        "BLOCKED: Just-keep-working mode has been invoked but the session file \
-                         does not exist yet.\n\n\
-                         Before making any code changes, you MUST:\n\
-                         1. Create the JKW session file at: {SESSION_NOTES_PATH}\n\
-                         2. Include: session goal, success criteria, constraints, and quality requirements\n\n\
-                         This ensures proper tracking of the autonomous work session."
-                    )));
+                    let mut ctx = Context::new();
+                    ctx.insert("session_notes_path", SESSION_NOTES_PATH);
+
+                    let message = templates::render("messages/jkw_setup_required.tera", &ctx)
+                        .expect("jkw_setup_required.tera template should always render");
+
+                    return PreToolUseOutput::block(Some(message));
                 }
             }
         }

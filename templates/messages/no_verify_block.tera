@@ -1,0 +1,17 @@
+{# Message shown when --no-verify is blocked.
+
+Variables:
+  - acknowledgment: The acknowledgment phrase required
+#}
+ERROR: Attempting to use git commit with --no-verify.
+
+The --no-verify flag skips pre-commit hooks, which are
+important for:
+- Running quality checks before commits
+- Preventing secrets from being committed
+- Ensuring beads are properly synced
+
+If the user has explicitly said you can skip hooks, set:
+
+  NO_VERIFY_OK="{{ acknowledgment }}"
+

@@ -1,0 +1,20 @@
+{# Message shown when JKW mode work is complete.
+
+Variables:
+  - human_input_phrase: Phrase for when work is complete
+#}
+# Checking Completion
+
+No outstanding issues. Running quality gates...
+
+All quality gates passed!
+No open issues remain.
+
+## Options
+
+1. Run `/ideate` to generate new work items
+2. Say an exit phrase to end the session
+
+To exit when work is complete:
+
+  "{{ human_input_phrase }}"

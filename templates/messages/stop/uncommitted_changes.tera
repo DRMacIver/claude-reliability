@@ -1,0 +1,115 @@
+{# Message shown when there are uncommitted changes.
+
+Variables:
+  - changes_description: Description of the uncommitted changes
+  - quality_failed: Whether quality checks failed (bool)
+  - quality_output: Output from quality checks (optional)
+  - suppression_violations: List of suppression violations (optional)
+  - empty_except_violations: List of empty except violations (optional)
+  - secret_violations: List of secret violations (optional)
+  - todo_warnings: List of TODO warnings (optional)
+  - untracked_files: List of untracked files (optional)
+  - quality_check_enabled: Whether quality checks are enabled (bool)
+  - require_push: Whether pushing is required (bool)
+  - problem_phrase: The phrase to use when hitting a problem
+#}
+# Uncommitted Changes Detected
+
+Cannot exit with {{ changes_description }}.
+
+{% if quality_failed %}
+## Quality Checks Failed
+
+Quality gates did not pass. Fix issues before committing.
+
+{% if quality_output %}
+### Output:
+
+{{ quality_output }}
+{% endif %}
+{% endif %}
+{% if suppression_violations %}
+## Error Suppression Detected
+
+The following error suppressions were added:
+
+{% for v in suppression_violations %}
+{{ v }}
+{% endfor %}
+
+Fix the underlying issues instead of suppressing errors.
+
+{% endif %}
+{% if empty_except_violations %}
+## Empty Exception Handlers Detected
+
+The following empty except blocks were added:
+
+{% for v in empty_except_violations %}
+{{ v }}
+{% endfor %}
+
+Handle exceptions properly or re-raise them.
+
+{% endif %}
+{% if secret_violations %}
+## SECURITY: Hardcoded Secrets Detected
+
+The following secrets/tokens were found in staged changes:
+
+{% for v in secret_violations %}
+{{ v }}
+{% endfor %}
+
+NEVER commit secrets. Use environment variables instead.
+If this was accidental, the secret may need to be rotated.
+
+{% endif %}
+{% if todo_warnings %}
+## Untracked Work Items
+
+Consider linking these items to beads issues:
+
+{% for w in todo_warnings %}
+{{ w }}
+{% endfor %}
+
+{% endif %}
+{% if untracked_files %}
+## Untracked Files
+
+The following files are not tracked by git:
+
+{% for f in untracked_files %}
+  {{ f }}
+{% endfor %}
+
+Either `git add` them or add them to .gitignore
+
+{% endif %}
+Before stopping, please:
+
+1. Run `git status` to check for files that should be gitignored
+{% if quality_check_enabled %}
+2. Run quality checks to verify they pass
+3. Stage your changes: `git add <files>`
+4. Commit with a descriptive message: `git commit -m '...'`
+{% else %}
+2. Stage your changes: `git add <files>`
+3. Commit with a descriptive message: `git commit -m '...'`
+{% endif %}
+{% if require_push %}
+{% if quality_check_enabled %}
+5. Push to remote: `git push`
+{% else %}
+4. Push to remote: `git push`
+{% endif %}
+
+Work is incomplete until `git push` succeeds.
+{% endif %}
+
+---
+
+If you've hit a problem you cannot solve without user input:
+
+  "{{ problem_phrase }}"

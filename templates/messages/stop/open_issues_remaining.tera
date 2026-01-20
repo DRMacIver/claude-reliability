@@ -1,0 +1,16 @@
+{# Message shown when trying to exit with open issues.
+
+Variables:
+  - open_count: Number of open issues
+  - problem_phrase: The phrase to use when hitting a problem
+#}
+# Exit Phrase Rejected
+
+There are {{ open_count }} open issue(s) remaining.
+
+Please work on the remaining issues before exiting.
+Run `bd ready` to see available work.
+
+If you've hit a blocker you can't resolve, use this phrase instead:
+
+  "{{ problem_phrase }}"

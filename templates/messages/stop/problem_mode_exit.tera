@@ -1,0 +1,5 @@
+{# Message shown when exiting problem mode. #}
+# Problem Mode Exit
+
+Agent has explained their problem and stopped.
+Please review and provide guidance.

@@ -1,0 +1,10 @@
+{# Message shown when API error loop is detected.
+
+Variables:
+  - error_count: Number of consecutive API errors
+#}
+# API Error Loop Detected
+
+Detected {{ error_count }} consecutive API errors. Stopping to prevent infinite loop.
+
+Please start a new conversation to continue.

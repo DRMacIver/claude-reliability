@@ -4,6 +4,8 @@
 //! reliability config file to prevent accidental modifications.
 
 use crate::hooks::{HookInput, PreToolUseOutput};
+use crate::templates;
+use tera::Context;
 
 /// The protected config file path (relative to project root).
 const PROTECTED_CONFIG: &str = ".claude/reliability-config.yaml";
@@ -37,6 +39,12 @@ fn is_delete_command(command: &str) -> bool {
 /// Run the config protection `PreToolUse` hook.
 ///
 /// This hook blocks Write, Edit, and delete operations on the reliability config.
+///
+/// # Panics
+///
+/// Panics if embedded templates fail to render. Templates are embedded via
+/// `include_str!` and verified by `test_all_embedded_templates_render`, so
+/// this should only occur if a template has a bug that escaped tests.
 pub fn run_protect_config_hook(input: &HookInput) -> PreToolUseOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
 
@@ -45,16 +53,13 @@ pub fn run_protect_config_hook(input: &HookInput) -> PreToolUseOutput {
             if let Some(ref tool_input) = input.tool_input {
                 if let Some(ref file_path) = tool_input.file_path {
                     if is_protected_path(file_path) {
-                        return PreToolUseOutput::block(Some(format!(
-                            r"# Protected File - Modification Blocked
+                        let mut ctx = Context::new();
+                        ctx.insert("config_path", PROTECTED_CONFIG);
 
-The file `{PROTECTED_CONFIG}` is protected and cannot be modified by the agent.
+                        let message = templates::render("messages/protect_config_write.tera", &ctx)
+                            .expect("protect_config_write.tera template should always render");
 
-This configuration file controls the reliability hooks and should only be
-modified manually by the user.
-
-If you need to change hook settings, ask the user to modify the file directly."
-                        )));
+                        return PreToolUseOutput::block(Some(message));
                     }
                 }
             }
@@ -63,14 +68,14 @@ If you need to change hook settings, ask the user to modify the file directly."
             if let Some(ref tool_input) = input.tool_input {
                 if let Some(ref command) = tool_input.command {
                     if is_delete_command(command) {
-                        return PreToolUseOutput::block(Some(format!(
-                            r"# Protected File - Deletion Blocked
+                        let mut ctx = Context::new();
+                        ctx.insert("config_path", PROTECTED_CONFIG);
 
-The file `{PROTECTED_CONFIG}` is protected and cannot be deleted by the agent.
+                        let message =
+                            templates::render("messages/protect_config_delete.tera", &ctx)
+                                .expect("protect_config_delete.tera template should always render");
 
-This configuration file controls the reliability hooks and should only be
-modified manually by the user."
-                        )));
+                        return PreToolUseOutput::block(Some(message));
                     }
                 }
             }

@@ -1,0 +1,11 @@
+{# Message shown when beads interaction is required. #}
+# Beads Interaction Required
+
+You have uncommitted changes but haven't interacted with beads.
+
+In Claude Code sessions, work should be tracked in beads:
+  - Create an issue: `bd create "Issue title"`
+  - Claim work: `bd update <id> --status in_progress`
+  - Complete work: `bd close <id>`
+
+If this work genuinely doesn't need tracking, try stopping again.

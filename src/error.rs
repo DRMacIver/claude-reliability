@@ -56,6 +56,10 @@ pub enum Error {
     /// Git is not available or not in a git repository.
     #[error("Git error: {0}")]
     Git(String),
+
+    /// A template error occurred.
+    #[error("Template error: {0}")]
+    Template(String),
 }
 
 /// A specialized Result type for this crate.

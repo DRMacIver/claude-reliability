@@ -1,0 +1,21 @@
+{# Message shown when tool use is blocked due to problem mode.
+
+Variables:
+  - tool_name: The tool that was attempted
+#}
+# Tool Use Blocked - Problem Mode Active
+
+You indicated you've hit a problem you can't solve. **All tools are currently blocked.**
+
+You attempted to use: `{{ tool_name }}`
+
+## What you must do:
+
+1. **Stop trying to use tools** - They will all be blocked until you explain your problem
+2. **Explain the problem clearly to the user:**
+   - What exactly went wrong?
+   - What did you try?
+   - What specific help do you need?
+3. **Then stop** - Your next stop will be allowed unconditionally
+
+Once you've explained and stopped, the user will be able to respond and help you.

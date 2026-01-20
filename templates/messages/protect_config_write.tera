@@ -1,0 +1,13 @@
+{# Message shown when trying to write to protected config file.
+
+Variables:
+  - config_path: Path to the protected config file
+#}
+# Protected File - Modification Blocked
+
+The file `{{ config_path }}` is protected and cannot be modified by the agent.
+
+This configuration file controls the reliability hooks and should only be
+modified manually by the user.
+
+If you need to change hook settings, ask the user to modify the file directly.

@@ -5,13 +5,21 @@
 
 use crate::hooks::{HookInput, PreToolUseOutput};
 use crate::session;
+use crate::templates;
 use std::path::Path;
+use tera::Context;
 
 /// Run the problem mode `PreToolUse` hook.
 ///
 /// This hook checks if problem mode is active and blocks all tool use if so.
 /// Problem mode is activated when the bot says "I have run into a problem"
 /// and is deactivated when they successfully stop.
+///
+/// # Panics
+///
+/// Panics if embedded templates fail to render. Templates are embedded via
+/// `include_str!` and verified by `test_all_embedded_templates_render`, so
+/// this should only occur if a template has a bug that escaped tests.
 pub fn run_problem_mode_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutput {
     // Check if problem mode is active
     if !session::is_problem_mode_active(base_dir) {
@@ -22,24 +30,11 @@ pub fn run_problem_mode_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOu
     let tool_name = input.tool_name.as_deref().unwrap_or("Unknown");
 
     // Block all tool use in problem mode
-    let context = format!(
-        r"# Tool Use Blocked - Problem Mode Active
+    let mut ctx = Context::new();
+    ctx.insert("tool_name", tool_name);
 
-You indicated you've hit a problem you can't solve. **All tools are currently blocked.**
-
-You attempted to use: `{tool_name}`
-
-## What you must do:
-
-1. **Stop trying to use tools** - They will all be blocked until you explain your problem
-2. **Explain the problem clearly to the user:**
-   - What exactly went wrong?
-   - What did you try?
-   - What specific help do you need?
-3. **Then stop** - Your next stop will be allowed unconditionally
-
-Once you've explained and stopped, the user will be able to respond and help you."
-    );
+    let context = templates::render("messages/problem_mode_block.tera", &ctx)
+        .expect("problem_mode_block.tera template should always render");
 
     PreToolUseOutput::block(Some(context))
 }
