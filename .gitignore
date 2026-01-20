@@ -20,3 +20,6 @@ lcov.info
 __pycache__/
 *.pyc
 .beads/sync_base.jsonl
+
+# Generated documentation
+docs/*.png

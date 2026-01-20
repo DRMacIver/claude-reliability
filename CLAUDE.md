@@ -181,3 +181,21 @@ This section provides guidance to the automated code reviewer.
 - Questions for clarification
 - Opportunities to simplify code
 - Missing test coverage for non-critical paths
+
+## Documentation
+
+### Stop Hook State Diagram
+
+The file `docs/stop-hook-states.dot` contains a Graphviz state diagram showing all possible states and transitions in the stop hook, from user message to agent stop.
+
+**To regenerate this diagram after modifying `src/hooks/stop.rs`:**
+
+Read through `src/hooks/stop.rs` and update `docs/stop-hook-states.dot` to reflect any changes to:
+- Early exit conditions (problem mode, API errors, fast path, bypass phrases)
+- Block conditions (validation, uncommitted changes, unpushed commits, questions, JKW mode, quality checks, self-reflection)
+- Tool use patterns (git commands, beads commands, quality check commands, sub-agent calls)
+
+**To render the diagram as PNG:**
+```bash
+dot -Tpng docs/stop-hook-states.dot -o docs/stop-hook-states.png
+```

@@ -1,0 +1,269 @@
+// Stop Hook State Machine
+// Shows all possible states and transitions from user message to agent stop
+digraph StopHookStateMachine {
+    rankdir=TB;
+    compound=true;
+    node [shape=box, style=rounded];
+
+    // Start and End nodes
+    UserMessage [label="User Message\nReceived", shape=ellipse, style=filled, fillcolor=lightblue];
+    AllowStop [label="Allow Stop\n(exit_code=0)", shape=ellipse, style=filled, fillcolor=lightgreen];
+    BlockStop [label="Block Stop\n(exit_code=2)", shape=ellipse, style=filled, fillcolor=lightyellow];
+
+    // ========== Early Checks (Order matters) ==========
+
+    // 1. Problem Mode Check
+    CheckProblemMode [label="Check:\nproblem_mode_active?"];
+    ProblemModeExit [label="Problem Mode Exit\n(cleanup session)"];
+
+    // 2. API Error Loop Check
+    CheckAPIErrors [label="Check:\nconsecutive_api_errors >= 2?"];
+    APIErrorLoop [label="API Error Loop\nDetected"];
+
+    // 3. Commit/Push Question Fast Path (git repos only)
+    CheckCommitPushQ [label="Check:\nlast_output ends with\ncommit/push question?"];
+    AutoConfirmCommit [label="Auto-confirm:\n\"Yes, please commit\""];
+    AutoConfirmPush [label="Auto-confirm:\n\"Yes, please push\""];
+    AutoConfirmBoth [label="Auto-confirm:\n\"Yes, commit and push\""];
+
+    // 4. Validation Check
+    CheckNeedsValidation [label="Check:\nneeds_validation marker?"];
+    RunValidation [label="Run quality_check_command"];
+    ValidationFailed [label="Validation Failed\n(show output)"];
+    ClearValidation [label="Clear validation marker"];
+
+    // 5. Fast Path Check (no JKW session + clean git)
+    CheckFastPath [label="Check:\nno JKW session?\n(parse session state)"];
+    CheckGitClean [label="Check git status:\nno uncommitted changes?\nnot ahead of remote?"];
+    FastPathExit [label="Fast Path:\nClean state"];
+
+    // 6. Bypass Phrase Checks
+    CheckBypassPhrases [label="Check last_output for:\n- HUMAN_INPUT_REQUIRED\n- PROBLEM_NEEDS_USER"];
+
+    // Problem phrase path
+    ProblemPhraseDetected [label="Problem Phrase\nDetected"];
+    EnterProblemMode [label="Enter Problem Mode\n(block all tools)"];
+
+    // Complete phrase path
+    CompletePhraseDetected [label="Complete Phrase\nDetected"];
+    CheckOpenIssues [label="Check beads:\nopen issues count?"];
+    ExitPhraseRejected [label="Exit Phrase Rejected\n(issues remain)"];
+    BypassAllowed [label="Bypass Allowed\n(cleanup session)"];
+
+    // 7. Uncommitted Changes Check
+    CheckUncommitted [label="Check git:\nuncommitted changes?"];
+
+    // Uncommitted Changes Handler
+    subgraph cluster_uncommitted {
+        label="Handle Uncommitted Changes";
+        style=dashed;
+
+        MarkHadChanges [label="Mark:\nhad_uncommitted_changes"];
+        CheckBeadsInteraction [label="Check beads:\nhas interaction?"];
+        BeadsWarning [label="Beads Interaction\nRequired (first time)"];
+        AnalyzeDiff [label="Analyze diff:\n- suppressions\n- empty except\n- secrets\n- TODOs"];
+        RunQualityOnChanges [label="Run quality checks\n(if enabled)"];
+        ShowUncommittedBlock [label="Block: Uncommitted\nChanges Detected\n(show analysis)"];
+    }
+
+    // 8. Unpushed Commits Check
+    CheckUnpushed [label="Check:\nrequire_push &&\nahead_of_remote?"];
+    UnpushedBlock [label="Block: Unpushed\nCommits"];
+
+    // 9. Interactive Question Check
+    CheckQuestion [label="Check:\nlooks_like_question?\nuser_recently_active?"];
+
+    subgraph cluster_question {
+        label="Handle Interactive Question";
+        style=dashed;
+
+        CheckContinueQ [label="Fast path:\nis_continue_question?"];
+        AutoAnswerContinue [label="Auto-answer:\n\"Yes, please continue\""];
+        SubAgentDecision [label="Sub-agent:\ndecide_on_question"];
+        DecisionAllowStop [label="Decision:\nAllowStop"];
+        DecisionAnswer [label="Decision:\nAnswer(response)"];
+        DecisionContinue [label="Decision:\nContinue"];
+    }
+
+    // 10. JKW Mode Handler
+    CheckJKWActive [label="Check:\nJKW session active?"];
+
+    subgraph cluster_jkw {
+        label="Handle JKW Mode";
+        style=dashed;
+
+        IncrementIteration [label="Increment iteration\nUpdate session state"];
+        GetIssueState [label="Get current issues\n(beads or git hash)"];
+        CheckStaleness [label="Check staleness:\niterations_since_change\n>= threshold?"];
+        StalenessExit [label="Staleness Detected\n(cleanup session)"];
+        CheckAllDone [label="Check:\nbeads available &&\nno outstanding issues?"];
+        JKWQualityCheck [label="Run quality checks"];
+        JKWQualityFailed [label="Quality Gates Failed"];
+        JKWReflection [label="Run self-reflection\n(in jkw mode)"];
+        JKWReflectionBlock [label="Self-Reflection\nCheck (JKW)"];
+        JKWAllDoneBlock [label="All Done:\nShow options\n(/ideate or exit phrase)"];
+        JKWWorkRemains [label="Work Remains:\nShow status"];
+    }
+
+    // 11. Non-JKW Quality Check
+    NonJKWQuality [label="Run quality checks\n(if enabled, non-JKW)"];
+    NonJKWQualityFailed [label="Quality Gates Failed\n(non-JKW)"];
+
+    // 12. Self-Reflection Check
+    CheckReflection [label="Check:\nreflection_marker exists?"];
+    CheckHadChanges [label="Check:\nhad_changes marker OR\ncurrent git changes OR\nmodifying tool use?"];
+    RunReflection [label="Sub-agent:\nreflect_on_work"];
+    MarkReflectionDone [label="Mark reflection done\nClear had_changes"];
+    ReflectionBlock [label="Self-Reflection Check\n(show assessment)"];
+
+    // ========== Transitions ==========
+
+    // Start
+    UserMessage -> CheckProblemMode;
+
+    // 1. Problem Mode
+    CheckProblemMode -> ProblemModeExit [label="yes"];
+    CheckProblemMode -> CheckAPIErrors [label="no"];
+    ProblemModeExit -> AllowStop;
+
+    // 2. API Errors
+    CheckAPIErrors -> APIErrorLoop [label="yes"];
+    CheckAPIErrors -> CheckCommitPushQ [label="no"];
+    APIErrorLoop -> AllowStop;
+
+    // 3. Commit/Push Question (git repos only)
+    CheckCommitPushQ -> AutoConfirmCommit [label="commit question"];
+    CheckCommitPushQ -> AutoConfirmPush [label="push question"];
+    CheckCommitPushQ -> AutoConfirmBoth [label="commit+push question"];
+    CheckCommitPushQ -> CheckNeedsValidation [label="no match"];
+    AutoConfirmCommit -> BlockStop [label="inject response"];
+    AutoConfirmPush -> BlockStop [label="inject response"];
+    AutoConfirmBoth -> BlockStop [label="inject response"];
+
+    // 4. Validation
+    CheckNeedsValidation -> RunValidation [label="yes + cmd exists"];
+    CheckNeedsValidation -> CheckFastPath [label="no"];
+    RunValidation -> ValidationFailed [label="exit != 0"];
+    RunValidation -> ClearValidation [label="exit == 0"];
+    ValidationFailed -> BlockStop;
+    ClearValidation -> CheckFastPath;
+
+    // 5. Fast Path
+    CheckFastPath -> CheckGitClean [label="no session + git repo"];
+    CheckFastPath -> CheckBypassPhrases [label="has session"];
+    CheckGitClean -> FastPathExit [label="clean"];
+    CheckGitClean -> CheckBypassPhrases [label="dirty"];
+    FastPathExit -> AllowStop;
+
+    // 6. Bypass Phrases
+    CheckBypassPhrases -> ProblemPhraseDetected [label="PROBLEM_NEEDS_USER"];
+    CheckBypassPhrases -> CompletePhraseDetected [label="HUMAN_INPUT_REQUIRED"];
+    CheckBypassPhrases -> CheckUncommitted [label="no bypass"];
+
+    ProblemPhraseDetected -> EnterProblemMode;
+    EnterProblemMode -> BlockStop [label="tools blocked"];
+
+    CompletePhraseDetected -> CheckOpenIssues [label="beads available"];
+    CompletePhraseDetected -> BypassAllowed [label="no beads"];
+    CheckOpenIssues -> ExitPhraseRejected [label="issues > 0"];
+    CheckOpenIssues -> BypassAllowed [label="issues == 0"];
+    ExitPhraseRejected -> BlockStop;
+    BypassAllowed -> AllowStop;
+
+    // 7. Uncommitted Changes
+    CheckUncommitted -> MarkHadChanges [label="yes", lhead=cluster_uncommitted];
+    CheckUncommitted -> CheckUnpushed [label="no"];
+
+    MarkHadChanges -> CheckBeadsInteraction;
+    CheckBeadsInteraction -> BeadsWarning [label="no interaction\n(first time)"];
+    CheckBeadsInteraction -> AnalyzeDiff [label="has interaction\nor warned"];
+    BeadsWarning -> BlockStop;
+    AnalyzeDiff -> RunQualityOnChanges;
+    RunQualityOnChanges -> ShowUncommittedBlock;
+    ShowUncommittedBlock -> BlockStop;
+
+    // 8. Unpushed Commits
+    CheckUnpushed -> UnpushedBlock [label="yes"];
+    CheckUnpushed -> CheckQuestion [label="no"];
+    UnpushedBlock -> BlockStop;
+
+    // 9. Interactive Question
+    CheckQuestion -> CheckContinueQ [label="is question +\nuser active", lhead=cluster_question];
+    CheckQuestion -> CheckJKWActive [label="not question"];
+
+    CheckContinueQ -> AutoAnswerContinue [label="yes"];
+    CheckContinueQ -> SubAgentDecision [label="no"];
+    AutoAnswerContinue -> BlockStop [label="inject response"];
+    SubAgentDecision -> DecisionAllowStop [label="AllowStop"];
+    SubAgentDecision -> DecisionAnswer [label="Answer"];
+    SubAgentDecision -> DecisionContinue [label="Continue"];
+    DecisionAllowStop -> AllowStop;
+    DecisionAnswer -> BlockStop [label="inject response"];
+    DecisionContinue -> CheckJKWActive;
+
+    // 10. JKW Mode
+    CheckJKWActive -> IncrementIteration [label="yes", lhead=cluster_jkw];
+    CheckJKWActive -> NonJKWQuality [label="no"];
+
+    IncrementIteration -> GetIssueState;
+    GetIssueState -> CheckStaleness;
+    CheckStaleness -> StalenessExit [label="stale"];
+    CheckStaleness -> CheckAllDone [label="not stale"];
+    StalenessExit -> AllowStop;
+    CheckAllDone -> JKWQualityCheck [label="all done"];
+    CheckAllDone -> JKWWorkRemains [label="work remains"];
+    JKWQualityCheck -> JKWQualityFailed [label="failed"];
+    JKWQualityCheck -> JKWReflection [label="passed"];
+    JKWQualityFailed -> BlockStop;
+    JKWReflection -> JKWReflectionBlock [label="reflection\nneeded"];
+    JKWReflection -> JKWAllDoneBlock [label="no reflection\n(already done)"];
+    JKWReflectionBlock -> BlockStop;
+    JKWAllDoneBlock -> BlockStop;
+    JKWWorkRemains -> BlockStop;
+
+    // 11. Non-JKW Quality
+    NonJKWQuality -> NonJKWQualityFailed [label="failed"];
+    NonJKWQuality -> CheckReflection [label="passed or\nnot enabled"];
+    NonJKWQualityFailed -> BlockStop;
+
+    // 12. Self-Reflection
+    CheckReflection -> AllowStop [label="already done"];
+    CheckReflection -> CheckHadChanges [label="not done"];
+    CheckHadChanges -> AllowStop [label="no changes"];
+    CheckHadChanges -> RunReflection [label="has changes"];
+    RunReflection -> MarkReflectionDone;
+    MarkReflectionDone -> ReflectionBlock;
+    ReflectionBlock -> BlockStop;
+
+    // ========== Legend ==========
+    subgraph cluster_legend {
+        label="Legend";
+        rank=sink;
+
+        LegendStart [label="Start/End", shape=ellipse, style=filled, fillcolor=lightblue];
+        LegendAllow [label="Allow Stop", shape=ellipse, style=filled, fillcolor=lightgreen];
+        LegendBlock [label="Block Stop", shape=ellipse, style=filled, fillcolor=lightyellow];
+        LegendCheck [label="Decision Point", shape=box, style=rounded];
+        LegendAction [label="Action/State", shape=box, style=rounded];
+
+        LegendStart -> LegendAllow [style=invis];
+        LegendAllow -> LegendBlock [style=invis];
+        LegendBlock -> LegendCheck [style=invis];
+        LegendCheck -> LegendAction [style=invis];
+    }
+
+    // ========== Tool Use Annotations ==========
+    // (Shown as labels on transitions where relevant bash commands are invoked)
+
+    // The following transitions involve specific tool uses:
+    // - CheckGitClean: Bash(git diff --stat, git diff --cached --stat, git ls-files, git rev-list)
+    // - CheckUncommitted: Bash(git diff --stat, git diff --cached --stat, git ls-files, git rev-list)
+    // - AnalyzeDiff: Bash(git diff --cached, git diff)
+    // - RunQualityOnChanges: Bash(sh -c "quality_command")
+    // - RunValidation: Bash(sh -c "quality_command")
+    // - CheckBeadsInteraction: Bash(bd show, bd list)
+    // - CheckOpenIssues: Bash(bd list --status=open)
+    // - GetIssueState: Bash(bd list --status=open, bd list --status=in_progress) OR Bash(git diff --stat)
+    // - SubAgentDecision: Sub-agent API call (decide_on_question)
+    // - RunReflection: Sub-agent API call (reflect_on_work) + Bash(git diff)
+}
