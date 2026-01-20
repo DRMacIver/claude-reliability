@@ -1,5 +1,11 @@
 # claude-reliability
 
+A plugin for Claude to improve its reliability through comprehensive testing infrastructure and behavioral validation.
+
+## Overview
+
+This project provides tools for testing and validating Claude Code behavior by recording and replaying tool call transcripts. The infrastructure supports reliability improvements through snapshot-based testing that captures expected behavior and validates consistency across changes.
+
 ## Development Commands
 
 ```bash
