@@ -6,9 +6,17 @@ use std::env;
 use std::io::{self, Read};
 use std::process::ExitCode;
 
+use claude_reliability::cli::{parse_args, ParseResult};
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let stdin = read_stdin();
+
+    // Only read stdin for commands that need it (avoids blocking on terminal)
+    let stdin = match parse_args(&args) {
+        ParseResult::Command(cmd) if cmd.needs_stdin() => read_stdin(),
+        _ => String::new(),
+    };
+
     let (exit_code, messages) = claude_reliability::cli::run(&args, &stdin);
 
     for msg in messages {

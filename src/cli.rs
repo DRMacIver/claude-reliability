@@ -39,6 +39,24 @@ pub enum Command {
     PreToolUseValidation,
 }
 
+impl Command {
+    /// Returns true if this command requires stdin input.
+    #[must_use]
+    pub const fn needs_stdin(self) -> bool {
+        match self {
+            Self::Version | Self::EnsureConfig | Self::EnsureGitignore | Self::UserPromptSubmit => {
+                false
+            }
+            Self::Stop
+            | Self::PreToolUseNoVerify
+            | Self::PreToolUseCodeReview
+            | Self::PreToolUseProblemMode
+            | Self::PreToolUseJkwSetup
+            | Self::PreToolUseValidation => true,
+        }
+    }
+}
+
 /// Result of parsing CLI arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseResult {
@@ -480,6 +498,23 @@ mod tests {
             parse_args(&args(&["prog", "user-prompt-submit"])),
             ParseResult::Command(Command::UserPromptSubmit)
         );
+    }
+
+    #[test]
+    fn test_command_needs_stdin() {
+        // Commands that don't need stdin (won't block on terminal)
+        assert!(!Command::Version.needs_stdin());
+        assert!(!Command::EnsureConfig.needs_stdin());
+        assert!(!Command::EnsureGitignore.needs_stdin());
+        assert!(!Command::UserPromptSubmit.needs_stdin());
+
+        // Commands that need stdin (hooks that receive JSON input)
+        assert!(Command::Stop.needs_stdin());
+        assert!(Command::PreToolUseNoVerify.needs_stdin());
+        assert!(Command::PreToolUseCodeReview.needs_stdin());
+        assert!(Command::PreToolUseProblemMode.needs_stdin());
+        assert!(Command::PreToolUseJkwSetup.needs_stdin());
+        assert!(Command::PreToolUseValidation.needs_stdin());
     }
 
     #[test]
