@@ -1476,11 +1476,7 @@ mod tests {
 
         // Create initial commit
         Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(base)
-            .output()
-            .unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
 
         // Create config WITHOUT code_review_section
         let config_path = base.join(CONFIG_FILE_PATH);
@@ -1535,11 +1531,7 @@ mod tests {
         let claude_md = base.join(CLAUDE_MD_PATH);
         std::fs::write(&claude_md, "# Project\n").unwrap();
         Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(base)
-            .output()
-            .unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
 
         // Modify CLAUDE.md
         std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nNew section.\n").unwrap();
@@ -1582,11 +1574,7 @@ mod tests {
         let claude_md = base.join(CLAUDE_MD_PATH);
         std::fs::write(&claude_md, "# Project\n").unwrap();
         Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(base)
-            .output()
-            .unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
 
         // Count commits before
         let count_before = Command::new("git")
@@ -1594,10 +1582,7 @@ mod tests {
             .current_dir(base)
             .output()
             .unwrap();
-        let before: u32 = String::from_utf8_lossy(&count_before.stdout)
-            .trim()
-            .parse()
-            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout).trim().parse().unwrap();
 
         // Call auto_commit_claude_md with no changes staged
         auto_commit_claude_md(base);
@@ -1608,10 +1593,196 @@ mod tests {
             .current_dir(base)
             .output()
             .unwrap();
-        let after: u32 = String::from_utf8_lossy(&count_after.stdout)
-            .trim()
-            .parse()
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_update_gitignore_content_replaces_existing_section() {
+        // Test updating an existing managed section with content before (no trailing newline)
+        let existing = "node_modules/# claude-reliability managed\n.claude/bin/\n";
+        let result = update_gitignore_content(existing);
+        // Should have newline added before managed section
+        assert!(result.contains("node_modules/\n# claude-reliability managed"));
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_update_gitignore_content_with_content_after_section() {
+        // Test updating managed section with content after it
+        let existing =
+            "node_modules/\n# claude-reliability managed\n.claude/bin/\n# User section\n.env\n";
+        let result = update_gitignore_content(existing);
+        // Should preserve content after the section
+        assert!(result.contains(".env"));
+        assert!(result.contains(GITIGNORE_SECTION_HEADER));
+    }
+
+    #[test]
+    fn test_has_check_target_file_not_found() {
+        // Test when justfile doesn't exist
+        let result = has_check_target(Path::new("/nonexistent/justfile"));
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_project_config_save_wrapper() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create a config and save it
+        let config = ProjectConfig {
+            git_repo: true,
+            beads_installed: false,
+            check_command: Some("just check".to_string()),
+            code_review_section: None,
+            require_push: true,
+        };
+
+        // Change to temp dir to test save() wrapper
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let result = config.save();
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(result.is_ok());
+        assert!(config_path.exists());
+    }
+
+    #[test]
+    fn test_ensure_code_review_section_write_fails() {
+        // Test when writing to CLAUDE.md fails (read-only directory)
+        // This is hard to test without mocking, so we'll use a directory path
+        // instead of a file path to trigger a write error
+        let dir = TempDir::new().unwrap();
+        let claude_md = dir.path().join(CLAUDE_MD_PATH);
+
+        // Create a directory at CLAUDE.md path instead of a file
+        std::fs::create_dir_all(&claude_md).unwrap();
+
+        // This should return false because write will fail
+        let result = ensure_code_review_section(dir.path());
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_auto_commit_claude_md_not_a_git_repo() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create CLAUDE.md but NOT a git repo
+        let claude_md = base.join(CLAUDE_MD_PATH);
+        std::fs::write(&claude_md, "# Project\n\n## Code Review\n").unwrap();
+
+        // Should silently return without error (git add will fail)
+        auto_commit_claude_md(base);
+        // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_auto_commit_config_already_committed() {
+        // Test that auto_commit_config returns early when file is already committed
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
             .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create and commit config file
+        let config_path = ProjectConfig::config_path(base);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
+
+        // Count commits before
+        let count_before = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout).trim().parse().unwrap();
+
+        // Call auto_commit_config - should return early since already committed
+        auto_commit_config(base);
+
+        // Count commits after - should be same (no new commit)
+        let count_after = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_auto_commit_gitignore_already_committed() {
+        // Test that auto_commit_gitignore returns early when file is already committed
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create and commit .gitignore
+        std::fs::write(base.join(".gitignore"), "# test\n").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
+
+        // Count commits before
+        let count_before = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout).trim().parse().unwrap();
+
+        // Call auto_commit_gitignore - should return early since already committed
+        auto_commit_gitignore(base);
+
+        // Count commits after - should be same (no new commit)
+        let count_after = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
 
         assert_eq!(before, after);
     }

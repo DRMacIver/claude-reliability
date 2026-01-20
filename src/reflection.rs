@@ -157,29 +157,47 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_wrapper_functions() {
         // Test the wrapper functions that use current directory
+        let original_dir = std::env::current_dir().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         // First ensure we're in a clean state
         let _ = clear_reflection_marker();
-
-        // Test has_reflection_marker
-        let initial = has_reflection_marker();
-        // Could be true or false depending on previous tests
-
-        // If marker exists, clear it for clean test
-        if initial {
-            clear_reflection_marker().unwrap();
-        }
-
         assert!(!has_reflection_marker());
 
         // Create marker
         mark_reflection_done().unwrap();
         assert!(has_reflection_marker());
 
-        // Clean up
+        // Clear marker (this also covers the clear path)
         clear_reflection_marker().unwrap();
         assert!(!has_reflection_marker());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_wrapper_functions_clear_existing() {
+        // Test clearing an existing marker (covers the branch in test code)
+        let original_dir = std::env::current_dir().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let _ = clear_reflection_marker(); // Ensure clean state first
+
+        // Create a marker
+        mark_reflection_done().unwrap();
+        assert!(has_reflection_marker());
+
+        // Now clear it - this explicitly covers the "marker exists" path
+        clear_reflection_marker().unwrap();
+        assert!(!has_reflection_marker());
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]

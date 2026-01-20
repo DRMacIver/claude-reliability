@@ -611,4 +611,48 @@ Some content.
         // Empty section (only whitespace) should return None
         assert!(extract_code_review_section(content).is_none());
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_review_guide_success() {
+        use tempfile::TempDir;
+
+        let original_dir = std::env::current_dir().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Write a CLAUDE.md file with a Code Review section
+        std::fs::write(
+            "CLAUDE.md",
+            r"# Project
+
+## Code Review
+
+Review guidelines here.
+
+## Other Section
+",
+        )
+        .unwrap();
+
+        let guide = load_review_guide().unwrap();
+        assert!(guide.contains("Review guidelines here."));
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_review_guide_no_file() {
+        use tempfile::TempDir;
+
+        let original_dir = std::env::current_dir().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // No CLAUDE.md file exists
+        assert!(load_review_guide().is_none());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
 }

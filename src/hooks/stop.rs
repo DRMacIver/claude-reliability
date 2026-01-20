@@ -2529,11 +2529,7 @@ mod tests {
         runner.expect(
             "git",
             &["diff", "-U0"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "small diff".to_string(),
-                stderr: String::new(),
-            },
+            CommandOutput { exit_code: 0, stdout: "small diff".to_string(), stderr: String::new() },
         );
 
         let mut sub_agent = MockSubAgent::new();
@@ -2552,10 +2548,7 @@ mod tests {
         let result = result.unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Work Assessment: May Be Incomplete")));
-        assert!(result
-            .messages
-            .iter()
-            .any(|m| m.contains("Please review the feedback")));
+        assert!(result.messages.iter().any(|m| m.contains("Please review the feedback")));
     }
 
     #[test]
@@ -2738,7 +2731,7 @@ mod tests {
         runner.expect(
             "git",
             &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: long_diff.clone(), stderr: String::new() },
+            CommandOutput { exit_code: 0, stdout: long_diff, stderr: String::new() },
         );
         runner.expect(
             "git",
@@ -2792,5 +2785,65 @@ mod tests {
         let result =
             check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_run_stop_reflection_incomplete_blocks() {
+        // Test that run_stop returns reflection result when incomplete (covers line 275)
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up had_uncommitted_changes marker so reflection triggers
+        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
+
+        // Set up runner with ahead_of_remote=true to skip fast path
+        // but no uncommitted changes to avoid handle_uncommitted_changes
+        let mut runner = MockCommandRunner::new();
+        let empty = CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let one = CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+
+        // FIRST: For the fast path check (check_uncommitted_changes at line 159)
+        runner.expect("git", &["diff", "--stat"], empty.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one.clone());
+
+        // SECOND: For line 219's check_uncommitted_changes
+        runner.expect("git", &["diff", "--stat"], empty.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one.clone());
+
+        // THIRD: For check_self_reflection's check_uncommitted_changes (line 503)
+        runner.expect("git", &["diff", "--stat"], empty.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one);
+
+        // FOURTH: For combined_diff (called by check_self_reflection)
+        runner.expect("git", &["diff", "--cached", "-U0"], empty);
+        runner.expect(
+            "git",
+            &["diff", "-U0"],
+            CommandOutput { exit_code: 0, stdout: "some diff".to_string(), stderr: String::new() },
+        );
+
+        // Sub-agent returns incomplete
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_reflection(false, "Work incomplete");
+
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            require_push: false, // Allow ahead_of_remote without blocking
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("May Be Incomplete")));
     }
 }

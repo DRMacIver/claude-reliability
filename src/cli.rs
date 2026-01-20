@@ -804,6 +804,33 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_run_ensure_config_with_justfile() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
+
+        // Create a justfile with a check recipe
+        std::fs::write(dir_path.join("justfile"), "check:\n\techo test\n").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        // Should detect "just check" as the check command
+        assert!(messages.iter().any(|m| m.contains("just check")));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_run_ensure_gitignore_via_cli() {
         use tempfile::TempDir;
 

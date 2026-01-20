@@ -13,6 +13,73 @@ const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 /// Timeout for reflection checks (90 seconds).
 const REFLECTION_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Context added to reflection prompt when in just-keep-working mode.
+const JKW_MODE_CONTEXT: &str = r"
+
+## Just-Keep-Working Mode Context
+
+You are currently in **just-keep-working mode**. This means you have a session plan that you're working through.
+
+**IMPORTANT**: Double-check your plan for this session:
+1. Review the conditions and success criteria defined in your `.claude/jkw-session.local.md` file
+2. Confirm you have definitely completed ALL conditions of your instructions
+3. Consider if there are any remaining tasks in your plan that haven't been addressed
+
+If you haven't fully completed all the planned work, mark this as incomplete.";
+
+/// Context added to reflection prompt when NOT in just-keep-working mode.
+const NORMAL_MODE_CONTEXT: &str = r#"
+
+## Continuation Guidance
+
+If you believe your work is incomplete, you should invoke `/just-keep-working` with enough information to cover your current task. This will allow you to continue working without requiring further questions to the user.
+
+Example: If you've implemented a feature but haven't run tests, you could invoke:
+`/just-keep-working` with the goal "Complete remaining work: run tests for the new feature and fix any failures""#;
+
+/// Build the reflection prompt with the given context.
+fn build_reflection_prompt(assistant_output: &str, git_diff: &str, in_jkw_mode: bool) -> String {
+    let jkw_context = if in_jkw_mode { JKW_MODE_CONTEXT } else { NORMAL_MODE_CONTEXT };
+
+    format!(
+        r#"You are a self-reflection agent. Your task is to reflect on whether the assistant has completed the user's request properly, or whether there might be something incomplete, misunderstood, or shortcuts taken.
+
+## Assistant's Last Output
+<assistant_output>
+{assistant_output}
+</assistant_output>
+
+## Changes Made (Git Diff)
+<git_diff>
+{git_diff}
+</git_diff>
+{jkw_context}
+
+## Your Task
+Carefully reflect on whether the work appears complete and correct. Consider:
+
+1. **Completeness**: Has everything the user asked for been done? Are there any TODO items or "left for later" comments?
+
+2. **Correctness**: Do the changes look correct and match what was requested? Are there any obvious bugs or issues?
+
+3. **Shortcuts**: Were any corners cut? Any "I'll skip X" or "this should be good enough"?
+
+4. **Misunderstandings**: Could the user's request have been misunderstood in any way?
+
+5. **Edge cases**: Are there obvious edge cases that were missed?
+
+Respond with a JSON object:
+```json
+{{
+    "complete": true or false,
+    "feedback": "Your analysis here. If complete is false, explain what seems incomplete or problematic. If complete is true, briefly confirm why the work looks good."
+}}
+```
+
+Be constructively critical - it's better to flag potential issues than to miss them. However, don't be overly pedantic about trivial matters."#
+    )
+}
+
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
     runner: &'a dyn CommandRunner,
@@ -227,67 +294,7 @@ If rejecting, explain clearly what needs to be fixed. If approving, you can stil
         git_diff: &str,
         in_jkw_mode: bool,
     ) -> Result<(bool, String)> {
-        let jkw_context = if in_jkw_mode {
-            r"
-
-## Just-Keep-Working Mode Context
-
-You are currently in **just-keep-working mode**. This means you have a session plan that you're working through.
-
-**IMPORTANT**: Double-check your plan for this session:
-1. Review the conditions and success criteria defined in your `.claude/jkw-session.local.md` file
-2. Confirm you have definitely completed ALL conditions of your instructions
-3. Consider if there are any remaining tasks in your plan that haven't been addressed
-
-If you haven't fully completed all the planned work, mark this as incomplete."
-        } else {
-            r#"
-
-## Continuation Guidance
-
-If you believe your work is incomplete, you should invoke `/just-keep-working` with enough information to cover your current task. This will allow you to continue working without requiring further questions to the user.
-
-Example: If you've implemented a feature but haven't run tests, you could invoke:
-`/just-keep-working` with the goal "Complete remaining work: run tests for the new feature and fix any failures""#
-        };
-
-        let prompt = format!(
-            r#"You are a self-reflection agent. Your task is to reflect on whether the assistant has completed the user's request properly, or whether there might be something incomplete, misunderstood, or shortcuts taken.
-
-## Assistant's Last Output
-<assistant_output>
-{assistant_output}
-</assistant_output>
-
-## Changes Made (Git Diff)
-<git_diff>
-{git_diff}
-</git_diff>
-{jkw_context}
-
-## Your Task
-Carefully reflect on whether the work appears complete and correct. Consider:
-
-1. **Completeness**: Has everything the user asked for been done? Are there any TODO items or "left for later" comments?
-
-2. **Correctness**: Do the changes look correct and match what was requested? Are there any obvious bugs or issues?
-
-3. **Shortcuts**: Were any corners cut? Any "I'll skip X" or "this should be good enough"?
-
-4. **Misunderstandings**: Could the user's request have been misunderstood in any way?
-
-5. **Edge cases**: Are there obvious edge cases that were missed?
-
-Respond with a JSON object:
-```json
-{{
-    "complete": true or false,
-    "feedback": "Your analysis here. If complete is false, explain what seems incomplete or problematic. If complete is true, briefly confirm why the work looks good."
-}}
-```
-
-Be constructively critical - it's better to flag potential issues than to miss them. However, don't be overly pedantic about trivial matters."#
-        );
+        let prompt = build_reflection_prompt(assistant_output, git_diff, in_jkw_mode);
 
         let output = self.runner.run(
             self.claude_cmd(),
@@ -773,6 +780,40 @@ mod tests {
 
             let result = agent.reflect_on_work("test output", "+diff", false);
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_build_reflection_prompt_jkw_mode() {
+            let prompt = build_reflection_prompt("assistant output", "+diff", true);
+
+            // Should contain JKW mode context
+            assert!(prompt.contains("just-keep-working mode"));
+            assert!(prompt.contains("jkw-session.local.md"));
+            assert!(prompt.contains("Double-check your plan"));
+
+            // Should NOT contain normal mode context
+            assert!(!prompt.contains("/just-keep-working` with enough information"));
+
+            // Should contain the assistant output and diff
+            assert!(prompt.contains("assistant output"));
+            assert!(prompt.contains("+diff"));
+        }
+
+        #[test]
+        fn test_build_reflection_prompt_normal_mode() {
+            let prompt = build_reflection_prompt("my output", "my diff", false);
+
+            // Should contain normal mode context
+            assert!(prompt.contains("Continuation Guidance"));
+            assert!(prompt.contains("/just-keep-working` with enough information"));
+
+            // Should NOT contain JKW mode context
+            assert!(!prompt.contains("jkw-session.local.md"));
+            assert!(!prompt.contains("Double-check your plan"));
+
+            // Should contain the assistant output and diff
+            assert!(prompt.contains("my output"));
+            assert!(prompt.contains("my diff"));
         }
     }
 }
