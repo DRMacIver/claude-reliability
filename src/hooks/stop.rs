@@ -12,7 +12,6 @@ use crate::error::Result;
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
-use crate::reflection;
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
 use crate::templates;
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
@@ -302,12 +301,31 @@ pub fn run_stop_hook(
         }
     }
 
-    // Self-reflection check: on first attempt to stop after making changes,
-    // ask the LLM to reflect on whether work was completed properly
-    // (not in jkw mode at this point - jkw mode returned earlier)
-    if let Some(result) = check_self_reflection(config, runner, &transcript_info, sub_agent, false)?
-    {
-        return Ok(result);
+    // Simple reflection check: if modifying tools were used, prompt for reflection
+    // on first stop attempt; allow on second consecutive stop
+    let base_dir = config.base_dir();
+    if session::has_reflect_marker(base_dir) {
+        // Agent already got the reflection prompt and is stopping again - allow it
+        session::clear_reflect_marker(base_dir)?;
+        return Ok(StopHookResult::allow());
+    }
+
+    if transcript_info.has_modifying_tool_use {
+        // Modifying tools were used, prompt for reflection
+        session::set_reflect_marker(base_dir)?;
+        return Ok(StopHookResult::block()
+            .with_message("# Task Completion Check")
+            .with_message("")
+            .with_message(
+                "Before exiting, carefully analyze whether you have fully completed the task.",
+            )
+            .with_message("")
+            .with_message("If you have NOT completed the task:")
+            .with_message("  - Continue working to finish it")
+            .with_message("")
+            .with_message("If you HAVE completed the task:")
+            .with_message("  - Provide a clear, concise summary of what was done for the user")
+            .with_message("  - Then stop again to exit"));
     }
 
     Ok(StopHookResult::allow())
@@ -365,10 +383,6 @@ fn handle_uncommitted_changes(
 ) -> Result<StopHookResult> {
     let mut result = StopHookResult::block();
     let base_dir = config.base_dir();
-
-    // Mark that we had uncommitted changes - used by reflection check later
-    // This ensures reflection runs even if Claude commits+pushes in one command
-    reflection::mark_had_uncommitted_changes_in(base_dir)?;
 
     // Check beads interaction if beads is available
     if beads::is_beads_available_in(runner, base_dir) {
@@ -549,106 +563,6 @@ fn add_analysis_messages(result: &mut StopHookResult, analysis: &AnalysisResults
     }
 }
 
-/// Check for self-reflection on completed work.
-///
-/// On the first attempt to stop after making changes, this asks the LLM to
-/// reflect on whether the work was completed properly. The reflection marker
-/// is set after the first reflection so this only runs once per user prompt.
-fn check_self_reflection(
-    config: &StopHookConfig,
-    runner: &dyn CommandRunner,
-    transcript_info: &TranscriptInfo,
-    sub_agent: &dyn SubAgent,
-    in_jkw_mode: bool,
-) -> Result<Option<StopHookResult>> {
-    let base_dir = config.base_dir();
-
-    // Skip if reflection was already done this session
-    if reflection::has_reflection_marker_in(base_dir) {
-        return Ok(None);
-    }
-
-    // Check if there were any changes made this session
-    // We use multiple signals:
-    // 1. The "had_uncommitted_changes" marker (set when we blocked on uncommitted changes)
-    // 2. Current git status (uncommitted changes or ahead of remote)
-    // 3. Tool use tracking from transcript
-    // This ensures reflection runs even if Claude commits+pushes in one command.
-    let had_changes_marker = reflection::had_uncommitted_changes_in(base_dir);
-    let has_current_changes = if config.git_repo {
-        if let Ok(git_status) = git::check_uncommitted_changes(runner) {
-            git_status.uncommitted.has_changes() || git_status.ahead_of_remote
-        } else {
-            transcript_info.has_modifying_tool_use
-        }
-    } else {
-        transcript_info.has_modifying_tool_use
-    };
-
-    let has_changes = had_changes_marker || has_current_changes;
-
-    if !has_changes {
-        return Ok(None);
-    }
-
-    // Get the assistant's last output for context
-    let assistant_output =
-        transcript_info.last_assistant_output.as_deref().unwrap_or("(No output available)");
-    let assistant_output = truncate_for_context(assistant_output, 3000);
-
-    // Get the git diff for context (only if in a git repo)
-    let git_diff = if config.git_repo {
-        git::combined_diff(runner).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let git_diff = if git_diff.len() > 5000 {
-        format!("{}...(truncated)", &git_diff[..5000])
-    } else {
-        git_diff
-    };
-
-    // Ask the LLM to reflect
-    let (complete, feedback) =
-        sub_agent.reflect_on_work(assistant_output, &git_diff, in_jkw_mode)?;
-
-    // Mark reflection as done so we don't run again
-    reflection::mark_reflection_done_in(base_dir)?;
-    // Clear the "had uncommitted changes" marker since we've now reflected
-    reflection::clear_had_uncommitted_changes_in(base_dir)?;
-
-    // Build the result
-    let mut result = StopHookResult::block()
-        .with_message("# Self-Reflection Check")
-        .with_message("")
-        .with_message("Before finishing, please reflect on your work:");
-    result.messages.push(String::new());
-
-    if complete {
-        result.messages.push("## Work Assessment: Complete".to_string());
-    } else {
-        result.messages.push("## Work Assessment: May Be Incomplete".to_string());
-    }
-    result.messages.push(String::new());
-    result.messages.push(feedback);
-    result.messages.push(String::new());
-    result.messages.push("---".to_string());
-    result.messages.push(String::new());
-
-    if complete {
-        result
-            .messages
-            .push("The self-reflection check has passed. Try stopping again to exit.".to_string());
-    } else {
-        result
-            .messages
-            .push("Please review the feedback above and address any concerns.".to_string());
-        result.messages.push("Then try stopping again when ready.".to_string());
-    }
-
-    Ok(Some(result))
-}
-
 /// Check for interactive question handling.
 fn check_interactive_question(
     transcript_info: &TranscriptInfo,
@@ -714,8 +628,8 @@ fn handle_jkw_mode(
     session: &mut SessionConfig,
     config: &StopHookConfig,
     runner: &dyn CommandRunner,
-    sub_agent: &dyn SubAgent,
-    transcript_info: &TranscriptInfo,
+    _sub_agent: &dyn SubAgent,
+    _transcript_info: &TranscriptInfo,
 ) -> Result<StopHookResult> {
     let session_state_path = config.session_state_path();
 
@@ -782,17 +696,6 @@ fn handle_jkw_mode(
             if let Some(ref cmd) = config.quality_check_command {
                 let output = runner.run("sh", &["-c", cmd], None)?;
                 if output.success() {
-                    // Run self-reflection check before allowing completion
-                    if let Some(reflection_result) = check_self_reflection(
-                        config,
-                        runner,
-                        transcript_info,
-                        sub_agent,
-                        true, // in jkw mode
-                    )? {
-                        return Ok(reflection_result);
-                    }
-
                     result.messages.push(String::new());
                     result.messages.push("All quality gates passed!".to_string());
                     result.messages.push("No open issues remain.".to_string());
@@ -1200,9 +1103,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Set up reflection marker so the reflection check is skipped
+        // Set up reflect marker so the reflection check is skipped
         // (this test is about require_push behavior, not reflection)
-        reflection::mark_reflection_done_in(base).unwrap();
+        session::set_reflect_marker(base).unwrap();
 
         let runner = mock_clean_with_ahead();
         let sub_agent = MockSubAgent::new();
@@ -1928,22 +1831,14 @@ mod tests {
             &["ls-files", "--others", "--exclude-standard"],
             empty_success.clone(),
         );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
         // get_current_issues (returns empty - all done)
         runner.expect("bd", &["list", "--status=open"], empty_success.clone());
         runner.expect("bd", &["list", "--status=in_progress"], empty_success.clone());
 
         // Quality check passes
-        runner.expect("sh", &["-c", "just check"], empty_success.clone());
-
-        // check_self_reflection calls git::check_uncommitted_changes
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // check_self_reflection skips git::combined_diff since no changes were detected
+        runner.expect("sh", &["-c", "just check"], empty_success);
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -1959,160 +1854,6 @@ mod tests {
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Checking Completion")));
         assert!(result.messages.iter().any(|m| m.contains("All quality gates passed")));
-    }
-
-    #[test]
-    fn test_jkw_mode_all_done_with_reflection_returns() {
-        use tempfile::TempDir;
-
-        // This test covers lines 804-805 (return Ok(reflection_result) in JKW mode)
-        // Key insight: handle_jkw_mode is only called when there are NO uncommitted changes
-        // (line 265-276 returns early if changes exist). So we need:
-        // - No current uncommitted changes (to reach handle_jkw_mode)
-        // - The had_uncommitted_changes marker set (to trigger reflection)
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create JKW session file
-        create_session_state(base, 1, 1);
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        // Set marker to trigger reflection (even though no current changes)
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes - NO changes (allows us to reach handle_jkw_mode)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // get_current_issues in handle_jkw_mode (no issues - all done)
-        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], empty_success.clone());
-
-        // Quality check passes
-        runner.expect("sh", &["-c", "just check"], empty_success.clone());
-
-        // check_self_reflection calls check_uncommitted_changes
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for reflection context
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
-
-        let mut sub_agent = MockSubAgent::new();
-        // Mock reflection returning "complete"
-        sub_agent.expect_reflection(true, "Work looks complete!");
-
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        // Should return the reflection result (lines 804-805)
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Self-Reflection Check")));
-        assert!(result.messages.iter().any(|m| m.contains("Work Assessment: Complete")));
-    }
-
-    #[test]
-    fn test_jkw_mode_reflection_error_propagates() {
-        use crate::testing::FailingSubAgent;
-        use tempfile::TempDir;
-
-        // This test covers line 804's error path (the `?` in `check_self_reflection(...)?`)
-        // by making sub_agent.reflect_on_work fail after quality checks pass
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create JKW session file
-        create_session_state(base, 1, 1);
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        // Set marker to trigger reflection
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes - NO changes (to reach handle_jkw_mode)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // get_current_issues (no issues - all done)
-        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], empty_success.clone());
-
-        // Quality check passes
-        runner.expect("sh", &["-c", "just check"], empty_success.clone());
-
-        // check_self_reflection calls check_uncommitted_changes (succeeds)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for reflection context
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
-
-        // Use FailingSubAgent to make reflect_on_work fail
-        let sub_agent = FailingSubAgent::new("reflection error");
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        // Should return Err because check_self_reflection fails via sub_agent.reflect_on_work
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -2665,298 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn test_check_self_reflection_with_changes() {
-        use tempfile::TempDir;
-
-        // Test the self-reflection check when there are uncommitted changes
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Set up had_uncommitted_changes marker to trigger reflection
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        // Create a transcript with last assistant output
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("I have completed the implementation.".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true,
-        };
-
-        let mut runner = MockCommandRunner::new();
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for context
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "diff --git a/file.rs b/file.rs\n+new code".to_string(),
-                stderr: String::new(),
-            },
-        );
-
-        let mut sub_agent = MockSubAgent::new();
-        // Mock that reflection says work is complete
-        sub_agent.expect_reflection(true, "Work looks complete. Good job!");
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert!(!result.allow_stop); // Blocks to show reflection
-        assert!(result.messages.iter().any(|m| m.contains("Self-Reflection Check")));
-        assert!(result.messages.iter().any(|m| m.contains("Work Assessment: Complete")));
-    }
-
-    #[test]
-    fn test_check_self_reflection_incomplete() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Set up had_uncommitted_changes marker
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("Working on it...".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true,
-        };
-
-        let mut runner = MockCommandRunner::new();
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "small diff".to_string(), stderr: String::new() },
-        );
-
-        let mut sub_agent = MockSubAgent::new();
-        // Mock that reflection says work is incomplete
-        sub_agent.expect_reflection(false, "The work appears incomplete. Please finish up.");
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Work Assessment: May Be Incomplete")));
-        assert!(result.messages.iter().any(|m| m.contains("Please review the feedback")));
-    }
-
-    #[test]
-    fn test_check_self_reflection_in_jkw_mode() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("Task completed".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true,
-        };
-
-        let mut runner = MockCommandRunner::new();
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "diff".to_string(), stderr: String::new() },
-        );
-
-        let mut sub_agent = MockSubAgent::new();
-        sub_agent.expect_reflection(true, "Looks good!");
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        // Pass in_jkw_mode = true
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, true).unwrap();
-        assert!(result.is_some());
-        // The JKW context is passed to sub_agent, we just verify it runs
-    }
-
-    #[test]
-    fn test_check_self_reflection_skipped_when_marker_exists() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Mark reflection as already done
-        crate::reflection::mark_reflection_done_in(base).unwrap();
-
-        let transcript_info = TranscriptInfo::default();
-        let runner = MockCommandRunner::new();
-        let sub_agent = MockSubAgent::new();
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        assert!(result.is_none()); // Skipped due to marker
-    }
-
-    #[test]
-    fn test_check_self_reflection_no_changes_skipped() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // No had_uncommitted_changes marker, no modifying tool use
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("Just reading files".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: false, // No modifying tools used
-        };
-
-        let mut runner = MockCommandRunner::new();
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes - no changes
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        let sub_agent = MockSubAgent::new();
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        assert!(result.is_none()); // Skipped - no changes
-    }
-
-    #[test]
-    fn test_check_self_reflection_git_fails_falls_back_to_transcript() {
-        use crate::testing::FailingCommandRunner;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Set up had_uncommitted_changes marker
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        // Use transcript with modifying tool use
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("I have made changes.".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true, // Will be used as fallback when git fails
-        };
-
-        // Use a runner that fails all commands
-        let runner = FailingCommandRunner::new("simulated git failure");
-
-        let mut sub_agent = MockSubAgent::new();
-        // Mock reflection returning complete
-        sub_agent.expect_reflection(true, "Work looks complete!");
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        // This should work because it falls back to transcript_info.has_modifying_tool_use
-        // when git::check_uncommitted_changes fails (line 594)
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-
-        // Should return Some because has_modifying_tool_use is true
-        assert!(result.is_some());
-        let result = result.unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Self-Reflection Check")));
-    }
-
-    #[test]
     fn test_problem_mode_exit() {
         use tempfile::TempDir;
 
@@ -2983,152 +2432,118 @@ mod tests {
     }
 
     #[test]
-    fn test_self_reflection_with_long_diff_truncated() {
+    fn test_simple_reflection_prompts_on_modifying_tool_use() {
+        use std::io::Write;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("Done".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true,
-        };
-
-        let mut runner = MockCommandRunner::new();
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // Return a very long diff (> 5000 chars) to trigger truncation
-        let long_diff = "x".repeat(6000);
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: long_diff, stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-
-        let mut sub_agent = MockSubAgent::new();
-        sub_agent.expect_reflection(true, "LGTM");
-
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        // Should succeed even with long diff (it gets truncated internally)
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_self_reflection_non_git_repo_uses_modifying_tool() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // No had_changes marker, but has_modifying_tool_use is true
-        let transcript_info = TranscriptInfo {
-            last_assistant_output: Some("Made changes".to_string()),
-            last_user_message_time: None,
-            has_api_error: false,
-            consecutive_api_errors: 0,
-            has_modifying_tool_use: true, // This triggers reflection in non-git repos
-        };
+        // Create a transcript with modifying tool use
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
 
         let runner = MockCommandRunner::new();
-
-        let mut sub_agent = MockSubAgent::new();
-        sub_agent.expect_reflection(true, "OK");
-
-        let config = StopHookConfig {
-            git_repo: false, // Not a git repo - uses has_modifying_tool_use fallback
-            base_dir: Some(base.to_path_buf()),
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
             ..Default::default()
         };
-
-        // Should run reflection based on has_modifying_tool_use
-        let result =
-            check_self_reflection(&config, &runner, &transcript_info, &sub_agent, false).unwrap();
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_run_stop_reflection_incomplete_blocks() {
-        // Test that run_stop returns reflection result when incomplete (covers line 275)
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Set up had_uncommitted_changes marker so reflection triggers
-        crate::reflection::mark_had_uncommitted_changes_in(base).unwrap();
-
-        // Set up runner with ahead_of_remote=true to skip fast path
-        // but no uncommitted changes to avoid handle_uncommitted_changes
-        let mut runner = MockCommandRunner::new();
-        let empty = CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let one = CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
-
-        // FIRST: For the fast path check (check_uncommitted_changes at line 159)
-        runner.expect("git", &["diff", "--stat"], empty.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one.clone());
-
-        // SECOND: For line 219's check_uncommitted_changes
-        runner.expect("git", &["diff", "--stat"], empty.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one.clone());
-
-        // THIRD: For check_self_reflection's check_uncommitted_changes (line 503)
-        runner.expect("git", &["diff", "--stat"], empty.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty.clone());
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one);
-
-        // FOURTH: For combined_diff (called by check_self_reflection)
-        runner.expect("git", &["diff", "--cached", "-U0"], empty);
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "some diff".to_string(), stderr: String::new() },
-        );
-
-        // Sub-agent returns incomplete
-        let mut sub_agent = MockSubAgent::new();
-        sub_agent.expect_reflection(false, "Work incomplete");
-
-        let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
-            git_repo: true,
-            require_push: false, // Allow ahead_of_remote without blocking
+            git_repo: false,
             base_dir: Some(base.to_path_buf()),
             ..Default::default()
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("May Be Incomplete")));
+        assert!(result.messages.iter().any(|m| m.contains("Task Completion Check")));
+        // Marker should be set
+        assert!(session::has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_simple_reflection_allows_second_stop() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up the reflect marker (simulating first stop already happened)
+        session::set_reflect_marker(base).unwrap();
+
+        // Create a transcript without modifying tool use (just reading)
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Summary of work done."}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        // Marker should be cleared after second stop
+        assert!(!session::has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_simple_reflection_no_modifying_tools_no_prompt() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript with only read operations
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Read","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        // No marker should be set
+        assert!(!session::has_reflect_marker(base));
     }
 
     #[test]

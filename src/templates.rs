@@ -18,16 +18,11 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
     let mut m = HashMap::new();
 
     // Prompts
-    m.insert("prompts/reflection.tera", include_str!("../templates/prompts/reflection.tera"));
     m.insert(
         "prompts/question_decision.tera",
         include_str!("../templates/prompts/question_decision.tera"),
     );
     m.insert("prompts/code_review.tera", include_str!("../templates/prompts/code_review.tera"));
-
-    // Contexts
-    m.insert("contexts/jkw_mode.tera", include_str!("../templates/contexts/jkw_mode.tera"));
-    m.insert("contexts/normal_mode.tera", include_str!("../templates/contexts/normal_mode.tera"));
 
     // Stop hook messages
     m.insert(
@@ -61,10 +56,6 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
     m.insert(
         "messages/stop/open_issues_remaining.tera",
         include_str!("../templates/messages/stop/open_issues_remaining.tera"),
-    );
-    m.insert(
-        "messages/stop/self_reflection.tera",
-        include_str!("../templates/messages/stop/self_reflection.tera"),
     );
     m.insert(
         "messages/stop/staleness_detected.tera",
@@ -165,7 +156,7 @@ pub fn init_templates(templates_dir: Option<&Path>) -> Result<()> {
 ///
 /// # Arguments
 ///
-/// * `name` - Template name (e.g., "prompts/reflection.tera")
+/// * `name` - Template name (e.g., `prompts/code_review.tera`)
 /// * `context` - Tera context with variables for the template
 ///
 /// # Errors
@@ -265,8 +256,6 @@ fn sample_context_for(template_name: &str) -> Context {
     // Add all possible variables with sample values
     // Prompts
     ctx.insert("assistant_output", "Sample assistant output");
-    ctx.insert("git_diff", "+sample diff");
-    ctx.insert("jkw_context", "Sample JKW context");
     ctx.insert("user_recency_minutes", &5_u32);
     ctx.insert("guide_section", "Sample review guidelines");
     ctx.insert("files_list", "- file1.rs\n- file2.rs");
@@ -289,8 +278,6 @@ fn sample_context_for(template_name: &str) -> Context {
     );
     ctx.insert("commits_ahead", &2_u32);
     ctx.insert("open_count", &3_u32);
-    ctx.insert("complete", &true);
-    ctx.insert("feedback", "Work looks complete");
     ctx.insert("change_type", "issue");
     ctx.insert("iterations_since_change", &2_u32);
     ctx.insert("iteration", &5_u32);
@@ -401,7 +388,7 @@ mod tests {
     fn test_embedded_template_count() {
         // Ensure we have all expected templates
         let names = embedded_template_names();
-        assert!(names.len() >= 17, "Expected at least 17 templates, got {}", names.len());
+        assert!(names.len() >= 13, "Expected at least 13 templates, got {}", names.len());
     }
 
     #[test]

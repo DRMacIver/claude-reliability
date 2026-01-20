@@ -116,27 +116,4 @@ pub trait SubAgent {
         files: &[String],
         review_guide: Option<&str>,
     ) -> Result<(bool, String)>;
-
-    /// Reflect on the work done and check if it meets the user's request.
-    ///
-    /// # Arguments
-    ///
-    /// * `assistant_output` - The assistant's last output (truncated).
-    /// * `git_diff` - The git diff showing changes made.
-    /// * `in_jkw_mode` - Whether we're currently in just-keep-working mode.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (`work_complete`, feedback). If `work_complete` is false,
-    /// the feedback describes what may be incomplete or missing.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the sub-agent call fails.
-    fn reflect_on_work(
-        &self,
-        assistant_output: &str,
-        git_diff: &str,
-        in_jkw_mode: bool,
-    ) -> Result<(bool, String)>;
 }

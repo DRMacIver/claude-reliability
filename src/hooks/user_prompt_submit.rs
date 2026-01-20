@@ -1,18 +1,17 @@
 //! `UserPromptSubmit` hook for resetting session state.
 //!
 //! This hook runs when the user submits a new prompt. It resets the
-//! self-reflection marker so that the reflection check runs again
+//! reflection marker so that the reflection check runs again
 //! on the next stop attempt after making changes.
 
 use crate::error::Result;
-use crate::reflection;
 use crate::session;
 use std::path::Path;
 
 /// Run the user prompt submit hook.
 ///
 /// This hook resets session state when the user sends a new message,
-/// including clearing the self-reflection marker and validation marker.
+/// including clearing the reflection marker and validation marker.
 ///
 /// # Arguments
 ///
@@ -24,14 +23,11 @@ use std::path::Path;
 pub fn run_user_prompt_submit_hook(base_dir: Option<&Path>) -> Result<()> {
     let base = base_dir.unwrap_or_else(|| Path::new("."));
 
-    // Clear the reflection marker so the next stop will trigger reflection
-    reflection::clear_reflection_marker_in(base)?;
-
-    // Clear the "had uncommitted changes" marker as this is a new prompt
-    reflection::clear_had_uncommitted_changes_in(base)?;
-
     // Clear the needs validation marker - user has seen changes
     session::clear_needs_validation(base)?;
+
+    // Clear the reflection marker so the next stop with modifying tools will prompt again
+    session::clear_reflect_marker(base)?;
 
     Ok(())
 }
@@ -42,35 +38,19 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_user_prompt_submit_clears_reflection_marker() {
+    fn test_user_prompt_submit_clears_reflect_marker() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
         // Create the reflection marker
-        reflection::mark_reflection_done_in(base).unwrap();
-        assert!(reflection::has_reflection_marker_in(base));
+        session::set_reflect_marker(base).unwrap();
+        assert!(session::has_reflect_marker(base));
 
         // Run the hook
         run_user_prompt_submit_hook(Some(base)).unwrap();
 
         // Marker should be cleared
-        assert!(!reflection::has_reflection_marker_in(base));
-    }
-
-    #[test]
-    fn test_user_prompt_submit_clears_had_uncommitted_changes_marker() {
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create the "had uncommitted changes" marker
-        reflection::mark_had_uncommitted_changes_in(base).unwrap();
-        assert!(reflection::had_uncommitted_changes_in(base));
-
-        // Run the hook
-        run_user_prompt_submit_hook(Some(base)).unwrap();
-
-        // Marker should be cleared
-        assert!(!reflection::had_uncommitted_changes_in(base));
+        assert!(!session::has_reflect_marker(base));
     }
 
     #[test]
@@ -79,7 +59,7 @@ mod tests {
         let base = dir.path();
 
         // No marker exists initially
-        assert!(!reflection::has_reflection_marker_in(base));
+        assert!(!session::has_reflect_marker(base));
 
         // Should not error when marker doesn't exist
         run_user_prompt_submit_hook(Some(base)).unwrap();

@@ -11,7 +11,6 @@ pub mod error;
 pub mod git;
 pub mod hooks;
 pub mod question;
-pub mod reflection;
 pub mod session;
 pub mod subagent;
 pub mod templates;

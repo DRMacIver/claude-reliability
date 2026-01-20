@@ -1,8 +1,0 @@
-{# Context added to reflection prompt when NOT in just-keep-working mode. #}
-
-## Continuation Guidance
-
-If you believe your work is incomplete, you should invoke `/just-keep-working` with enough information to cover your current task. This will allow you to continue working without requiring further questions to the user.
-
-Example: If you've implemented a feature but haven't run tests, you could invoke:
-`/just-keep-working` with the goal "Complete remaining work: run tests for the new feature and fix any failures"

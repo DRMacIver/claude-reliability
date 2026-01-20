@@ -12,30 +12,6 @@ const QUESTION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Timeout for code reviews (5 minutes).
 const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Timeout for reflection checks (90 seconds).
-const REFLECTION_TIMEOUT: Duration = Duration::from_secs(90);
-
-/// Build the reflection prompt with the given context.
-fn build_reflection_prompt(assistant_output: &str, git_diff: &str, in_jkw_mode: bool) -> String {
-    // Get the context template based on mode
-    let jkw_context = if in_jkw_mode {
-        templates::render("contexts/jkw_mode.tera", &Context::new())
-            .expect("jkw_mode.tera template should always render")
-    } else {
-        templates::render("contexts/normal_mode.tera", &Context::new())
-            .expect("normal_mode.tera template should always render")
-    };
-
-    // Build the full prompt using the template
-    let mut ctx = Context::new();
-    ctx.insert("assistant_output", assistant_output);
-    ctx.insert("git_diff", git_diff);
-    ctx.insert("jkw_context", &jkw_context);
-
-    templates::render("prompts/reflection.tera", &ctx)
-        .expect("reflection.tera template should always render")
-}
-
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
     runner: &'a dyn CommandRunner,
@@ -173,55 +149,6 @@ impl SubAgent for RealSubAgent<'_> {
             format!(
                 "Review completed (could not parse structured response): {}",
                 response.chars().take(1000).collect::<String>()
-            ),
-        ))
-    }
-
-    fn reflect_on_work(
-        &self,
-        assistant_output: &str,
-        git_diff: &str,
-        in_jkw_mode: bool,
-    ) -> Result<(bool, String)> {
-        let prompt = build_reflection_prompt(assistant_output, git_diff, in_jkw_mode);
-
-        let output = self.runner.run(
-            self.claude_cmd(),
-            &["--print", "--model", "haiku", "-p", &prompt],
-            Some(REFLECTION_TIMEOUT),
-        )?;
-
-        if !output.success() {
-            // If Claude fails, assume work is complete with warning
-            return Ok((
-                true,
-                "Reflection check failed to run. Proceeding assuming work is complete.".to_string(),
-            ));
-        }
-
-        let response = output.stdout.trim();
-
-        // Try to find and parse JSON in the output
-        if let Some(json_match) = extract_json_object(response) {
-            if let Ok(reflection) = serde_json::from_str::<serde_json::Value>(json_match) {
-                let complete =
-                    reflection.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(true);
-                let feedback = reflection
-                    .get("feedback")
-                    .and_then(|f| f.as_str())
-                    .unwrap_or("No feedback provided.")
-                    .to_string();
-
-                return Ok((complete, feedback));
-            }
-        }
-
-        // If parsing fails, assume complete with the raw output as feedback
-        Ok((
-            true,
-            format!(
-                "Reflection check completed (could not parse response): {}",
-                response.chars().take(500).collect::<String>()
             ),
         ))
     }
@@ -595,114 +522,6 @@ mod tests {
             // Falls through to default approval with raw output as feedback
             assert!(approved);
             assert!(feedback.contains("could not parse"));
-        }
-
-        #[test]
-        fn test_real_subagent_reflect_complete() {
-            let dir = TempDir::new().unwrap();
-            let json = r#"{"complete": true, "feedback": "Work looks good"}"#;
-            let claude_cmd = setup_fake_claude(&dir, json, 0);
-
-            let runner = RealCommandRunner::new();
-            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
-
-            let (complete, feedback) =
-                agent.reflect_on_work("test output", "+diff", false).unwrap();
-
-            assert!(complete);
-            assert!(feedback.contains("looks good"));
-        }
-
-        #[test]
-        fn test_real_subagent_reflect_incomplete() {
-            let dir = TempDir::new().unwrap();
-            let json = r#"{"complete": false, "feedback": "Missing test coverage"}"#;
-            let claude_cmd = setup_fake_claude(&dir, json, 0);
-
-            let runner = RealCommandRunner::new();
-            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
-
-            let (complete, feedback) =
-                agent.reflect_on_work("test output", "+diff", false).unwrap();
-
-            assert!(!complete);
-            assert!(feedback.contains("Missing test"));
-        }
-
-        #[test]
-        fn test_real_subagent_reflect_command_fails() {
-            let dir = TempDir::new().unwrap();
-            let claude_cmd = setup_fake_claude(&dir, "error occurred", 1);
-
-            let runner = RealCommandRunner::new();
-            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
-
-            let (complete, feedback) =
-                agent.reflect_on_work("test output", "+diff", false).unwrap();
-
-            // Command failure defaults to complete
-            assert!(complete);
-            assert!(feedback.contains("failed to run"));
-        }
-
-        #[test]
-        fn test_real_subagent_reflect_invalid_json() {
-            let dir = TempDir::new().unwrap();
-            let claude_cmd = setup_fake_claude(&dir, "Not valid JSON at all", 0);
-
-            let runner = RealCommandRunner::new();
-            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
-
-            let (complete, feedback) =
-                agent.reflect_on_work("test output", "+diff", false).unwrap();
-
-            // Invalid JSON defaults to complete
-            assert!(complete);
-            assert!(feedback.contains("could not parse"));
-        }
-
-        #[test]
-        fn test_real_subagent_reflect_spawn_fails() {
-            let runner = RealCommandRunner::new();
-            let agent = RealSubAgent::new(&runner)
-                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
-
-            let result = agent.reflect_on_work("test output", "+diff", false);
-            assert!(result.is_err());
-        }
-
-        #[test]
-        fn test_build_reflection_prompt_jkw_mode() {
-            let prompt = build_reflection_prompt("assistant output", "+diff", true);
-
-            // Should contain JKW mode context
-            assert!(prompt.contains("just-keep-working mode"));
-            assert!(prompt.contains("jkw-session.local.md"));
-            assert!(prompt.contains("Double-check your plan"));
-
-            // Should NOT contain normal mode context
-            assert!(!prompt.contains("/just-keep-working` with enough information"));
-
-            // Should contain the assistant output and diff
-            assert!(prompt.contains("assistant output"));
-            assert!(prompt.contains("+diff"));
-        }
-
-        #[test]
-        fn test_build_reflection_prompt_normal_mode() {
-            let prompt = build_reflection_prompt("my output", "my diff", false);
-
-            // Should contain normal mode context
-            assert!(prompt.contains("Continuation Guidance"));
-            assert!(prompt.contains("/just-keep-working` with enough information"));
-
-            // Should NOT contain JKW mode context
-            assert!(!prompt.contains("jkw-session.local.md"));
-            assert!(!prompt.contains("Double-check your plan"));
-
-            // Should contain the assistant output and diff
-            assert!(prompt.contains("my output"));
-            assert!(prompt.contains("my diff"));
         }
     }
 }

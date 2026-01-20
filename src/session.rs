@@ -264,6 +264,43 @@ pub fn clear_needs_validation(base_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Path for "must reflect" marker file.
+/// This marker indicates that the agent should reflect on its work before stopping.
+pub const MUST_REFLECT_MARKER_PATH: &str = ".claude/must-reflect.local";
+
+/// Check if the `must_reflect` marker exists.
+#[must_use]
+pub fn has_reflect_marker(base_dir: &Path) -> bool {
+    base_dir.join(MUST_REFLECT_MARKER_PATH).exists()
+}
+
+/// Set the `must_reflect` marker.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be created.
+pub fn set_reflect_marker(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(MUST_REFLECT_MARKER_PATH);
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&marker_path, "Reflection prompted - waiting for next stop")?;
+    Ok(())
+}
+
+/// Clear the `must_reflect` marker.
+///
+/// # Errors
+///
+/// Returns an error if the marker file cannot be removed.
+pub fn clear_reflect_marker(base_dir: &Path) -> Result<()> {
+    let marker_path = base_dir.join(MUST_REFLECT_MARKER_PATH);
+    if marker_path.exists() {
+        fs::remove_file(marker_path)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +631,54 @@ issue_snapshot:
         // Should not error when clearing without setting
         clear_needs_validation(base).unwrap();
         assert!(!needs_validation(base));
+    }
+
+    #[test]
+    fn test_has_reflect_marker_not_set_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!has_reflect_marker(dir.path()));
+    }
+
+    #[test]
+    fn test_set_reflect_marker() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        set_reflect_marker(base).unwrap();
+        assert!(has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_clear_reflect_marker() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        set_reflect_marker(base).unwrap();
+        assert!(has_reflect_marker(base));
+
+        clear_reflect_marker(base).unwrap();
+        assert!(!has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_clear_reflect_marker_when_not_set() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Should not error when clearing without setting
+        clear_reflect_marker(base).unwrap();
+        assert!(!has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_set_reflect_marker_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        // .claude subdirectory doesn't exist yet
+
+        set_reflect_marker(base).unwrap();
+
+        assert!(base.join(".claude").exists());
+        assert!(has_reflect_marker(base));
     }
 }
