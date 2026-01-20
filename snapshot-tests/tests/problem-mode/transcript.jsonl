@@ -1,0 +1,4 @@
+{"type":"user","uuid":"user-1","timestamp":"2026-01-20T00:00:00.000Z","parentUuid":null,"message":{"role":"user","content":"Try to run 'ls' and observe the result"}}
+{"type":"assistant","uuid":"assistant-1","timestamp":"2026-01-20T00:00:01.000Z","parentUuid":"user-1","message":{"role":"assistant","content":[{"type":"text","text":"I'll run ls to list the files."},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"result-1","timestamp":"2026-01-20T00:00:02.000Z","parentUuid":"assistant-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"test.txt"}]}}
+{"type":"assistant","uuid":"assistant-2","timestamp":"2026-01-20T00:00:03.000Z","parentUuid":"result-1","message":{"role":"assistant","content":[{"type":"text","text":"The directory contains test.txt."}]}}

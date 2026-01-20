@@ -1,0 +1,4 @@
+{"type":"user","uuid":"user-1","timestamp":"2026-01-20T00:00:00.000Z","parentUuid":null,"message":{"role":"user","content":"Write \"hello\" to test.txt"}}
+{"type":"assistant","uuid":"assistant-1","timestamp":"2026-01-20T00:00:01.000Z","parentUuid":"user-1","message":{"role":"assistant","content":[{"type":"text","text":"I'll write \"hello\" to test.txt."},{"type":"tool_use","id":"tool-1","name":"Write","input":{"file_path":"test.txt","content":"hello\n"}}]}}
+{"type":"user","uuid":"result-1","timestamp":"2026-01-20T00:00:02.000Z","parentUuid":"assistant-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"File written: test.txt"}]}}
+{"type":"assistant","uuid":"assistant-2","timestamp":"2026-01-20T00:00:03.000Z","parentUuid":"result-1","message":{"role":"assistant","content":[{"type":"text","text":"I've written \"hello\" to test.txt."}]}}

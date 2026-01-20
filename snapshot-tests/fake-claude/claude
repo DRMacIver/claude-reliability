@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake Claude binary for snapshot testing
+#
+# This script is added to PATH during test replay to intercept calls
+# to the real Claude binary. It delegates to fake_claude.py which
+# reads from the test transcript and returns expected outputs.
+#
+# Environment variables (set by test runner):
+#   FAKE_CLAUDE_TRANSCRIPT: Path to transcript.jsonl
+#   FAKE_CLAUDE_STATE: Path to state file for tracking calls
+#   FAKE_CLAUDE_CWD: Working directory
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPSHOT_TESTS_DIR="$SCRIPT_DIR/.."
+
+# Run the Python implementation via uv
+cd "$SNAPSHOT_TESTS_DIR"
+exec uv run python -m snapshot_tests.fake_claude "$@"

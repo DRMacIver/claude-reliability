@@ -208,17 +208,21 @@ run *ARGS:
 	cargo run --features cli -- {{ARGS}}
 
 # Snapshot test commands
-# Run snapshot tests (creates new transcripts if missing)
+# Run snapshot tests in replay mode (default)
 snapshot-tests *ARGS:
-	./snapshot-tests/run-snapshots.sh --create {{ARGS}}
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots {{ARGS}}
 
-# Confirm current snapshots match expected
-confirm-snapshots:
-	./snapshot-tests/run-snapshots.sh
+# Run snapshot tests with verbose output
+snapshot-tests-verbose *ARGS:
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --verbose {{ARGS}}
 
-# Update all snapshot transcripts
-update-snapshot-tests:
-	./snapshot-tests/run-snapshots.sh --update
+# Record new snapshot transcripts (requires Claude Code)
+snapshot-tests-record *ARGS:
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --mode=record {{ARGS}}
+
+# Compile transcript.jsonl to human-readable markdown
+compile-transcript FILE:
+	cd snapshot-tests && uv run python -m snapshot_tests.compile_transcript {{FILE}}
 
 smoke-test:
 	#!/usr/bin/env bash

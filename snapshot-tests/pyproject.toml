@@ -1,0 +1,15 @@
+[project]
+name = "snapshot-tests"
+version = "0.1.0"
+description = "Snapshot testing infrastructure for claude-reliability hooks"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+run-snapshots = "snapshot_tests.run_snapshots:main"
+compile-transcript = "snapshot_tests.compile_transcript:main"
+
+[dependency-groups]
+dev = []
