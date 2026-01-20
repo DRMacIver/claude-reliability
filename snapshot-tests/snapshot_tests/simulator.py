@@ -389,7 +389,13 @@ class ToolSimulator:
     def _handle_read(self, tool_input: dict[str, Any]) -> str:
         """Read content from a file.
 
-        Returns output in Claude Code's format with arrow separators.
+        Returns output in Claude Code's format:
+        - Line numbers right-justified to 6 characters
+        - Arrow character (→ U+2192) as separator (not tab)
+        - Line content after separator
+
+        Example: "     1→first line"
+
         Uses split('\n') to match Claude Code's line counting behavior
         (trailing newlines create an extra empty line).
         """
@@ -424,7 +430,10 @@ class ToolSimulator:
     def _handle_edit(self, tool_input: dict[str, Any]) -> str:
         """Edit a file by replacing text.
 
-        Enforces read-before-edit, matching Claude Code behavior.
+        Enforces Claude Code behavior:
+        - Read-before-edit requirement
+        - old_string must differ from new_string
+        - old_string must be unique when replace_all=False
         """
         file_path = tool_input.get("file_path", "")
         old_string = tool_input.get("old_string", "")
@@ -433,6 +442,10 @@ class ToolSimulator:
 
         if self.dry_run:
             return f"[DRY RUN] Would edit {file_path}"
+
+        # Check that old_string differs from new_string
+        if old_string == new_string:
+            return "<tool_use_error>old_string and new_string must be different.</tool_use_error>"
 
         path = Path(file_path)
         if not path.is_absolute():
@@ -450,10 +463,16 @@ class ToolSimulator:
         if old_string not in content:
             raise ValueError(f"old_string not found in {file_path}")
 
+        # Check for uniqueness constraint when replace_all is False
+        if not replace_all:
+            match_count = content.count(old_string)
+            if match_count > 1:
+                return f"<tool_use_error>Multiple occurrences of old_string found ({match_count} matches). Use replace_all: true or provide a more unique string.</tool_use_error>"
+
         if replace_all:
             new_content = content.replace(old_string, new_string)
         else:
-            # Replace only first occurrence
+            # Replace only first occurrence (already verified uniqueness above)
             new_content = content.replace(old_string, new_string, 1)
 
         path.write_text(new_content)

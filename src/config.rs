@@ -76,9 +76,10 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_command: Option<String>,
 
-    /// Whether CLAUDE.md has a "Code Review" section.
-    #[serde(default)]
-    pub code_review_section: bool,
+    /// The title of the code review section in CLAUDE.md (e.g., "## Code Review").
+    /// None means no code review section exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_review_section: Option<String>,
 
     /// Whether to require pushing commits before allowing exit.
     /// Defaults to true for git repos.
@@ -97,7 +98,7 @@ impl Default for ProjectConfig {
             git_repo: false,
             beads_installed: false,
             check_command: None,
-            code_review_section: false,
+            code_review_section: None,
             require_push: true,
         }
     }
@@ -171,7 +172,7 @@ impl ProjectConfig {
         let git_repo = base_dir.join(".git").exists();
         let beads_installed = runner.is_available("bd");
         let check_command = detect_check_command(runner, base_dir);
-        let code_review_section = has_code_review_section(base_dir);
+        let code_review_section = find_code_review_section(base_dir);
 
         // Only require push if there's a remote configured
         let require_push = git_repo && has_git_remote(runner);
@@ -256,12 +257,15 @@ fn has_check_target(justfile_path: &Path) -> bool {
 }
 
 /// Check if CLAUDE.md has a "Code Review" section.
-fn has_code_review_section(base_dir: &Path) -> bool {
+/// Returns the section header if found (e.g., "## Code Review").
+fn find_code_review_section(base_dir: &Path) -> Option<String> {
     let claude_md_path = base_dir.join(CLAUDE_MD_PATH);
-    let Ok(content) = std::fs::read_to_string(claude_md_path) else {
-        return false;
-    };
-    content.contains(CODE_REVIEW_HEADER)
+    let content = std::fs::read_to_string(claude_md_path).ok()?;
+    if content.contains(CODE_REVIEW_HEADER) {
+        Some(CODE_REVIEW_HEADER.to_string())
+    } else {
+        None
+    }
 }
 
 /// Ensure CLAUDE.md has a "Code Review" section, adding it if missing.
@@ -380,17 +384,17 @@ pub fn ensure_config_in(runner: &dyn CommandRunner, base_dir: &Path) -> Result<P
     }
 
     // Ensure Code Review section exists in CLAUDE.md
-    if !config.code_review_section {
+    if config.code_review_section.is_none() {
         // Check if it exists now (might have been added manually)
-        if has_code_review_section(base_dir) {
-            config.code_review_section = true;
+        if let Some(section_title) = find_code_review_section(base_dir) {
+            config.code_review_section = Some(section_title);
             config.save_to(base_dir)?;
             if config.git_repo {
                 auto_commit_config(base_dir);
             }
         } else if ensure_code_review_section(base_dir) {
-            // Section was added
-            config.code_review_section = true;
+            // Section was added with default header
+            config.code_review_section = Some(CODE_REVIEW_HEADER.to_string());
             config.save_to(base_dir)?;
             if config.git_repo {
                 auto_commit_claude_md(base_dir);
@@ -609,7 +613,7 @@ mod tests {
             git_repo: true,
             beads_installed: true,
             check_command: Some("just check".to_string()),
-            code_review_section: false,
+            code_review_section: None,
             require_push: true,
         };
 
@@ -627,7 +631,7 @@ mod tests {
             git_repo: true,
             beads_installed: false,
             check_command: Some("make test".to_string()),
-            code_review_section: false,
+            code_review_section: None,
             require_push: true,
         };
 
@@ -831,7 +835,7 @@ mod tests {
             git_repo: false,
             beads_installed: true,
             check_command: Some("make test".to_string()),
-            code_review_section: false,
+            code_review_section: None,
             require_push: true,
         };
         existing.save_to(dir.path()).unwrap();

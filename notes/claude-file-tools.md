@@ -50,20 +50,20 @@ This document captures the behavioral specification of Claude Code's Read, Write
 Output uses `cat -n` style line numbering. Format per line:
 
 ```
-{spaces}{line_number}\t{content}
+{spaces}{line_number}→{content}
 ```
 
 Where:
 - `{spaces}` — right-justifies line number to a fixed width (observed: 6 characters total for number + spaces)
 - `{line_number}` — 1-indexed
-- `\t` — literal tab character
+- `→` — Unicode arrow character (U+2192 RIGHTWARDS ARROW), **NOT a tab character** (earlier docs incorrectly stated tab)
 - `{content}` — line content, truncated at **2,000 characters**
 
 Example output for a 3-line file:
 ```
-     1	first line
-     2	second line
-     3	third line
+     1→first line
+     2→second line
+     3→third line
 ```
 
 ### Default Limits
