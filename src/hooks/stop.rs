@@ -102,6 +102,9 @@ impl StopHookResult {
     }
 }
 
+/// Threshold for consecutive API errors before allowing stop.
+const API_ERROR_THRESHOLD: u32 = 2;
+
 /// Run the stop hook.
 ///
 /// # Errors
@@ -125,6 +128,25 @@ pub fn run_stop_hook(
         .as_ref()
         .and_then(|p| transcript::parse_transcript(Path::new(p)).ok())
         .unwrap_or_default();
+
+    // Check for API error loop - if we've seen multiple consecutive API errors,
+    // allow the stop to prevent infinite loops
+    if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
+        return Ok(StopHookResult::allow()
+            .with_message("# API Error Loop Detected")
+            .with_message("")
+            .with_message(format!(
+                "Detected {} consecutive API errors. Allowing stop to prevent infinite loop.",
+                transcript_info.consecutive_api_errors
+            ))
+            .with_message("")
+            .with_message("This typically happens when:")
+            .with_message("- The conversation state has become corrupted")
+            .with_message("- The API is experiencing issues")
+            .with_message("- There was a long pause that caused a timeout")
+            .with_message("")
+            .with_message("Please start a new conversation to continue."));
+    }
 
     // Check if autonomous session is active
     let session_path = config.session_path();
@@ -1042,6 +1064,8 @@ mod tests {
         let transcript_info = TranscriptInfo {
             last_assistant_output: Some("This is just a statement.".to_string()),
             last_user_message_time: None,
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1056,6 +1080,8 @@ mod tests {
             last_assistant_output: Some("Would you like me to continue?".to_string()),
             // User was active 10 minutes ago (beyond the 5-minute threshold)
             last_user_message_time: Some(Utc::now() - Duration::minutes(10)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1069,6 +1095,8 @@ mod tests {
         let transcript_info = TranscriptInfo {
             last_assistant_output: Some("Should I continue?".to_string()),
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1088,6 +1116,8 @@ mod tests {
         let transcript_info = TranscriptInfo {
             last_assistant_output: Some("What color theme would you prefer?".to_string()),
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
@@ -1109,6 +1139,8 @@ mod tests {
         let transcript_info = TranscriptInfo {
             last_assistant_output: Some("Which approach should I use?".to_string()),
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
@@ -1128,6 +1160,8 @@ mod tests {
         let transcript_info = TranscriptInfo {
             last_assistant_output: Some("What do you think about this?".to_string()),
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Continue);
@@ -1710,6 +1744,124 @@ mod tests {
         assert!(!result.allow_stop);
         // Should show "... and 5 more" for the extra files beyond 10
         assert!(result.messages.iter().any(|m| m.contains("... and 5 more")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_api_error_loop_allows_exit() {
+        use std::io::Write;
+
+        // Create a transcript with multiple consecutive API errors
+        let mut transcript_file = tempfile::NamedTempFile::new().unwrap();
+        let error_entry1 = serde_json::json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "message": {
+                "content": [{"type": "text", "text": "API Error: 400"}]
+            }
+        });
+        let error_entry2 = serde_json::json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "message": {
+                "content": [{"type": "text", "text": "API Error: 400"}]
+            }
+        });
+        writeln!(transcript_file, "{}", serde_json::to_string(&error_entry1).unwrap()).unwrap();
+        writeln!(transcript_file, "{}", serde_json::to_string(&error_entry2).unwrap()).unwrap();
+
+        // Use mock runner with uncommitted changes (would normally block)
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // These expectations won't be used because we bail out early
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        // Should allow stop despite uncommitted changes due to API error loop
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("API Error Loop")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_single_api_error_still_blocks() {
+        use std::io::Write;
+
+        // Create a transcript with only one API error (below threshold)
+        let mut transcript_file = tempfile::NamedTempFile::new().unwrap();
+        let error_entry = serde_json::json!({
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "message": {
+                "content": [{"type": "text", "text": "API Error: 400"}]
+            }
+        });
+        writeln!(transcript_file, "{}", serde_json::to_string(&error_entry).unwrap()).unwrap();
+
+        // Use mock runner with uncommitted changes
+        let mut runner = MockCommandRunner::new();
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // Fast path check
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Main check
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        // Single API error should NOT trigger the escape hatch
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Uncommitted Changes")));
     }
 
     #[test]

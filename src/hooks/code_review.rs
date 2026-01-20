@@ -14,8 +14,11 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-/// Path to the review guide file.
-const REVIEW_GUIDE_PATH: &str = "REVIEWGUIDE.md";
+/// Path to the CLAUDE.md file containing the review guide section.
+const CLAUDE_MD_PATH: &str = "CLAUDE.md";
+
+/// Header that marks the start of the code review section.
+const CODE_REVIEW_HEADER: &str = "## Code Review";
 
 /// Source code file extensions.
 static SOURCE_EXTENSIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
@@ -140,9 +143,33 @@ pub fn is_source_code_file(filepath: &str) -> bool {
     false
 }
 
-/// Load the review guide if it exists.
+/// Load the review guide from the "Code Review" section of CLAUDE.md.
+///
+/// Extracts the content from the `## Code Review` header until the next `## ` header
+/// or end of file.
 pub fn load_review_guide() -> Option<String> {
-    fs::read_to_string(REVIEW_GUIDE_PATH).ok()
+    let content = fs::read_to_string(CLAUDE_MD_PATH).ok()?;
+    extract_code_review_section(&content)
+}
+
+/// Extract the "Code Review" section from CLAUDE.md content.
+///
+/// Returns the content from `## Code Review` to the next `## ` header (exclusive).
+fn extract_code_review_section(content: &str) -> Option<String> {
+    // Find the start of the Code Review section
+    let start_idx = content.find(CODE_REVIEW_HEADER)?;
+    let section_start = start_idx + CODE_REVIEW_HEADER.len();
+
+    // Find the next ## header (end of section) or use end of content
+    let remaining = &content[section_start..];
+    let section_end = remaining.find("\n## ").map_or(content.len(), |idx| section_start + idx);
+
+    let section = content[section_start..section_end].trim();
+    if section.is_empty() {
+        None
+    } else {
+        Some(section.to_string())
+    }
 }
 
 /// Run the code review hook.
@@ -538,11 +565,75 @@ mod tests {
     }
 
     #[test]
-    fn test_load_review_guide_not_exists() {
-        // When file doesn't exist, should return None
+    fn test_load_review_guide_from_claude_md() {
+        // When CLAUDE.md exists with Code Review section, should return content
         let guide = load_review_guide();
-        // This depends on whether REVIEWGUIDE.md exists in the repo
+        // This depends on whether CLAUDE.md exists in the repo with the section
         // Just make sure it doesn't panic
         let _ = guide;
+    }
+
+    #[test]
+    fn test_extract_code_review_section_found() {
+        let content = r"# Project
+
+## Development
+
+Some dev content.
+
+## Code Review
+
+This is the review guide content.
+
+### What to Check
+
+- Security issues
+- Logic errors
+
+## Other Section
+
+This should not be included.
+";
+        let section = extract_code_review_section(content).unwrap();
+        assert!(section.contains("This is the review guide content."));
+        assert!(section.contains("What to Check"));
+        assert!(section.contains("Security issues"));
+        assert!(!section.contains("Other Section"));
+        assert!(!section.contains("This should not be included"));
+    }
+
+    #[test]
+    fn test_extract_code_review_section_at_end() {
+        let content = r"# Project
+
+## Code Review
+
+This is the only content.
+";
+        let section = extract_code_review_section(content).unwrap();
+        assert!(section.contains("This is the only content."));
+    }
+
+    #[test]
+    fn test_extract_code_review_section_not_found() {
+        let content = r"# Project
+
+## Development
+
+Some content.
+";
+        assert!(extract_code_review_section(content).is_none());
+    }
+
+    #[test]
+    fn test_extract_code_review_section_empty() {
+        let content = r"# Project
+
+## Code Review
+
+## Next Section
+";
+        // Empty section (only whitespace) should return None
+        assert!(extract_code_review_section(content).is_none());
     }
 }

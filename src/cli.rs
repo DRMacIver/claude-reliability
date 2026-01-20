@@ -207,7 +207,8 @@ fn run_ensure_config_cmd() -> (ExitCode, Vec<String>) {
 
     match config::ensure_config(&runner) {
         Ok(config) => {
-            let mut messages = vec!["Config ensured at .claude/reliability-config.yaml".to_string()];
+            let mut messages =
+                vec!["Config ensured at .claude/reliability-config.yaml".to_string()];
             messages.push(format!("  git_repo: {}", config.git_repo));
             messages.push(format!("  beads_installed: {}", config.beads_installed));
             if let Some(ref cmd) = config.check_command {
@@ -228,7 +229,10 @@ fn run_ensure_gitignore_cmd() -> (ExitCode, Vec<String>) {
     match config::ensure_gitignore(Path::new(".")) {
         Ok(modified) => {
             if modified {
-                (ExitCode::SUCCESS, vec!["Updated .gitignore with claude-reliability entries".to_string()])
+                (
+                    ExitCode::SUCCESS,
+                    vec!["Updated .gitignore with claude-reliability entries".to_string()],
+                )
             } else {
                 (ExitCode::SUCCESS, vec![".gitignore already has required entries".to_string()])
             }

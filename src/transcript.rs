@@ -48,6 +48,9 @@ pub struct TranscriptEntry {
     /// The message content (for assistant messages).
     #[serde(default)]
     pub message: Option<Message>,
+    /// Whether this entry is an API error message.
+    #[serde(rename = "isApiErrorMessage", default)]
+    pub is_api_error_message: bool,
 }
 
 /// Parsed transcript information.
@@ -57,6 +60,10 @@ pub struct TranscriptInfo {
     pub last_assistant_output: Option<String>,
     /// The timestamp of the last user message.
     pub last_user_message_time: Option<DateTime<Utc>>,
+    /// Whether the transcript contains a recent API error.
+    pub has_api_error: bool,
+    /// Count of consecutive API errors at the end of the transcript.
+    pub consecutive_api_errors: u32,
 }
 
 /// Parse a transcript file and extract relevant information.
@@ -95,6 +102,17 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
             Err(_) => continue, // Skip malformed lines
         };
 
+        // Check for API error
+        let is_api_error = entry.is_api_error_message || is_api_error_text(&entry);
+
+        if is_api_error {
+            info.has_api_error = true;
+            info.consecutive_api_errors += 1;
+        } else if entry.entry_type == "assistant" && !entry.is_api_error_message {
+            // A valid (non-error) assistant message resets the consecutive counter
+            info.consecutive_api_errors = 0;
+        }
+
         match entry.entry_type.as_str() {
             "assistant" => {
                 // Extract text from assistant message
@@ -119,6 +137,30 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
     }
 
     Ok(info)
+}
+
+/// Check if an entry contains API error text patterns.
+fn is_api_error_text(entry: &TranscriptEntry) -> bool {
+    if let Some(message) = &entry.message {
+        for block in &message.content {
+            if let ContentBlock::Text { text } = block {
+                // Check for common API error patterns
+                if text.contains("API Error:") && text.contains("400") {
+                    return true;
+                }
+                if text.contains("thinking")
+                    && text.contains("blocks")
+                    && text.contains("cannot be modified")
+                {
+                    return true;
+                }
+                if text.contains("invalid_request_error") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Parse an ISO 8601 timestamp.
@@ -213,6 +255,8 @@ also not json
         let info = TranscriptInfo {
             last_assistant_output: None,
             last_user_message_time: Some(Utc::now()),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         assert!(is_user_recently_active(&info, 5));
     }
@@ -222,6 +266,8 @@ also not json
         let info = TranscriptInfo {
             last_assistant_output: None,
             last_user_message_time: Some(Utc::now() - chrono::Duration::minutes(10)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
         };
         assert!(!is_user_recently_active(&info, 5));
     }
@@ -328,5 +374,162 @@ also not json
         let file = create_temp_transcript(content);
         let info = parse_transcript(file.path()).unwrap();
         assert_eq!(info.last_assistant_output, Some("Valid".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_api_error_flag() {
+        // Test detection of API error via isApiErrorMessage flag
+        let content = r#"{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "API Error: 400"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 1);
+    }
+
+    #[test]
+    fn test_parse_transcript_api_error_text_pattern() {
+        // Test detection of API error via text patterns
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "API Error: 400 {\"error\": {\"type\": \"invalid_request_error\"}}"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+    }
+
+    #[test]
+    fn test_parse_transcript_thinking_blocks_error() {
+        // Test detection of thinking blocks error
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "thinking or redacted_thinking blocks cannot be modified"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+    }
+
+    #[test]
+    fn test_parse_transcript_consecutive_api_errors() {
+        // Test counting consecutive API errors
+        let content = r#"{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 1"}]}}
+{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 2"}]}}
+{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 3"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 3);
+    }
+
+    #[test]
+    fn test_parse_transcript_api_error_reset() {
+        // Test that consecutive errors reset after valid message
+        let content = r#"{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 1"}]}}
+{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Valid response"}]}}
+{"type": "assistant", "isApiErrorMessage": true, "message": {"content": [{"type": "text", "text": "Error 3"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        // Should be 1 because the valid message reset the counter
+        assert_eq!(info.consecutive_api_errors, 1);
+    }
+
+    #[test]
+    fn test_parse_transcript_no_api_error() {
+        // Test transcript without API errors
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "Normal response"}]}}
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z"}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Another normal response"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(!info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 0);
+    }
+
+    #[test]
+    fn test_is_api_error_text_400() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: vec![ContentBlock::Text {
+                    text: "API Error: 400 something went wrong".to_string(),
+                }],
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_thinking_blocks() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: vec![ContentBlock::Text {
+                    text: "thinking blocks in the latest assistant message cannot be modified"
+                        .to_string(),
+                }],
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_invalid_request() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: vec![ContentBlock::Text {
+                    text: "error type: invalid_request_error".to_string(),
+                }],
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_normal_text() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: vec![ContentBlock::Text {
+                    text: "This is a normal response about error handling".to_string(),
+                }],
+            }),
+            is_api_error_message: false,
+        };
+        assert!(!is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_no_message() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: None,
+            is_api_error_message: false,
+        };
+        assert!(!is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_non_text_content() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: vec![ContentBlock::ToolUse { name: "test".to_string() }],
+            }),
+            is_api_error_message: false,
+        };
+        assert!(!is_api_error_text(&entry));
     }
 }

@@ -1,29 +1,5 @@
 # claude-reliability
 
-## IMPORTANT: Fresh Project Setup
-
-**This is a freshly created project from the drmaciver-project template.**
-
-Your first task is to help set up this project properly:
-
-1. **Understand the project's purpose** - Ask the user what this project is for
-2. **Create a development plan** - Use beads (`bd create`) to track planned work
-3. **Update this CLAUDE.md** - Replace this section with project-specific instructions
-
-Until you've completed setup, this file contains only generic instructions. Update it with:
-- Project overview and architecture
-- Important conventions and patterns
-- Key files and their purposes
-- Any domain-specific knowledge
-
-## Current Capabilities
-
-This project was created with the following capabilities (see `.capabilities.json`):
-- **devcontainer**: Development container with all tools pre-installed
-- **claude-code**: Claude Code commands, hooks, and scripts
-
-Additional capabilities may have been added. Check `.capabilities.json` for the full list.
-
 ## Development Commands
 
 ```bash
@@ -90,3 +66,83 @@ When ending a work session, complete ALL steps below. Work is NOT complete until
    git status  # MUST show "up to date with origin"
    ```
 5. **Verify** - All changes committed AND pushed
+
+## Code Review
+
+This section provides guidance to the automated code reviewer.
+
+### What to Check
+
+**Security:**
+- No hardcoded secrets, API keys, or credentials
+- No SQL injection vulnerabilities
+- No command injection vulnerabilities
+- Proper input validation and sanitization
+- Secure handling of user data
+
+**Correctness:**
+- Does the code do what's intended?
+- Are there obvious logic errors or bugs?
+- Are edge cases handled appropriately?
+- What could go wrong? (boundary conditions, null/empty inputs, error states)
+
+**Code Quality:**
+- Clear, readable code with appropriate naming
+- Proper error handling for critical paths
+- Appropriate use of types and type hints
+- Consistent style with the rest of the codebase
+- No unnecessary complexity or over-engineering
+- No redundant if/else branches or conditions that can never trigger
+- No commented-out code or stale TODO comments
+
+**Architecture:**
+- Changes follow existing patterns in the codebase
+- Appropriate separation of concerns
+- No backwards-compatibility hacks for unused code
+
+**Test Quality:**
+
+*Comprehensibility:*
+- Test names clearly describe what's being tested
+- Tests are self-explanatory or have docstrings
+- Assertions are clear about what's expected
+
+*Realistic Failure Modes:*
+- Tests could actually fail if the code is broken
+- Tests aren't just checking implementation details
+- Tests exercise meaningful behavior, not just code paths
+
+*Robustness:*
+- No unnecessary sleeps or timing dependencies
+- No flaky assertions (ordering, floating point equality without tolerance)
+- Mocks are minimal and focused
+- No unstable references (hardcoded line numbers, timestamps, random values without seeds)
+
+*Performance:*
+- Tests don't do unnecessary work
+- No excessive iteration counts where fewer would suffice
+- Slow operations are mocked where appropriate
+
+*Coverage:*
+- New functionality has corresponding tests
+- Tests cover edge cases and error paths
+- No test code in production files
+- Tests should be runnable in parallel wherever possible, and explicitly marked as serial where not
+- Coverage is kept at 100% - no attempts to change this are permitted
+- Where coverage is hard to achieve, suggest refactoring to improve testability
+
+### When to Reject
+
+- Security vulnerabilities (hardcoded secrets, injection risks)
+- Clear bugs or logic errors
+- Missing error handling for critical paths
+- Breaking changes without proper handling
+- Tests that can never fail or don't test meaningful behavior
+
+### When to Approve with Feedback
+
+- Minor style issues
+- Suggestions for improvement
+- Questions for clarification
+- Opportunities to simplify code
+- Missing test coverage for non-critical paths

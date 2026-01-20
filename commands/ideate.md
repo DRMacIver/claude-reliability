@@ -2,16 +2,41 @@
 description: Generate new features and improvements for the project
 ---
 
-# Ideate
+# Ideate - Getting Unstuck
 
-Generate ideas for improving this project:
+Use this when you're in autonomous mode and feel stuck, blocked, or uncertain about next steps.
 
-1. Review current codebase structure
-2. Check existing issues with `bd list` (if beads is available)
-3. Consider:
-   - Missing features users might want
-   - Code quality improvements
-   - Performance optimizations
-   - Developer experience enhancements
-4. Present ideas with priority and complexity estimates
-5. Offer to create beads issues for approved ideas (if beads is available)
+## Step 1: Assess Current State
+
+1. What task were you trying to accomplish?
+2. What's blocking progress?
+3. Are there any errors or unexpected behaviors?
+
+## Step 2: Check Available Context
+
+1. Review `bd list --status=open` for tracked issues that might help
+2. Check CLAUDE.md for guidance you might have missed
+3. Look at git status to see what work is in flight
+
+## Step 3: Brainstorm Approaches
+
+Consider these strategies for getting unstuck:
+
+- **Break it down**: Is the task too large? Split into smaller steps
+- **Try a different angle**: Is there another way to approach this?
+- **Reduce scope**: Can you accomplish a simpler version first?
+- **Skip and return**: Can you work on something else and come back?
+- **Ask for help**: Would user input help clarify the path forward?
+
+## Step 4: Choose and Execute
+
+1. Pick the most promising approach
+2. If still stuck, use `bd create` to log the blocker as an issue
+3. Move on to the next available task
+
+## Key Principle
+
+In autonomous mode, momentum matters. If blocked on one task:
+1. Log the blocker
+2. Move to the next ready task
+3. Return to blocked tasks when conditions change
