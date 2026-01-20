@@ -150,6 +150,17 @@ pub fn run_stop_hook(
             .with_message("Please start a new conversation to continue."));
     }
 
+    // Fast path: auto-confirm commit/push questions
+    // When the agent asks "Would you like me to commit/push?" just say yes
+    // This check is fast (string matching) so do it before git status checks
+    if config.git_repo {
+        if let Some(ref output) = transcript_info.last_assistant_output {
+            if let Some(response) = check_commit_push_question(output) {
+                return Ok(StopHookResult::block().with_inject(response));
+            }
+        }
+    }
+
     // Check if just-keep-working session is active
     let session_state_path = config.session_state_path();
     let session_config = session::parse_session_state(&session_state_path)?;
@@ -276,6 +287,47 @@ pub fn run_stop_hook(
     }
 
     Ok(StopHookResult::allow())
+}
+
+/// Check if the assistant's last message is asking about committing or pushing.
+/// Returns Some(response) if we should auto-confirm, None otherwise.
+fn check_commit_push_question(output: &str) -> Option<String> {
+    // Get the last sentence/question from the output
+    let trimmed = output.trim();
+
+    // Check for commit confirmation questions
+    if trimmed.ends_with("Would you like me to commit these changes?")
+        || trimmed.ends_with("Would you like me to commit this?")
+        || trimmed.ends_with("Would you like me to commit?")
+        || trimmed.ends_with("Shall I commit these changes?")
+        || trimmed.ends_with("Should I commit these changes?")
+        || trimmed.ends_with("Ready to commit?")
+    {
+        return Some("Yes, please commit these changes.".to_string());
+    }
+
+    // Check for push confirmation questions
+    if trimmed.ends_with("Would you like me to push these changes?")
+        || trimmed.ends_with("Would you like me to push this?")
+        || trimmed.ends_with("Would you like me to push?")
+        || trimmed.ends_with("Shall I push these changes?")
+        || trimmed.ends_with("Should I push these changes?")
+        || trimmed.ends_with("Should I push?")
+        || trimmed.ends_with("Ready to push?")
+    {
+        return Some("Yes, please push.".to_string());
+    }
+
+    // Check for combined commit and push
+    if trimmed.ends_with("Would you like me to commit and push?")
+        || trimmed.ends_with("Would you like me to commit and push these changes?")
+        || trimmed.ends_with("Shall I commit and push?")
+        || trimmed.ends_with("Should I commit and push?")
+    {
+        return Some("Yes, please commit and push.".to_string());
+    }
+
+    None
 }
 
 /// Handle uncommitted changes.
@@ -2845,5 +2897,90 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("May Be Incomplete")));
+    }
+
+    #[test]
+    fn test_check_commit_push_question_commit() {
+        assert_eq!(
+            check_commit_push_question("Would you like me to commit these changes?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question(
+                "Here's the summary.\n\nWould you like me to commit these changes?"
+            ),
+            Some("Yes, please commit these changes.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Should I commit these changes?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_commit_push_question_push() {
+        assert_eq!(
+            check_commit_push_question("Would you like me to push these changes?"),
+            Some("Yes, please push.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Should I push?"),
+            Some("Yes, please push.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_commit_push_question_both() {
+        assert_eq!(
+            check_commit_push_question("Would you like me to commit and push?"),
+            Some("Yes, please commit and push.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Should I commit and push?"),
+            Some("Yes, please commit and push.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_commit_push_question_none() {
+        assert_eq!(check_commit_push_question("Here's the summary."), None);
+        assert_eq!(check_commit_push_question("Done with the changes."), None);
+        assert_eq!(check_commit_push_question("What would you like me to do next?"), None);
+        // Not at end of message
+        assert_eq!(check_commit_push_question("Would you like me to commit? Let me know."), None);
+    }
+
+    #[test]
+    fn test_run_stop_hook_auto_confirms_commit_question() {
+        use std::io::Write;
+
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // Create a transcript with the commit question
+        let transcript_path = dir.path().join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Changes committed.\n\nWould you like me to commit these changes?"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop); // Block, but with inject
+        assert_eq!(result.inject_response, Some("Yes, please commit these changes.".to_string()));
     }
 }
