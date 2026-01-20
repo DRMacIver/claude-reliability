@@ -1,3 +1,4 @@
-git_repo: false
+git_repo: true
 beads_installed: false
 code_review_section: true
+require_push: true
