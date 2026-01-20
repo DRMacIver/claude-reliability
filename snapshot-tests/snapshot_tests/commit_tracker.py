@@ -1,131 +1,146 @@
 """Commit SHA placeholders for snapshot tests.
 
-Git commit SHAs differ between recording and replay. This module provides
-a simple placeholder system where `<<commit:ORIGINAL_SHA>>` matches any
-valid commit SHA prefix (7+ hex characters).
+Git commit SHAs differ between recording and replay. This module tracks
+commits by order of first appearance and uses numbered placeholders like
+<<commit 1>>, <<commit 2>> for consistent matching.
 
 Usage:
-    # In expected output from recording:
-    "007c8c1 Initial commit"
+    tracker = CommitTracker()
 
-    # Gets normalized to:
-    "<<commit:007c8c1>> Initial commit"
+    # First commit seen gets <<commit 1>>
+    text1 = tracker.normalize("007c8c1 Initial commit")
+    # -> "<<commit 1>> Initial commit"
 
-    # During replay, matches:
-    "f9e3260 Initial commit"
+    # Same commit reused keeps same number
+    text2 = tracker.normalize("[master 007c8c1] msg")
+    # -> "[master <<commit 1>>] msg"
 
-    # Because <<commit:...>> matches any 7+ hex string
+    # New commit gets next number
+    text3 = tracker.normalize("99dc541 Add feature")
+    # -> "<<commit 2>> Add feature"
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
 
-# Pattern for commit placeholder: <<commit:SHA>>
-COMMIT_PLACEHOLDER = re.compile(r"<<commit:([0-9a-f]{7,40})>>")
+@dataclass
+class CommitTracker:
+    """Tracks commit SHAs and assigns numbered placeholders.
 
-# Pattern for a git SHA (7-40 hex chars)
-SHA_PATTERN = re.compile(r"[0-9a-f]{7,40}")
-
-
-def normalize_expected(text: str) -> str:
-    """Replace git SHAs in expected output with commit placeholders.
-
-    Recognizes SHAs in common git output formats:
-    - git log: "007c8c1 Initial commit"
-    - git commit: "[master 99dc541] Add function"
-    - git diff: "index cd53e7d..086743a"
-
-    Args:
-        text: Expected output from recorded transcript
-
-    Returns:
-        Text with SHAs replaced by <<commit:SHA>> placeholders
+    Commits are numbered by order of first appearance. The same SHA
+    always gets the same placeholder number.
     """
-    result = text
 
-    # Find all potential SHAs (7+ hex chars at word boundaries)
-    # We need to be careful not to match other hex strings
+    # Map: SHA prefix (7 chars) -> commit number (1-based)
+    sha_to_number: dict[str, int] = field(default_factory=dict)
+    # Next commit number to assign
+    next_number: int = 1
 
-    # Pattern 1: git log --oneline format: "SHA message"
-    result = re.sub(
-        r"^([0-9a-f]{7,40})(\s+)",
-        r"<<commit:\1>>\2",
-        result,
-        flags=re.MULTILINE
-    )
+    def get_placeholder(self, sha: str) -> str:
+        """Get or create a placeholder for a SHA.
 
-    # Pattern 2: git commit output: "[branch SHA] message"
-    result = re.sub(
-        r"\[(\w+)\s+([0-9a-f]{7,40})\]",
-        r"[\1 <<commit:\2>>]",
-        result
-    )
+        Args:
+            sha: A git SHA (7-40 hex chars)
 
-    # Pattern 3: git diff index line: "index SHA..SHA"
-    result = re.sub(
-        r"index\s+([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})",
-        r"index <<commit:\1>>..<<commit:\2>>",
-        result
-    )
+        Returns:
+            Placeholder like "<<commit 1>>"
+        """
+        # Normalize to 7-char prefix
+        prefix = sha[:7].lower()
 
-    return result
+        if prefix not in self.sha_to_number:
+            self.sha_to_number[prefix] = self.next_number
+            self.next_number += 1
+
+        return f"<<commit {self.sha_to_number[prefix]}>>"
+
+    def normalize(self, text: str) -> str:
+        """Replace git SHAs with numbered placeholders.
+
+        Recognizes SHAs in common git output formats:
+        - git log: "007c8c1 Initial commit"
+        - git commit: "[master 99dc541] Add function"
+        - git diff: "index cd53e7d..086743a"
+
+        Args:
+            text: Text that may contain git SHAs
+
+        Returns:
+            Text with SHAs replaced by <<commit N>> placeholders
+        """
+        result = text
+
+        # Pattern 1: git log --oneline format: "SHA message" at start of line
+        def replace_log(m: re.Match) -> str:
+            sha = m.group(1)
+            space = m.group(2)
+            return self.get_placeholder(sha) + space
+
+        result = re.sub(
+            r"^([0-9a-f]{7,40})(\s+)",
+            replace_log,
+            result,
+            flags=re.MULTILINE
+        )
+
+        # Pattern 2: git commit output: "[branch SHA] message"
+        def replace_commit(m: re.Match) -> str:
+            branch = m.group(1)
+            sha = m.group(2)
+            return f"[{branch} {self.get_placeholder(sha)}]"
+
+        result = re.sub(
+            r"\[(\w+)\s+([0-9a-f]{7,40})\]",
+            replace_commit,
+            result
+        )
+
+        # Pattern 3: git diff index line: "index SHA..SHA"
+        def replace_diff_index(m: re.Match) -> str:
+            sha1 = m.group(1)
+            sha2 = m.group(2)
+            return f"index {self.get_placeholder(sha1)}..{self.get_placeholder(sha2)}"
+
+        result = re.sub(
+            r"index\s+([0-9a-f]{7,40})\.\.([0-9a-f]{7,40})",
+            replace_diff_index,
+            result
+        )
+
+        return result
 
 
-def normalize_actual(text: str) -> str:
-    """Replace git SHAs in actual output with a generic placeholder.
-
-    This uses the same placeholder format so comparison works.
-    The actual SHA value doesn't matter for matching - any valid
-    SHA prefix will match any <<commit:...>> placeholder.
-
-    Args:
-        text: Actual output from replay
-
-    Returns:
-        Text with SHAs replaced by <<commit:SHA>> placeholders
-    """
-    # Use the same normalization - the key insight is that
-    # <<commit:X>> == <<commit:Y>> for comparison purposes
-    return normalize_expected(text)
+# Pattern to match our commit placeholders
+COMMIT_PLACEHOLDER_PATTERN = re.compile(r"<<commit (\d+)>>")
 
 
-def placeholders_match(expected: str, actual: str) -> bool:
-    """Check if expected and actual match, treating commit placeholders as equivalent.
-
-    Two commit placeholders match if they're both valid SHA prefixes,
-    regardless of the actual SHA value.
-
-    Args:
-        expected: Normalized expected text with <<commit:SHA>> placeholders
-        actual: Normalized actual text with <<commit:SHA>> placeholders
-
-    Returns:
-        True if the texts match (with placeholder equivalence)
-    """
-    # Replace all commit placeholders with a canonical form for comparison
-    canonical_expected = COMMIT_PLACEHOLDER.sub("<<commit>>", expected)
-    canonical_actual = COMMIT_PLACEHOLDER.sub("<<commit>>", actual)
-
-    return canonical_expected == canonical_actual
-
-
-def normalize_git_output(expected: str, actual: str) -> tuple[str, str]:
+def normalize_for_comparison(expected: str, actual: str) -> tuple[str, str]:
     """Normalize both expected and actual for comparison.
 
+    Uses separate trackers so that commit numbers are assigned independently,
+    then compares by structure (<<commit N>> matches <<commit M>> at same position).
+
     Args:
-        expected: Expected output from recorded transcript
+        expected: Expected output (may already have placeholders or raw SHAs)
         actual: Actual output from replay
 
     Returns:
         Tuple of (normalized_expected, normalized_actual) ready for comparison
     """
-    norm_expected = normalize_expected(expected)
-    norm_actual = normalize_actual(actual)
+    # Normalize expected (it may already have placeholders from transcript.md)
+    expected_tracker = CommitTracker()
+    norm_expected = expected_tracker.normalize(expected)
 
-    # Canonicalize placeholders for comparison
-    canon_expected = COMMIT_PLACEHOLDER.sub("<<commit>>", norm_expected)
-    canon_actual = COMMIT_PLACEHOLDER.sub("<<commit>>", norm_actual)
+    # Normalize actual
+    actual_tracker = CommitTracker()
+    norm_actual = actual_tracker.normalize(actual)
+
+    # For comparison, replace all <<commit N>> with just <<commit>>
+    # This allows matching regardless of the specific number
+    canon_expected = COMMIT_PLACEHOLDER_PATTERN.sub("<<commit>>", norm_expected)
+    canon_actual = COMMIT_PLACEHOLDER_PATTERN.sub("<<commit>>", norm_actual)
 
     return canon_expected, canon_actual

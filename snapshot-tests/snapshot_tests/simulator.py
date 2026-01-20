@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from snapshot_tests.placeholder import PlaceholderRegistry
-from snapshot_tests.commit_tracker import normalize_git_output
+from snapshot_tests.commit_tracker import normalize_for_comparison as normalize_git_commits
 
 
 def strip_system_reminders(text: str) -> str:
@@ -180,7 +180,7 @@ class ToolSimulator:
 
             # For Bash outputs, also normalize git SHAs using commit placeholders
             if tool_name == "Bash":
-                normalized_expected, normalized_actual = normalize_git_output(
+                normalized_expected, normalized_actual = normalize_git_commits(
                     normalized_expected, normalized_actual
                 )
 

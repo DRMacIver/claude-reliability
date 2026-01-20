@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from snapshot_tests.transcript import TranscriptEntry, ToolUse, ToolResult, parse_transcript
+from snapshot_tests.commit_tracker import CommitTracker
 
 
 def format_tool_use(tool_use: ToolUse) -> list[str]:
@@ -94,11 +95,20 @@ def strip_system_reminders(content: str) -> str:
     return content.strip()
 
 
-def format_tool_result(result: ToolResult) -> list[str]:
+def format_tool_result(
+    result: ToolResult,
+    tool_name: str | None = None,
+    commit_tracker: CommitTracker | None = None,
+) -> list[str]:
     """Format a tool result as Markdown lines."""
     content = result.content
     # Strip system-reminder tags from output
     content = strip_system_reminders(content)
+
+    # For Bash results, normalize git SHAs to placeholders
+    if tool_name == "Bash" and commit_tracker:
+        content = commit_tracker.normalize(content)
+
     if len(content) > 2000:
         content = content[:2000] + "\n... (truncated)"
 
@@ -135,6 +145,9 @@ def compile_transcript(
 
     # Get home directory for substitution
     home_dir = os.path.expanduser("~")
+
+    # Track commits across the entire transcript for consistent numbering
+    commit_tracker = CommitTracker()
 
     def substitute_paths(text: str) -> str:
         """Replace variable paths with placeholders."""
@@ -206,7 +219,11 @@ def compile_transcript(
                 # Add the result if we have it
                 if tool_use.id in results_by_id:
                     result = results_by_id[tool_use.id]
-                    result_lines = format_tool_result(result)
+                    result_lines = format_tool_result(
+                        result,
+                        tool_name=tool_use.name,
+                        commit_tracker=commit_tracker,
+                    )
                     lines.extend([substitute_paths(line) for line in result_lines])
                     lines.append("")
 

@@ -145,7 +145,7 @@ git diff
 **Output:**
 ```
 diff --git a/src/math_utils.py b/src/math_utils.py
-index cd53e7d..086743a 100644
+index <<commit 1>>..<<commit 2>> 100644
 --- a/src/math_utils.py
 +++ b/src/math_utils.py
 @@ -4,3 +4,8 @@
@@ -158,7 +158,7 @@ index cd53e7d..086743a 100644
 +    """Multiply two numbers together."""
 +    return a * b
 diff --git a/tests/test_math_utils.py b/tests/test_math_utils.py
-index ddbf787..d343cdb 100644
+index <<commit 3>>..<<commit 4>> 100644
 --- a/tests/test_math_utils.py
 +++ b/tests/test_math_utils.py
 @@ -1,6 +1,6 @@
@@ -189,7 +189,7 @@ git log --oneline -5
 
 **Output:**
 ```
-007c8c1 Initial commit
+<<commit 5>> Initial commit
 ```
 
 **Tool: Bash**
@@ -204,7 +204,7 @@ EOF
 
 **Output:**
 ```
-[master 99dc541] Add multiply_numbers function with test
+[master <<commit 6>>] Add multiply_numbers function with test
  2 files changed, 13 insertions(+), 1 deletion(-)
 ```
 
