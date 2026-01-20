@@ -43,6 +43,26 @@ def filter_infrastructure_paths(text: str) -> str:
     return "\n".join(sorted(filtered))  # Sort for consistent comparison
 
 
+def normalize_git_shas(text: str) -> str:
+    """Normalize git SHAs to placeholders for comparison.
+
+    Git SHAs are deterministic but depend on content and timestamps,
+    so they will differ between runs. Replace them with placeholders.
+    """
+    # Normalize short git SHAs (7 chars) at start of lines (git log output)
+    # e.g., "007c8c1 Initial commit" -> "<sha> Initial commit"
+    text = re.sub(r"^([0-9a-f]{7}) ", r"<sha> ", text, flags=re.MULTILINE)
+
+    # Normalize commit SHAs in git commit output
+    # e.g., "[master 99dc541] Add function" -> "[master <sha>] Add function"
+    text = re.sub(r"\[(\w+) ([0-9a-f]{7})\]", r"[\1 <sha>]", text)
+
+    # Normalize full SHAs (40 chars)
+    text = re.sub(r"\b[0-9a-f]{40}\b", "<full-sha>", text)
+
+    return text
+
+
 def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
     """Normalize text for lenient comparison.
 
@@ -51,6 +71,7 @@ def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
     - Normalizes line endings
     - For Glob: filters out .venv paths
     - For Edit: normalizes output format
+    - For Bash: normalizes git SHAs
     """
     text = strip_system_reminders(text)
 
@@ -64,6 +85,10 @@ def normalize_for_comparison(text: str, tool_name: str | None = None) -> str:
         if "has been updated" in text.lower() or "edited file" in text.lower():
             # Extract just the file path for comparison
             return "edit_success"
+
+    # For Bash outputs, normalize git SHAs which vary between runs
+    if tool_name == "Bash":
+        text = normalize_git_shas(text)
 
     lines = [line.rstrip() for line in text.splitlines()]
     return "\n".join(lines).strip()

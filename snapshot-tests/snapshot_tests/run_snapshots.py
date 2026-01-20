@@ -39,6 +39,7 @@ from snapshot_tests.transcript import parse_transcript, extract_tool_calls, get_
 from snapshot_tests.simulator import ToolSimulator
 from snapshot_tests.compile_transcript import compile_transcript
 from snapshot_tests.plugin_setup import install_plugin
+from snapshot_tests.pty_runner import run_claude_pty
 
 
 @dataclass
@@ -428,43 +429,32 @@ def run_record(
     # Plugin directory for hooks
     plugin_dir = temp_dir / ".claude" / "plugins" / "claude-reliability"
 
-    # Run Claude Code with the plugin loaded
-    # Note: We use real HOME for auth, but load plugin from test directory
-    cmd = [
-        "claude",
-        "--print",
-        "--session-id", session_id,
-        "--dangerously-skip-permissions",
-        "--plugin-dir", str(plugin_dir),
-        "--model", "opus",  # Use opus for first message
-        "-p", prompt,
-    ]
-
     if verbose:
-        print(f"  Running Claude Code...")
+        print(f"  Running Claude Code via PTY...")
         print(f"  Plugin dir: {plugin_dir}")
 
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout
-        )
-    except subprocess.TimeoutExpired:
+    # Run Claude Code via PTY (not --print mode) to ensure proper session lifecycle
+    # This allows Stop hooks to run during normal exit
+    pty_result = run_claude_pty(
+        prompt=prompt,
+        cwd=temp_dir,
+        session_id=session_id,
+        plugin_dir=plugin_dir,
+        timeout=300,
+        verbose=verbose,
+    )
+
+    if pty_result.error:
         return TestResult(
             name=test.name,
             passed=False,
-            error="Claude Code timed out after 5 minutes",
+            error=f"Claude Code PTY error: {pty_result.error}",
         )
 
     if verbose:
-        print(f"  Claude Code exit code: {result.returncode}")
-        if result.stdout:
-            print(f"  Output: {result.stdout[:500]}...")
-        if result.stderr:
-            print(f"  Stderr: {result.stderr[:500]}...")
+        print(f"  Claude Code exit code: {pty_result.exit_code}")
+        if pty_result.output:
+            print(f"  Output: {pty_result.output[:500]}...")
 
     # Find and copy the transcript
     # Claude stores transcripts in ~/.claude/projects/<project-path-hash>/<session-id>.jsonl
@@ -512,6 +502,9 @@ def run_record(
             post_condition_output = result.stdout
             if verbose and post_condition_output:
                 print(f"  Post-condition output:\n{post_condition_output}")
+            # Save post-condition output alongside transcript for later compilation
+            output_file = test.test_dir / "post-condition-output.txt"
+            output_file.write_text(post_condition_output)
         except subprocess.CalledProcessError as e:
             return TestResult(
                 name=test.name,
@@ -591,9 +584,17 @@ def compile_all_transcripts(tests: list[TestConfig], verbose: bool = False) -> N
         if not test.transcript_path or not test.transcript_path.exists():
             continue
 
+        # Read post-condition output if available
+        post_condition_output = None
+        output_file = test.test_dir / "post-condition-output.txt"
+        if output_file.exists():
+            post_condition_output = output_file.read_text()
+
         md_path = test.transcript_path.with_suffix(".md")
         transcript = parse_transcript(test.transcript_path)
-        markdown = compile_transcript(transcript, verbose=False)
+        markdown = compile_transcript(
+            transcript, verbose=False, post_condition_output=post_condition_output
+        )
         md_path.write_text(markdown)
         compiled += 1
 

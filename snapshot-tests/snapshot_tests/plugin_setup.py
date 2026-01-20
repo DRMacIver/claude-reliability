@@ -68,6 +68,14 @@ def install_plugin(target_dir: Path, home_dir: Path | None = None) -> None:
             shutil.rmtree(commands_dst)
         shutil.copytree(commands_src, commands_dst)
 
+    # Copy hooks directory (contains hooks.json)
+    hooks_src = project_root / "hooks"
+    hooks_dst = plugin_dir / "hooks"
+    if hooks_src.exists():
+        if hooks_dst.exists():
+            shutil.rmtree(hooks_dst)
+        shutil.copytree(hooks_src, hooks_dst)
+
     # Create bin directory and copy the binary
     bin_dir = claude_dir / "bin"
     bin_dir.mkdir(exist_ok=True)

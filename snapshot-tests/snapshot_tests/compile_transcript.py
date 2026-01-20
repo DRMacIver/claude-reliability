@@ -79,9 +79,26 @@ def format_tool_use(tool_use: ToolUse) -> list[str]:
     return lines
 
 
+def strip_system_reminders(content: str) -> str:
+    """Strip <system-reminder> tags and their contents from text."""
+    import re
+
+    # Strip complete system-reminder tags
+    pattern = r"<system-reminder>.*?</system-reminder>"
+    content = re.sub(pattern, "", content, flags=re.DOTALL)
+
+    # Strip truncated system-reminder tags (no closing tag)
+    truncated_pattern = r"<system-reminder>.*$"
+    content = re.sub(truncated_pattern, "", content, flags=re.DOTALL)
+
+    return content.strip()
+
+
 def format_tool_result(result: ToolResult) -> list[str]:
     """Format a tool result as Markdown lines."""
     content = result.content
+    # Strip system-reminder tags from output
+    content = strip_system_reminders(content)
     if len(content) > 2000:
         content = content[:2000] + "\n... (truncated)"
 
@@ -89,12 +106,17 @@ def format_tool_result(result: ToolResult) -> list[str]:
     return lines
 
 
-def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False) -> str:
+def compile_transcript(
+    transcript: list[TranscriptEntry],
+    verbose: bool = False,
+    post_condition_output: str | None = None,
+) -> str:
     """Compile a parsed transcript to Markdown.
 
     Args:
         transcript: List of parsed transcript entries
         verbose: Include thinking blocks and extra details
+        post_condition_output: Optional output from post-condition script
 
     Returns:
         Markdown formatted string
@@ -187,6 +209,17 @@ def compile_transcript(transcript: list[TranscriptEntry], verbose: bool = False)
                     result_lines = format_tool_result(result)
                     lines.extend([substitute_paths(line) for line in result_lines])
                     lines.append("")
+
+    # Add post-condition output if provided
+    if post_condition_output and post_condition_output.strip():
+        lines.append("---")
+        lines.append("")
+        lines.append("## Post-Condition Output")
+        lines.append("")
+        lines.append("```")
+        lines.append(substitute_paths(post_condition_output.strip()))
+        lines.append("```")
+        lines.append("")
 
     return "\n".join(lines)
 

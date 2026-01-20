@@ -5,6 +5,7 @@ description = "Snapshot testing infrastructure for claude-reliability hooks"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
+    "pexpect>=4.9",
 ]
 
 [project.scripts]
