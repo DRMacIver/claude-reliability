@@ -310,6 +310,15 @@ pub fn run_stop_hook(
         return Ok(StopHookResult::allow());
     }
 
+    // Skip reflection if agent is asking a question (waiting for user input)
+    // This check is separate from check_interactive_question because that function
+    // also checks user recency, but we want to skip reflection regardless of recency
+    if let Some(ref output) = transcript_info.last_assistant_output {
+        if looks_like_question(output) {
+            return Ok(StopHookResult::allow());
+        }
+    }
+
     if transcript_info.has_modifying_tool_use {
         // Modifying tools were used, prompt for reflection
         session::set_reflect_marker(base_dir)?;
@@ -2543,6 +2552,57 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
         // No marker should be set
+        assert!(!session::has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_simple_reflection_skipped_when_agent_asks_question() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript with modifying tools BUT ending with a question
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            // Write tool use
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+            // Write tool result
+            writeln!(
+                file,
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"123","content":"ok"}}]}}}}"#
+            )
+            .unwrap();
+            // Write assistant message with a question
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"I've completed the changes. Would you like me to continue?"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        // Should allow stop because agent asked a question
+        assert!(result.allow_stop);
+        // No reflection marker should be set
         assert!(!session::has_reflect_marker(base));
     }
 

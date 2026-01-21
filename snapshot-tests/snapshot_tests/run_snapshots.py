@@ -59,6 +59,7 @@ class ErrorCategory(Enum):
 # Patterns for paths to exclude from directory snapshots
 SNAPSHOT_EXCLUDE_PATTERNS = {
     ".git",
+    ".git-remote",  # Bare git repos used for testing have non-deterministic hashes
     ".venv",
     ".claude",
     "__pycache__",
