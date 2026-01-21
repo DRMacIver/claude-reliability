@@ -64,6 +64,10 @@ pub enum Error {
     /// A template error occurred.
     #[error("Template error: {0}")]
     Template(String),
+
+    /// A task-related error occurred.
+    #[error("{0}")]
+    Task(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// A specialized Result type for this crate.

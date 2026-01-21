@@ -1,0 +1,583 @@
+//! MCP server for task management.
+//!
+//! This module provides an MCP server that exposes task management
+//! functionality through the Model Context Protocol.
+
+use crate::tasks::{Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate};
+use rmcp::model::{
+    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+};
+use rmcp::tool;
+use rmcp::Error as McpError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
+
+/// MCP server for task management.
+#[derive(Clone)]
+pub struct TasksServer {
+    store: Arc<SqliteTaskStore>,
+}
+
+impl TasksServer {
+    /// Create a new tasks server with the given database path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be initialized.
+    pub fn new(db_path: &Path) -> crate::error::Result<Self> {
+        let store = SqliteTaskStore::new(db_path)?;
+        Ok(Self { store: Arc::new(store) })
+    }
+
+    /// Create a new tasks server using the default database location in `.claude/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be initialized.
+    pub fn in_claude_dir(base_dir: &Path) -> crate::error::Result<Self> {
+        let store = SqliteTaskStore::in_claude_dir(base_dir)?;
+        Ok(Self { store: Arc::new(store) })
+    }
+}
+
+// Tool input schemas
+
+/// Input for creating a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateTaskInput {
+    /// Task title (required).
+    pub title: String,
+    /// Task description.
+    #[serde(default)]
+    pub description: String,
+    /// Priority: 0=critical, 1=high, 2=medium (default), 3=low, 4=backlog.
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+}
+
+const fn default_priority() -> u8 {
+    2
+}
+
+/// Input for getting a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetTaskInput {
+    /// Task ID.
+    pub id: String,
+}
+
+/// Input for updating a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateTaskInput {
+    /// Task ID.
+    pub id: String,
+    /// New title (optional).
+    pub title: Option<String>,
+    /// New description (optional).
+    pub description: Option<String>,
+    /// New priority (optional).
+    pub priority: Option<u8>,
+    /// New status: open, complete, abandoned, stuck, blocked (optional).
+    pub status: Option<String>,
+}
+
+/// Input for deleting a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteTaskInput {
+    /// Task ID.
+    pub id: String,
+}
+
+/// Input for listing tasks.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListTasksInput {
+    /// Filter by status (optional).
+    pub status: Option<String>,
+    /// Filter by exact priority (optional).
+    pub priority: Option<u8>,
+    /// Filter by maximum priority (optional).
+    pub max_priority: Option<u8>,
+    /// Only show tasks that are ready to work on (optional).
+    #[serde(default)]
+    pub ready_only: bool,
+}
+
+/// Input for adding a dependency.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddDependencyInput {
+    /// Task ID that will have the dependency.
+    pub task_id: String,
+    /// Task ID that must be completed first.
+    pub depends_on: String,
+}
+
+/// Input for removing a dependency.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RemoveDependencyInput {
+    /// Task ID that has the dependency.
+    pub task_id: String,
+    /// Task ID to remove as dependency.
+    pub depends_on: String,
+}
+
+/// Input for adding a note.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddNoteInput {
+    /// Task ID.
+    pub task_id: String,
+    /// Note content.
+    pub content: String,
+}
+
+/// Input for getting notes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetNotesInput {
+    /// Task ID.
+    pub task_id: String,
+}
+
+/// Input for searching tasks.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchTasksInput {
+    /// Search query.
+    pub query: String,
+}
+
+/// Input for getting audit log.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetAuditLogInput {
+    /// Filter by task ID (optional).
+    pub task_id: Option<String>,
+    /// Limit number of entries (optional).
+    pub limit: Option<usize>,
+}
+
+// Output types - defined at module level to avoid items_after_statements
+
+/// Task output representation.
+#[derive(Debug, Serialize)]
+struct TaskOutput {
+    id: String,
+    title: String,
+    description: String,
+    priority: u8,
+    priority_label: &'static str,
+    status: String,
+    created_at: String,
+    updated_at: String,
+    dependencies: Vec<String>,
+}
+
+impl TaskOutput {
+    fn from_task(task: &crate::tasks::Task, deps: Vec<String>) -> Self {
+        Self {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            description: task.description.clone(),
+            priority: task.priority.as_u8(),
+            priority_label: priority_label(task.priority),
+            status: task.status.as_str().to_string(),
+            created_at: task.created_at.clone(),
+            updated_at: task.updated_at.clone(),
+            dependencies: deps,
+        }
+    }
+}
+
+/// Note output for serialization.
+#[derive(Debug, Serialize)]
+struct NoteOutput {
+    id: i64,
+    content: String,
+    created_at: String,
+}
+
+/// Note output with task ID for serialization.
+#[derive(Debug, Serialize)]
+struct NoteWithTaskOutput {
+    id: i64,
+    task_id: String,
+    content: String,
+    created_at: String,
+}
+
+/// Full task with notes for `get_task` response.
+#[derive(Debug, Serialize)]
+struct FullTaskOutput {
+    #[serde(flatten)]
+    task: TaskOutput,
+    notes: Vec<NoteOutput>,
+}
+
+/// Task suggestion for `what_should_i_work_on` response.
+#[derive(Debug, Serialize)]
+struct TaskSuggestion {
+    #[serde(flatten)]
+    task: TaskOutput,
+    notes: Vec<NoteOutput>,
+    message: String,
+}
+
+/// Get the string label for a priority level.
+const fn priority_label(priority: Priority) -> &'static str {
+    match priority {
+        Priority::Critical => "critical",
+        Priority::High => "high",
+        Priority::Medium => "medium",
+        Priority::Low => "low",
+        Priority::Backlog => "backlog",
+    }
+}
+
+// Tool implementations
+// Note: rmcp macros require pass-by-value for input parameters
+
+#[tool(tool_box)]
+impl TasksServer {
+    /// Create a new task.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Create a new task with title, description, and priority")]
+    fn create_task(
+        &self,
+        #[tool(aggr)] input: CreateTaskInput,
+    ) -> Result<CallToolResult, McpError> {
+        let priority = Priority::from_u8(input.priority)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let task = self
+            .store
+            .create_task(&input.title, &input.description, priority)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
+        let output = TaskOutput::from_task(&task, deps);
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get a task by ID.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Get a task by its ID, including dependencies and notes")]
+    fn get_task(&self, #[tool(aggr)] input: GetTaskInput) -> Result<CallToolResult, McpError> {
+        let task = self
+            .store
+            .get_task(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match task {
+            Some(task) => {
+                let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
+                let notes = self.store.get_notes(&task.id).unwrap_or_default();
+
+                let output = FullTaskOutput {
+                    task: TaskOutput::from_task(&task, deps),
+                    notes: notes
+                        .into_iter()
+                        .map(|n| NoteOutput {
+                            id: n.id,
+                            content: n.content,
+                            created_at: n.created_at,
+                        })
+                        .collect(),
+                };
+
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Task not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Update a task's fields.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Update a task's title, description, priority, or status")]
+    fn update_task(
+        &self,
+        #[tool(aggr)] input: UpdateTaskInput,
+    ) -> Result<CallToolResult, McpError> {
+        let priority = input
+            .priority
+            .map(Priority::from_u8)
+            .transpose()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let status = input
+            .status
+            .as_ref()
+            .map(|s| Status::from_str(s))
+            .transpose()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let update =
+            TaskUpdate { title: input.title, description: input.description, priority, status };
+
+        let task = self
+            .store
+            .update_task(&input.id, update)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match task {
+            Some(task) => {
+                let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
+                let output = TaskOutput::from_task(&task, deps);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Task not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Delete a task.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Delete a task by its ID")]
+    fn delete_task(
+        &self,
+        #[tool(aggr)] input: DeleteTaskInput,
+    ) -> Result<CallToolResult, McpError> {
+        let deleted = self
+            .store
+            .delete_task(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if deleted {
+            Ok(CallToolResult::success(vec![Content::text(format!("Task deleted: {}", input.id))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Task not found: {}",
+                input.id
+            ))]))
+        }
+    }
+
+    /// List tasks with optional filters.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "List tasks, optionally filtered by status, priority, or ready state")]
+    fn list_tasks(&self, #[tool(aggr)] input: ListTasksInput) -> Result<CallToolResult, McpError> {
+        let status = input
+            .status
+            .as_ref()
+            .map(|s| Status::from_str(s))
+            .transpose()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let priority = input
+            .priority
+            .map(Priority::from_u8)
+            .transpose()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let max_priority = input
+            .max_priority
+            .map(Priority::from_u8)
+            .transpose()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let filter = TaskFilter { status, priority, max_priority, ready_only: input.ready_only };
+
+        let tasks = self
+            .store
+            .list_tasks(filter)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let outputs: Vec<_> = tasks
+            .iter()
+            .map(|t| {
+                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps)
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&outputs)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Add a dependency between tasks.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Add a dependency (task_id depends on depends_on task)")]
+    fn add_dependency(
+        &self,
+        #[tool(aggr)] input: AddDependencyInput,
+    ) -> Result<CallToolResult, McpError> {
+        self.store
+            .add_dependency(&input.task_id, &input.depends_on)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Dependency added: {} now depends on {}",
+            input.task_id, input.depends_on
+        ))]))
+    }
+
+    /// Remove a dependency between tasks.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Remove a dependency between tasks")]
+    fn remove_dependency(
+        &self,
+        #[tool(aggr)] input: RemoveDependencyInput,
+    ) -> Result<CallToolResult, McpError> {
+        let removed = self
+            .store
+            .remove_dependency(&input.task_id, &input.depends_on)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if removed {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Dependency removed: {} no longer depends on {}",
+                input.task_id, input.depends_on
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text("Dependency not found".to_string())]))
+        }
+    }
+
+    /// Add a note to a task.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Add a note to a task")]
+    fn add_note(&self, #[tool(aggr)] input: AddNoteInput) -> Result<CallToolResult, McpError> {
+        let note = self
+            .store
+            .add_note(&input.task_id, &input.content)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output = NoteWithTaskOutput {
+            id: note.id,
+            task_id: note.task_id,
+            content: note.content,
+            created_at: note.created_at,
+        };
+
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get all notes for a task.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Get all notes attached to a task")]
+    fn get_notes(&self, #[tool(aggr)] input: GetNotesInput) -> Result<CallToolResult, McpError> {
+        let notes = self
+            .store
+            .get_notes(&input.task_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let outputs: Vec<_> = notes
+            .into_iter()
+            .map(|n| NoteOutput { id: n.id, content: n.content, created_at: n.created_at })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&outputs)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Search tasks by text.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Full-text search across task titles, descriptions, and notes")]
+    fn search_tasks(
+        &self,
+        #[tool(aggr)] input: SearchTasksInput,
+    ) -> Result<CallToolResult, McpError> {
+        let tasks = self
+            .store
+            .search_tasks(&input.query)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let outputs: Vec<_> = tasks
+            .iter()
+            .map(|t| {
+                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps)
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&outputs)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get audit log entries.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Get the audit log, optionally filtered by task ID")]
+    fn get_audit_log(
+        &self,
+        #[tool(aggr)] input: GetAuditLogInput,
+    ) -> Result<CallToolResult, McpError> {
+        let entries = self
+            .store
+            .get_audit_log(input.task_id.as_deref(), input.limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let json = serde_json::to_string_pretty(&entries)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get a random task to work on from the highest priority ready tasks.
+    #[tool(description = "Pick a random task from the highest priority unblocked tasks")]
+    fn what_should_i_work_on(&self) -> Result<CallToolResult, McpError> {
+        let task =
+            self.store.pick_task().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match task {
+            Some(task) => {
+                let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
+                let notes = self.store.get_notes(&task.id).unwrap_or_default();
+
+                let output = TaskSuggestion {
+                    task: TaskOutput::from_task(&task, deps),
+                    notes: notes
+                        .into_iter()
+                        .map(|n| NoteOutput { id: n.id, content: n.content, created_at: n.created_at })
+                        .collect(),
+                    message: format!(
+                        "Suggested task: {} (priority: {})",
+                        task.title,
+                        priority_label(task.priority)
+                    ),
+                };
+
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "No tasks available to work on. All tasks are either complete, blocked, or the task list is empty.".to_string(),
+            )])),
+        }
+    }
+}
+
+#[rmcp::tool(tool_box)]
+impl rmcp::ServerHandler for TasksServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation { name: "tasks-mcp".to_string(), version: env!("CARGO_PKG_VERSION").to_string() },
+            instructions: Some(
+                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies and notes.".to_string(),
+            ),
+        }
+    }
+}
