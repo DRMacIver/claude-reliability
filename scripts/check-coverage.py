@@ -94,13 +94,16 @@ class UncoveredLine:
         when the assertion fails. Since we want tests to pass, these lines
         are expected to be uncovered.
 
-        Returns True for lines like: "Expected X, got: {y}"
+        Returns True for lines like: "Expected X, got: {y}" or "Should be X"
         in the context of: assert!(condition, "Expected X, got: {y}");
         """
         stripped = self.content.strip()
-        # Check if this looks like an assertion message (quoted string with format args)
+        # Check if this looks like an assertion message (quoted string)
+        # Common patterns: "Expected X", "got: X", "Should X"
         if stripped.startswith('"') and (
-            "Expected" in stripped or "got:" in stripped.lower()
+            "Expected" in stripped
+            or "got:" in stripped.lower()
+            or stripped.startswith('"Should ')
         ):
             # Check if it's in a test file by looking at the path
             return "src/" in str(self.file)

@@ -107,6 +107,20 @@ impl StopHookResult {
 /// Threshold for consecutive API errors before allowing stop.
 const API_ERROR_THRESHOLD: u32 = 2;
 
+/// Maximum number of files to show before truncating with "... and X more"
+const MAX_FILES_TO_SHOW: usize = 10;
+
+/// Helper to add a file list to messages with truncation.
+fn show_file_list(result: &mut StopHookResult, files: &[String], max_files: usize) {
+    for (i, f) in files.iter().enumerate() {
+        if i >= max_files {
+            result.messages.push(format!("  ... and {} more", files.len() - max_files));
+            break;
+        }
+        result.messages.push(format!("  {f}"));
+    }
+}
+
 /// Run the stop hook.
 ///
 /// # Errors
@@ -199,8 +213,15 @@ pub fn run_stop_hook(
     }
 
     // Check if just-keep-working session is active
+    // JKW mode is active if EITHER the session notes OR state file exists
     let session_state_path = config.session_state_path();
-    let session_config = session::parse_session_state(&session_state_path)?;
+    let session_notes_exist = session::jkw_session_file_exists(config.base_dir());
+    let mut session_config = session::parse_session_state(&session_state_path)?;
+
+    // If session notes exist but state doesn't, create default state (first stop in JKW mode)
+    if session_notes_exist && session_config.is_none() {
+        session_config = Some(session::SessionConfig::default());
+    }
 
     // Fast path: if no just-keep-working session and no git changes, allow immediate exit
     if session_config.is_none() && config.git_repo {
@@ -455,21 +476,33 @@ fn handle_uncommitted_changes(
     // Show analysis results
     add_analysis_messages(&mut result, &analysis);
 
+    // Show unstaged changes
+    if !git_status.unstaged_files.is_empty() {
+        result.messages.push("## Unstaged Changes".to_string());
+        result.messages.push(String::new());
+        result.messages.push("The following files have been modified:".to_string());
+        result.messages.push(String::new());
+        show_file_list(&mut result, &git_status.unstaged_files, MAX_FILES_TO_SHOW);
+        result.messages.push(String::new());
+    }
+
+    // Show staged changes
+    if !git_status.staged_files.is_empty() {
+        result.messages.push("## Staged Changes".to_string());
+        result.messages.push(String::new());
+        result.messages.push("The following files are staged for commit:".to_string());
+        result.messages.push(String::new());
+        show_file_list(&mut result, &git_status.staged_files, MAX_FILES_TO_SHOW);
+        result.messages.push(String::new());
+    }
+
     // Show untracked files
     if !git_status.untracked_files.is_empty() {
         result.messages.push("## Untracked Files".to_string());
         result.messages.push(String::new());
         result.messages.push("The following files are not tracked by git:".to_string());
         result.messages.push(String::new());
-        for (i, f) in git_status.untracked_files.iter().enumerate() {
-            if i >= 10 {
-                result
-                    .messages
-                    .push(format!("  ... and {} more", git_status.untracked_files.len() - 10));
-                break;
-            }
-            result.messages.push(format!("  {f}"));
-        }
+        show_file_list(&mut result, &git_status.untracked_files, MAX_FILES_TO_SHOW);
         result.messages.push(String::new());
         result.messages.push("Either `git add` them or add them to .gitignore".to_string());
         result.messages.push(String::new());
@@ -870,6 +903,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -877,7 +912,9 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone()); // Only when has_unstaged
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        // No --cached --name-only when no staged changes
         runner.expect(
             "git",
             &["ls-files", "--others", "--exclude-standard"],
@@ -887,7 +924,9 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list); // Only when has_unstaged
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        // No --cached --name-only when no staged changes
         runner.expect(
             "git",
             &["ls-files", "--others", "--exclude-standard"],
@@ -903,6 +942,70 @@ mod tests {
         runner.expect("git", &["diff", "-U0"], empty_success);
 
         runner
+    }
+
+    fn mock_staged_changes() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let has_staged = CommandOutput {
+            exit_code: 0,
+            stdout: " src/main.rs | 3 +++\n".to_string(),
+            stderr: String::new(),
+        };
+        let staged_file_list = CommandOutput {
+            exit_code: 0,
+            stdout: "src/main.rs\n".to_string(),
+            stderr: String::new(),
+        };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone()); // No unstaged
+        runner.expect("git", &["diff", "--cached", "--stat"], has_staged.clone());
+        runner.expect("git", &["diff", "--cached", "--name-only"], staged_file_list.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (main check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], has_staged);
+        runner.expect("git", &["diff", "--cached", "--name-only"], staged_file_list);
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // combined_diff for analysis
+        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
+        runner.expect("git", &["diff", "-U0"], empty_success);
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_shows_staged_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let runner = mock_staged_changes();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Staged Changes")));
+        assert!(result.messages.iter().any(|m| m.contains("src/main.rs")));
     }
 
     #[test]
@@ -1138,6 +1241,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -1150,6 +1255,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -1160,6 +1266,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], untracked_files);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
@@ -1196,6 +1303,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -1203,6 +1312,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -1213,6 +1323,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -1411,6 +1522,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -1418,6 +1531,7 @@ mod tests {
 
         // Fast path check - returns changes so we don't exit early
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
@@ -1487,6 +1601,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -1494,6 +1610,7 @@ mod tests {
 
         // check_uncommitted_changes (fast path) - returns changes so we continue
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
@@ -1545,6 +1662,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -1552,6 +1671,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -1562,6 +1682,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
@@ -2033,6 +2154,71 @@ mod tests {
     }
 
     #[test]
+    fn test_jkw_mode_detected_from_notes_file_only() {
+        // Test that JKW mode is detected when only the notes file exists (no state file)
+        // This can happen when the LLM creates the session file but exits before
+        // the stop hook runs for the first time.
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create ONLY the session notes file (no state file)
+        let session_dir = base.join(".claude");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("jkw-session.local.md"),
+            "# JKW Session\n\nSession notes here.\n",
+        )
+        .unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let sha =
+            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // working_state_hash (fallback when no .beads dir)
+        runner.expect("git", &["rev-parse", "HEAD"], sha);
+        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
+        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should detect JKW mode and block exit
+        assert!(!result.allow_stop, "Should block exit when JKW session notes exist");
+        assert!(
+            result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")),
+            "Should show JKW mode active message"
+        );
+        // Should show iteration 1 (first stop in this session)
+        assert!(result.messages.iter().any(|m| m.contains("Iteration 1")), "Should be iteration 1");
+    }
+
+    #[test]
     fn test_run_stop_hook_shows_many_untracked_files() {
         // Test with more than 10 untracked files to cover the "... and X more" message
         let mut runner = MockCommandRunner::new();
@@ -2041,6 +2227,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -2055,6 +2243,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2065,6 +2254,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], many_untracked);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
@@ -2169,6 +2359,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -2176,6 +2368,7 @@ mod tests {
 
         // Fast path check
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2186,6 +2379,7 @@ mod tests {
 
         // Main check
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2225,6 +2419,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -2232,6 +2428,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2242,6 +2439,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2361,6 +2559,8 @@ mod tests {
             stdout: " file.rs | 10 ++++++++++\n".to_string(),
             stderr: String::new(),
         };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
@@ -2373,6 +2573,7 @@ mod tests {
 
         // First check_uncommitted_changes (fast path check)
         runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",
@@ -2383,6 +2584,7 @@ mod tests {
 
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect(
             "git",

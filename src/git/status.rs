@@ -43,6 +43,10 @@ impl UncommittedChanges {
 pub struct GitStatus {
     /// Uncommitted changes.
     pub uncommitted: UncommittedChanges,
+    /// List of unstaged modified files.
+    pub unstaged_files: Vec<String>,
+    /// List of staged files.
+    pub staged_files: Vec<String>,
     /// List of untracked files.
     pub untracked_files: Vec<String>,
     /// Whether the branch is ahead of the remote.
@@ -64,10 +68,36 @@ pub fn check_uncommitted_changes(runner: &dyn CommandRunner) -> Result<GitStatus
     status.uncommitted.has_unstaged =
         diff_output.success() && !diff_output.stdout.trim().is_empty();
 
+    // Get list of unstaged files only if there are changes
+    if status.uncommitted.has_unstaged {
+        let unstaged_names = runner.run("git", &["diff", "--name-only"], None)?;
+        if unstaged_names.success() {
+            status.unstaged_files = unstaged_names
+                .stdout
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
     // Check for staged changes
     let staged_output = runner.run("git", &["diff", "--cached", "--stat"], None)?;
     status.uncommitted.has_staged =
         staged_output.success() && !staged_output.stdout.trim().is_empty();
+
+    // Get list of staged files only if there are changes
+    if status.uncommitted.has_staged {
+        let staged_names = runner.run("git", &["diff", "--cached", "--name-only"], None)?;
+        if staged_names.success() {
+            status.staged_files = staged_names
+                .stdout
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
 
     // Check for untracked files
     let untracked_output =
@@ -166,6 +196,15 @@ mod tests {
         );
         runner.expect(
             "git",
+            &["diff", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/lib.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
             &["diff", "--cached", "--stat"],
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
         );
@@ -184,6 +223,7 @@ mod tests {
         assert!(status.uncommitted.has_unstaged);
         assert!(!status.uncommitted.has_staged);
         assert!(!status.uncommitted.has_untracked);
+        assert_eq!(status.unstaged_files, vec!["src/lib.rs"]);
     }
 
     #[test]
@@ -320,5 +360,49 @@ mod tests {
         // ahead_of_remote remains false when output can't be parsed
         assert!(!status.ahead_of_remote);
         assert_eq!(status.commits_ahead, 0);
+    }
+
+    #[test]
+    fn test_check_uncommitted_changes_with_staged() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: " src/main.rs | 3 +++\n 1 file changed\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/main.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let status = check_uncommitted_changes(&runner).unwrap();
+        assert!(!status.uncommitted.has_unstaged);
+        assert!(status.uncommitted.has_staged);
+        assert!(!status.uncommitted.has_untracked);
+        assert_eq!(status.staged_files, vec!["src/main.rs"]);
     }
 }

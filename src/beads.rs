@@ -403,12 +403,19 @@ mod tests {
     fn test_get_ready_issues_count() {
         let mut runner = MockCommandRunner::new();
         runner.set_available("bd");
+        // Use actual bd ready output format
         runner.expect(
             "bd",
             &["ready"],
             CommandOutput {
                 exit_code: 0,
-                stdout: "1 [P1] Ready issue one\n2 [P2] Ready issue two\n".to_string(),
+                stdout: concat!(
+                    "📋 Ready work (2 issues with no blockers):\n",
+                    "\n",
+                    "1. [● P1] [bug] project-123: Fix the bug\n",
+                    "2. [● P2] [task] project-456: Add feature\n",
+                )
+                .to_string(),
                 stderr: String::new(),
             },
         );
