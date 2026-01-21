@@ -67,7 +67,8 @@ download_from_release() {
     fi
 
     if [[ -z "$version" ]]; then
-        echo "Could not determine latest version" >&2
+        echo "Could not determine latest version from GitHub API" >&2
+        echo "URL: ${GITHUB_API}/repos/${REPO}/releases/latest" >&2
         return 1
     fi
 
@@ -81,10 +82,17 @@ download_from_release() {
     trap "rm -rf '$tmp_dir'" RETURN
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$download_url" -o "${tmp_dir}/release.tar.gz" || return 1
+        if ! curl -fsSL "$download_url" -o "${tmp_dir}/release.tar.gz" 2>&1; then
+            echo "Download failed from: ${download_url}" >&2
+            return 1
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$download_url" -O "${tmp_dir}/release.tar.gz" || return 1
+        if ! wget -q "$download_url" -O "${tmp_dir}/release.tar.gz" 2>&1; then
+            echo "Download failed from: ${download_url}" >&2
+            return 1
+        fi
     else
+        echo "Neither curl nor wget available for download" >&2
         return 1
     fi
 
@@ -110,5 +118,11 @@ if [[ -n "$artifact_name" ]]; then
 fi
 
 echo "ERROR: Failed to obtain claude-reliability binary" >&2
+echo "" >&2
+echo "Tried:" >&2
+echo "  - Download from GitHub releases (${GITHUB_API}/repos/${REPO}/releases/latest)" >&2
+echo "" >&2
+echo "Expected binary location: ${BINARY_PATH}" >&2
+echo "Detected platform: $(uname -s) $(uname -m)" >&2
 echo "Supported platforms: Linux x86_64, Linux ARM64, macOS ARM64" >&2
 exit 1
