@@ -359,7 +359,16 @@ pub fn ensure_config(runner: &dyn CommandRunner) -> Result<ProjectConfig> {
 /// Returns an error if config cannot be loaded or saved.
 pub fn ensure_config_in(runner: &dyn CommandRunner, base_dir: &Path) -> Result<ProjectConfig> {
     // Try to load existing config
-    let mut config = if let Some(config) = ProjectConfig::load_from(base_dir)? {
+    let mut config = if let Some(mut config) = ProjectConfig::load_from(base_dir)? {
+        // Always re-detect git_repo since .git could have been added/removed
+        // This is critical for the stop hook to correctly check for uncommitted changes
+        let git_repo = base_dir.join(".git").exists();
+        if config.git_repo != git_repo {
+            config.git_repo = git_repo;
+            // Update require_push based on new git_repo status
+            config.require_push = git_repo && has_git_remote(runner);
+            config.save_to(base_dir)?;
+        }
         config
     } else {
         // Detect and create new config
@@ -829,29 +838,64 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_config_loads_existing() {
+    fn test_ensure_config_loads_existing_preserves_most_fields() {
         let dir = TempDir::new().unwrap();
 
-        // Create existing config
+        // Create existing config without .git
         let existing = ProjectConfig {
             git_repo: false,
             beads_installed: true,
             check_command: Some("make test".to_string()),
             code_review_section: None,
-            require_push: true,
+            require_push: false,
         };
         existing.save_to(dir.path()).unwrap();
-
-        // Now create .git (detection would say git_repo=true)
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
 
         let runner = MockCommandRunner::new();
         let config = ensure_config_in(&runner, dir.path()).unwrap();
 
-        // Should load existing config, not detect new one
-        assert!(!config.git_repo); // From saved config
+        // Should preserve non-git fields from saved config
+        assert!(!config.git_repo); // Still false, no .git exists
         assert!(config.beads_installed);
         assert_eq!(config.check_command, Some("make test".to_string()));
+    }
+
+    #[test]
+    fn test_ensure_config_redetects_git_repo() {
+        use crate::traits::CommandOutput;
+
+        let dir = TempDir::new().unwrap();
+
+        // Create existing config without .git
+        let existing = ProjectConfig {
+            git_repo: false,
+            beads_installed: true,
+            check_command: Some("make test".to_string()),
+            code_review_section: None,
+            require_push: false,
+        };
+        existing.save_to(dir.path()).unwrap();
+
+        // Now create .git - git_repo should be re-detected
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        // Mock the git remote check (called when git_repo becomes true)
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["remote"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let config = ensure_config_in(&runner, dir.path()).unwrap();
+
+        // git_repo should now be true (re-detected)
+        assert!(config.git_repo);
+        // Other fields should be preserved
+        assert!(config.beads_installed);
+        assert_eq!(config.check_command, Some("make test".to_string()));
+        // require_push should be updated (false because no remote)
+        assert!(!config.require_push);
     }
 
     #[test]
