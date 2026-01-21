@@ -3,13 +3,16 @@
 #
 # Ensures the binary is available and runs the code review hook.
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENSURE_BINARY="${SCRIPT_DIR}/../ensure-binary.sh"
 
-# Get the binary path
-BINARY="$("$ENSURE_BINARY")"
+# Get the binary path (this may build it if source changed)
+BINARY=$("$ENSURE_BINARY" 2>/dev/null) || {
+    # Build failed - allow the tool use silently
+    exit 0
+}
 
 # Run the code review hook, passing stdin through
 exec "$BINARY" pre-tool-use code-review

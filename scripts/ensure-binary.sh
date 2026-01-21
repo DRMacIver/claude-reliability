@@ -2,10 +2,11 @@
 # ensure-binary.sh - Ensures the claude-reliability binary is available
 #
 # This script:
-# 1. Checks for cached binary in ~/.claude-reliability/bin/
-# 2. Downloads from GitHub releases if not cached
-# 3. Falls back to building from source (from this repo) with cargo
-# 4. Prints the path to the binary on success, exits non-zero on failure
+# 1. In the source repo: rebuilds if source files changed (for local dev)
+# 2. Checks for cached binary in ~/.claude-reliability/bin/
+# 3. Downloads from GitHub releases if not cached
+# 4. Falls back to building from source (from this repo) with cargo
+# 5. Prints the path to the binary on success, exits non-zero on failure
 
 set -euo pipefail
 
@@ -17,6 +18,42 @@ VERSION_FILE="${CACHE_DIR}/version"
 # Get the directory where this script lives (plugin root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Check if we're in the source repository (has Cargo.toml with our crate name)
+is_source_repo() {
+    [[ -f "${PLUGIN_ROOT}/Cargo.toml" ]] && grep -q 'name = "claude-reliability"' "${PLUGIN_ROOT}/Cargo.toml" 2>/dev/null
+}
+
+# Check if source files are newer than the binary
+source_is_newer() {
+    local binary_path="$1"
+
+    if [[ ! -x "$binary_path" ]]; then
+        return 0  # No binary, need to build
+    fi
+
+    # Check if any Rust source files are newer than the binary
+    local newer_files
+    newer_files=$(find "${PLUGIN_ROOT}/src" -name '*.rs' -newer "$binary_path" 2>/dev/null | head -1)
+    if [[ -n "$newer_files" ]]; then
+        return 0  # Source is newer
+    fi
+
+    # Also check Cargo.toml for dependency changes
+    if [[ "${PLUGIN_ROOT}/Cargo.toml" -nt "$binary_path" ]]; then
+        return 0
+    fi
+
+    # Check templates directory too
+    if [[ -d "${PLUGIN_ROOT}/templates" ]]; then
+        newer_files=$(find "${PLUGIN_ROOT}/templates" -type f -newer "$binary_path" 2>/dev/null | head -1)
+        if [[ -n "$newer_files" ]]; then
+            return 0
+        fi
+    fi
+
+    return 1  # Binary is up to date
+}
 
 # Detect platform
 detect_platform() {
@@ -190,6 +227,19 @@ main() {
 
     binary_path="${CACHE_DIR}/bin/${BINARY_NAME}"
 
+    # In the source repo, check if we need to rebuild due to source changes
+    if is_source_repo && source_is_newer "$binary_path"; then
+        echo "Source files changed, rebuilding..." >&2
+        if build_from_source "$binary_path"; then
+            if [[ -x "$binary_path" ]] && "$binary_path" version >/dev/null 2>&1; then
+                echo "source" > "$VERSION_FILE"
+                echo "$binary_path"
+                exit 0
+            fi
+        fi
+        echo "Rebuild failed, trying other methods..." >&2
+    fi
+
     # Check if we have a cached binary
     if [[ -x "$binary_path" ]]; then
         # Verify it works
@@ -201,17 +251,19 @@ main() {
         rm -f "$binary_path"
     fi
 
-    # Try to download from GitHub releases
-    version="$(get_latest_version)"
-    if [[ -n "$version" ]]; then
-        if download_binary "$version" "$platform" "$binary_path"; then
-            # Verify downloaded binary works
-            if "$binary_path" version >/dev/null 2>&1; then
-                echo "$version" > "$VERSION_FILE"
-                echo "$binary_path"
-                exit 0
+    # Try to download from GitHub releases (skip if in source repo - prefer building)
+    if ! is_source_repo; then
+        version="$(get_latest_version)"
+        if [[ -n "$version" ]]; then
+            if download_binary "$version" "$platform" "$binary_path"; then
+                # Verify downloaded binary works
+                if "$binary_path" version >/dev/null 2>&1; then
+                    echo "$version" > "$VERSION_FILE"
+                    echo "$binary_path"
+                    exit 0
+                fi
+                rm -f "$binary_path"
             fi
-            rm -f "$binary_path"
         fi
     fi
 
@@ -230,8 +282,12 @@ main() {
     echo "ERROR: Could not obtain ${BINARY_NAME} binary" >&2
     echo "" >&2
     echo "Tried:" >&2
-    echo "  1. Download from GitHub releases (${REPO})" >&2
-    echo "  2. Build from source (with automatic Rust installation)" >&2
+    if is_source_repo; then
+        echo "  1. Build from source (source repo detected)" >&2
+    else
+        echo "  1. Download from GitHub releases (${REPO})" >&2
+        echo "  2. Build from source (with automatic Rust installation)" >&2
+    fi
     echo "" >&2
     echo "To fix, either:" >&2
     echo "  - Ensure you have internet access" >&2
