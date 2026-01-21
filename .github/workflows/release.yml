@@ -93,15 +93,12 @@ jobs:
           - os: ubuntu-latest
             artifact_name: linux-x86_64
             target: x86_64-unknown-linux-gnu
-            cross: false
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             artifact_name: linux-aarch64
             target: aarch64-unknown-linux-gnu
-            cross: true
           - os: macos-latest
             artifact_name: macos-arm64
             target: aarch64-apple-darwin
-            cross: false
 
     runs-on: ${{ matrix.os }}
 
@@ -112,11 +109,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-          targets: ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@cross
 
       - name: Install just
         uses: taiki-e/install-action@just
@@ -127,33 +119,17 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
-      - name: Build release binary (native)
-        if: ${{ !matrix.cross }}
-        run: cargo build --release --features cli --target ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --features cli
 
-      - name: Build release binary (cross)
-        if: matrix.cross
-        run: cross build --release --features cli --target ${{ matrix.target }}
-
-      - name: Strip binary (native Linux)
-        if: matrix.os == 'ubuntu-latest' && !matrix.cross
-        run: strip target/${{ matrix.target }}/release/claude-reliability
-
-      - name: Strip binary (cross Linux ARM64)
-        if: matrix.cross && matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-          aarch64-linux-gnu-strip target/${{ matrix.target }}/release/claude-reliability
-
-      - name: Strip binary (macOS)
-        if: matrix.os == 'macos-latest'
-        run: strip target/${{ matrix.target }}/release/claude-reliability
+      - name: Strip binary
+        run: strip target/release/claude-reliability
 
       - name: Package
         run: |
-          cd target/${{ matrix.target }}/release
+          cd target/release
           tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability
-          mv *.tar.gz ../../../
+          mv *.tar.gz ../../
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
