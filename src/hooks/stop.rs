@@ -15,7 +15,7 @@ use crate::question::{is_continue_question, looks_like_question, truncate_for_co
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
 use crate::templates;
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
-use crate::transcript::{self, TranscriptInfo};
+use crate::transcript::{self, is_simple_question, TranscriptInfo};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tera::Context;
@@ -163,6 +163,15 @@ pub fn run_stop_hook(
         let message = templates::render("messages/stop/api_error_loop.tera", &ctx)
             .expect("api_error_loop.tera template should always render");
         return Ok(StopHookResult::allow().with_message(message));
+    }
+
+    // Fast path: simple questions with no modifications
+    // If the user's first message is just a single-line question (ends with ?)
+    // and no modifying tools were used, allow immediate stop
+    if let Some(ref first_msg) = transcript_info.first_user_message {
+        if is_simple_question(first_msg) && !transcript_info.has_modifying_tool_use {
+            return Ok(StopHookResult::allow());
+        }
     }
 
     // Fast path: auto-confirm commit/push questions
@@ -1386,6 +1395,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1403,6 +1413,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1419,6 +1430,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1441,6 +1453,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
@@ -1468,6 +1481,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
@@ -1490,6 +1504,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Continue);
@@ -3064,5 +3079,208 @@ mod tests {
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("stderr")));
         assert!(result.messages.iter().any(|m| m.contains("compilation failed")));
+    }
+
+    #[test]
+    fn test_simple_question_fast_path_allows_stop() {
+        // When the first user message is a simple question (single line ending with ?)
+        // and no modifying tools were used, should allow immediate stop
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+
+        // Create input with transcript path
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "This function calculates the sum."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: false, // Skip git checks
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Simple question with only read tools should allow immediate stop
+        assert!(result.allow_stop, "Simple question with read-only tools should allow stop");
+    }
+
+    #[test]
+    fn test_simple_question_with_modifications_no_fast_path() {
+        // When there are modifications, should NOT use the fast path
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        // Will need git status checks since fast path doesn't apply
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        // Create transcript with modifications (Edit tool)
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I've updated the function."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should still allow (git is clean) but via the normal path, not fast path
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_multiline_message_no_fast_path() {
+        // Multiline messages should NOT use the fast path even without modifications
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        // Will need git status checks since fast path doesn't apply
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        // Create transcript with multiline question
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?\nAlso explain the parameters."}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "It does X."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should still allow (git is clean) but via normal path
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_non_question_no_fast_path() {
+        // Non-questions (no trailing ?) should NOT use the fast path
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        // Will need git status checks since fast path doesn't apply
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        // Create transcript with command, not question
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "Read the README file"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Here is the README content."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should still allow (git is clean) but via normal path
+        assert!(result.allow_stop);
     }
 }

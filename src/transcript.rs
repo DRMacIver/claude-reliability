@@ -28,12 +28,28 @@ pub enum ContentBlock {
     Other,
 }
 
+/// Message content - can be a string (user messages) or array of blocks (assistant messages).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Simple string content (user messages).
+    Text(String),
+    /// Array of content blocks (assistant messages).
+    Blocks(Vec<ContentBlock>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Blocks(Vec::new())
+    }
+}
+
 /// A message in the transcript.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Message {
-    /// The message content (for assistant messages).
+    /// The message content.
     #[serde(default)]
-    pub content: Vec<ContentBlock>,
+    pub content: MessageContent,
 }
 
 /// A transcript entry.
@@ -69,6 +85,8 @@ pub struct TranscriptInfo {
     pub consecutive_api_errors: u32,
     /// Whether the transcript contains any modifying (non-Read) tool uses.
     pub has_modifying_tool_use: bool,
+    /// The first user message in the transcript.
+    pub first_user_message: Option<String>,
 }
 
 /// Parse a transcript file and extract relevant information.
@@ -122,23 +140,33 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
             "assistant" => {
                 // Extract text from assistant message and check for tool uses
                 if let Some(message) = &entry.message {
-                    for block in &message.content {
-                        match block {
-                            ContentBlock::Text { text } => {
-                                info.last_assistant_output = Some(text.clone());
-                            }
-                            ContentBlock::ToolUse { name } => {
-                                // Check if this is a modifying tool
-                                if !READ_ONLY_TOOLS.contains(&name.as_str()) {
-                                    info.has_modifying_tool_use = true;
+                    if let MessageContent::Blocks(blocks) = &message.content {
+                        for block in blocks {
+                            match block {
+                                ContentBlock::Text { text } => {
+                                    info.last_assistant_output = Some(text.clone());
                                 }
+                                ContentBlock::ToolUse { name } => {
+                                    // Check if this is a modifying tool
+                                    if !READ_ONLY_TOOLS.contains(&name.as_str()) {
+                                        info.has_modifying_tool_use = true;
+                                    }
+                                }
+                                ContentBlock::Other => {}
                             }
-                            ContentBlock::Other => {}
                         }
                     }
                 }
             }
             "user" => {
+                // Capture first user message
+                if info.first_user_message.is_none() {
+                    if let Some(message) = &entry.message {
+                        if let MessageContent::Text(text) = &message.content {
+                            info.first_user_message = Some(text.clone());
+                        }
+                    }
+                }
                 // Parse timestamp
                 if let Some(ts_str) = &entry.timestamp {
                     if let Ok(ts) = parse_timestamp(ts_str) {
@@ -156,21 +184,33 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
 /// Check if an entry contains API error text patterns.
 fn is_api_error_text(entry: &TranscriptEntry) -> bool {
     if let Some(message) = &entry.message {
-        for block in &message.content {
-            if let ContentBlock::Text { text } = block {
-                // Check for common API error patterns
-                if text.contains("API Error:") && text.contains("400") {
-                    return true;
-                }
-                if text.contains("thinking")
-                    && text.contains("blocks")
-                    && text.contains("cannot be modified")
-                {
-                    return true;
-                }
-                if text.contains("invalid_request_error") {
-                    return true;
-                }
+        let texts_to_check: Vec<&str> = match &message.content {
+            MessageContent::Text(text) => vec![text.as_str()],
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        };
+
+        for text in texts_to_check {
+            // Check for common API error patterns
+            if text.contains("API Error:") && text.contains("400") {
+                return true;
+            }
+            if text.contains("thinking")
+                && text.contains("blocks")
+                && text.contains("cannot be modified")
+            {
+                return true;
+            }
+            if text.contains("invalid_request_error") {
+                return true;
             }
         }
     }
@@ -204,6 +244,25 @@ pub fn is_user_recently_active(info: &TranscriptInfo, recency_minutes: u32) -> b
     let now = Utc::now();
     let cutoff = now - chrono::Duration::minutes(i64::from(recency_minutes));
     last_time >= cutoff
+}
+
+/// Check if a message is a simple question (single line ending with ?).
+///
+/// A simple question is one where:
+/// - The message is a single line (no newlines except possibly trailing)
+/// - The line ends with a question mark
+///
+/// # Arguments
+///
+/// * `message` - The message text to check.
+///
+/// # Returns
+///
+/// True if the message is a simple question.
+pub fn is_simple_question(message: &str) -> bool {
+    let trimmed = message.trim();
+    // Must be non-empty, single line, and end with ?
+    !trimmed.is_empty() && !trimmed.contains('\n') && trimmed.ends_with('?')
 }
 
 #[cfg(test)]
@@ -272,6 +331,7 @@ also not json
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         assert!(is_user_recently_active(&info, 5));
     }
@@ -284,6 +344,7 @@ also not json
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            first_user_message: None,
         };
         assert!(!is_user_recently_active(&info, 5));
     }
@@ -470,9 +531,9 @@ also not json
             entry_type: "assistant".to_string(),
             timestamp: None,
             message: Some(Message {
-                content: vec![ContentBlock::Text {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
                     text: "API Error: 400 something went wrong".to_string(),
-                }],
+                }]),
             }),
             is_api_error_message: false,
         };
@@ -485,10 +546,10 @@ also not json
             entry_type: "assistant".to_string(),
             timestamp: None,
             message: Some(Message {
-                content: vec![ContentBlock::Text {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
                     text: "thinking blocks in the latest assistant message cannot be modified"
                         .to_string(),
-                }],
+                }]),
             }),
             is_api_error_message: false,
         };
@@ -501,9 +562,9 @@ also not json
             entry_type: "assistant".to_string(),
             timestamp: None,
             message: Some(Message {
-                content: vec![ContentBlock::Text {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
                     text: "error type: invalid_request_error".to_string(),
-                }],
+                }]),
             }),
             is_api_error_message: false,
         };
@@ -516,9 +577,9 @@ also not json
             entry_type: "assistant".to_string(),
             timestamp: None,
             message: Some(Message {
-                content: vec![ContentBlock::Text {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
                     text: "This is a normal response about error handling".to_string(),
-                }],
+                }]),
             }),
             is_api_error_message: false,
         };
@@ -542,7 +603,9 @@ also not json
             entry_type: "assistant".to_string(),
             timestamp: None,
             message: Some(Message {
-                content: vec![ContentBlock::ToolUse { name: "test".to_string() }],
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    name: "test".to_string(),
+                }]),
             }),
             is_api_error_message: false,
         };
@@ -642,5 +705,82 @@ also not json
         let info = parse_transcript(file.path()).unwrap();
         // Should successfully parse, capturing only the text block
         assert_eq!(info.last_assistant_output, Some("Done".to_string()));
+    }
+
+    #[test]
+    fn test_is_simple_question_basic() {
+        assert!(is_simple_question("What does this function do?"));
+        assert!(is_simple_question("How do I use this API?"));
+        assert!(is_simple_question("Is this code correct?"));
+    }
+
+    #[test]
+    fn test_is_simple_question_with_whitespace() {
+        assert!(is_simple_question("  What is this?  "));
+        assert!(is_simple_question("\nWhat is this?\n"));
+    }
+
+    #[test]
+    fn test_is_simple_question_not_question() {
+        assert!(!is_simple_question("Fix the bug"));
+        assert!(!is_simple_question("Please refactor this code"));
+        assert!(!is_simple_question("Run the tests!"));
+    }
+
+    #[test]
+    fn test_is_simple_question_multiline() {
+        // Multiline messages are not simple questions
+        assert!(!is_simple_question("What is this?\nAnd also explain it."));
+        assert!(!is_simple_question("Can you help?\nI need to refactor this code."));
+    }
+
+    #[test]
+    fn test_is_simple_question_empty() {
+        assert!(!is_simple_question(""));
+        assert!(!is_simple_question("   "));
+        // Just a question mark IS a valid simple question
+        assert!(is_simple_question("?"));
+    }
+
+    #[test]
+    fn test_parse_transcript_captures_first_user_message() {
+        let content = r#"{"type": "user", "message": {"role": "user", "content": "What does this do?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "It does X"}]}}
+{"type": "user", "message": {"role": "user", "content": "Can you explain more?"}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Should capture the FIRST user message, not the second
+        assert_eq!(info.first_user_message, Some("What does this do?".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transcript_no_user_message() {
+        // Transcript with only assistant messages
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert_eq!(info.first_user_message, None);
+    }
+
+    #[test]
+    fn test_message_content_default() {
+        // Test that MessageContent defaults to empty Blocks
+        // This exercises the Default impl used by serde when content is missing
+        let default = MessageContent::default();
+        assert!(matches!(default, MessageContent::Blocks(blocks) if blocks.is_empty()));
+    }
+
+    #[test]
+    fn test_parse_transcript_message_without_content() {
+        // Test parsing a message where the content field is missing
+        // This exercises the Default impl through serde deserialization
+        let content = r#"{"type": "assistant", "message": {"role": "assistant"}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Should parse successfully, with no output (empty content)
+        assert_eq!(info.last_assistant_output, None);
     }
 }
