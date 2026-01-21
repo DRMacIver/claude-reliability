@@ -18,6 +18,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 BINARY_PATH="${PROJECT_ROOT}/.claude/bin/claude-reliability"
+PLUGIN_SOURCE_FILE="${PROJECT_ROOT}/.claude/plugin-source.txt"
+
+# Check for external plugin source (installed from local checkout)
+PLUGIN_SOURCE=""
+if [[ -f "$PLUGIN_SOURCE_FILE" ]]; then
+    PLUGIN_SOURCE="$(cat "$PLUGIN_SOURCE_FILE")"
+    # Verify the plugin source still exists and is valid
+    if [[ ! -f "${PLUGIN_SOURCE}/Cargo.toml" ]] || ! grep -q 'name = "claude-reliability"' "${PLUGIN_SOURCE}/Cargo.toml" 2>/dev/null; then
+        PLUGIN_SOURCE=""  # Invalid, ignore it
+    fi
+fi
 
 # ============================================================================
 # Function definitions (must be before they're called)
@@ -28,22 +39,53 @@ is_source_repo() {
     [[ -f "${PROJECT_ROOT}/Cargo.toml" ]] && grep -q 'name = "claude-reliability"' "${PROJECT_ROOT}/Cargo.toml" 2>/dev/null
 }
 
+# Check if we have a plugin source (either local repo or external source)
+has_plugin_source() {
+    is_source_repo || [[ -n "$PLUGIN_SOURCE" ]]
+}
+
+# Get the plugin source directory (local repo or external source)
+get_plugin_source_dir() {
+    if is_source_repo; then
+        echo "$PROJECT_ROOT"
+    elif [[ -n "$PLUGIN_SOURCE" ]]; then
+        echo "$PLUGIN_SOURCE"
+    else
+        echo ""
+    fi
+}
+
 # Check if source files are newer than the binary
 source_is_newer() {
+    local source_dir
+    source_dir="$(get_plugin_source_dir)"
+
+    if [[ -z "$source_dir" ]]; then
+        return 1  # No source, can't be newer
+    fi
+
     if [[ ! -x "$BINARY_PATH" ]]; then
         return 0  # No binary, need to build
     fi
 
     # Check if any Rust source files are newer than the binary
     local newer_files
-    newer_files=$(find "${PROJECT_ROOT}/src" -name '*.rs' -newer "$BINARY_PATH" 2>/dev/null | head -1)
+    newer_files=$(find "${source_dir}/src" -name '*.rs' -newer "$BINARY_PATH" 2>/dev/null | head -1)
     if [[ -n "$newer_files" ]]; then
         return 0  # Source is newer
     fi
 
     # Also check Cargo.toml for dependency changes
-    if [[ "${PROJECT_ROOT}/Cargo.toml" -nt "$BINARY_PATH" ]]; then
+    if [[ "${source_dir}/Cargo.toml" -nt "$BINARY_PATH" ]]; then
         return 0
+    fi
+
+    # Check templates directory too
+    if [[ -d "${source_dir}/templates" ]]; then
+        newer_files=$(find "${source_dir}/templates" -type f -newer "$BINARY_PATH" 2>/dev/null | head -1)
+        if [[ -n "$newer_files" ]]; then
+            return 0
+        fi
     fi
 
     return 1  # Binary is up to date
@@ -146,14 +188,15 @@ install_rust() {
 
 # Try to build from source
 build_from_source() {
-    echo "Building claude-reliability from source..." >&2
+    local source_dir
+    source_dir="$(get_plugin_source_dir)"
 
-    cd "$PROJECT_ROOT"
-
-    if command -v just >/dev/null 2>&1 && [[ -f "justfile" ]]; then
-        just update-my-hooks >&2
-        return $?
+    if [[ -z "$source_dir" ]]; then
+        echo "No source directory available for building" >&2
+        return 1
     fi
+
+    echo "Building claude-reliability from source (${source_dir})..." >&2
 
     # Install Rust if not available
     if ! command -v cargo >/dev/null 2>&1; then
@@ -163,14 +206,22 @@ build_from_source() {
         fi
     fi
 
-    if [[ -f "Cargo.toml" ]]; then
-        cargo build --release --features cli >&2
-        mkdir -p .claude/bin
-        cp target/release/claude-reliability .claude/bin/
-        chmod +x .claude/bin/claude-reliability
-        return $?
+    # Build using cargo
+    if ! cargo build --release --features cli --manifest-path "${source_dir}/Cargo.toml" >&2; then
+        echo "Build failed" >&2
+        return 1
     fi
 
+    # Copy the built binary to the project's .claude/bin
+    local built_binary="${source_dir}/target/release/claude-reliability"
+    if [[ -x "$built_binary" ]]; then
+        mkdir -p "${PROJECT_ROOT}/.claude/bin"
+        cp "$built_binary" "$BINARY_PATH"
+        chmod +x "$BINARY_PATH"
+        return 0
+    fi
+
+    echo "Built binary not found at ${built_binary}" >&2
     return 1
 }
 
@@ -178,8 +229,8 @@ build_from_source() {
 # Main logic
 # ============================================================================
 
-# In the source repo, check if we need to rebuild due to source changes
-if is_source_repo && source_is_newer; then
+# Check if we have a plugin source and need to rebuild due to source changes
+if has_plugin_source && source_is_newer; then
     echo "Source files changed, rebuilding..." >&2
     if build_from_source; then
         if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
@@ -214,8 +265,8 @@ if [[ -n "$artifact_name" ]]; then
     fi
 fi
 
-# Fall back to building from source (only works in the source repo)
-if build_from_source; then
+# Fall back to building from source (only works if we have plugin source)
+if has_plugin_source && build_from_source; then
     if [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1; then
         echo "$BINARY_PATH"
         exit 0

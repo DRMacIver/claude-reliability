@@ -24,6 +24,14 @@ REPO="DRMacIver/claude-reliability"
 GITHUB_API="https://api.github.com"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 
+# Get the directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Check if we're running from a local checkout (has Cargo.toml with our crate)
+LOCAL_CHECKOUT=""
+if [[ -f "${SCRIPT_DIR}/../Cargo.toml" ]] && grep -q 'name = "claude-reliability"' "${SCRIPT_DIR}/../Cargo.toml" 2>/dev/null; then
+    LOCAL_CHECKOUT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -113,15 +121,26 @@ download() {
     fi
 }
 
-# Download and extract the binary
+# Download and extract the binary (or set up for local build)
 install_binary() {
     local target_dir="$1"
     local artifact_name="$2"
     local version="$3"
     local version_num="${version#v}"  # Remove 'v' prefix
 
-    local download_url="https://github.com/${REPO}/releases/download/${version}/claude-reliability-${version_num}-${artifact_name}.tar.gz"
     local bin_dir="${target_dir}/.claude/bin"
+    mkdir -p "$bin_dir"
+
+    # If installing from a local checkout, record the source path for rebuild-on-hook
+    if [[ -n "$LOCAL_CHECKOUT" ]]; then
+        log_info "Local checkout detected at ${LOCAL_CHECKOUT}"
+        log_info "Binary will be built on first hook invocation"
+        echo "$LOCAL_CHECKOUT" > "${target_dir}/.claude/plugin-source.txt"
+        log_info "Plugin source path saved to .claude/plugin-source.txt"
+        return 0
+    fi
+
+    local download_url="https://github.com/${REPO}/releases/download/${version}/claude-reliability-${version_num}-${artifact_name}.tar.gz"
     local tmp_dir
 
     tmp_dir=$(mktemp -d)
@@ -131,7 +150,6 @@ install_binary() {
     download "$download_url" "${tmp_dir}/release.tar.gz"
 
     log_info "Extracting binary..."
-    mkdir -p "$bin_dir"
     tar -xzf "${tmp_dir}/release.tar.gz" -C "$tmp_dir"
     mv "${tmp_dir}/claude-reliability" "${bin_dir}/claude-reliability"
     chmod +x "${bin_dir}/claude-reliability"
@@ -145,7 +163,19 @@ install_binary() {
     log_info "Binary installed to ${bin_dir}/claude-reliability"
 }
 
-# Download hook scripts from the repository
+# Copy a file from local checkout or download from GitHub
+copy_or_download() {
+    local rel_path="$1"
+    local dest_path="$2"
+
+    if [[ -n "$LOCAL_CHECKOUT" ]]; then
+        cp "${LOCAL_CHECKOUT}/${rel_path}" "$dest_path"
+    else
+        download "${RAW_URL}/${rel_path}" "$dest_path"
+    fi
+}
+
+# Install hook scripts (copy from local checkout or download from repository)
 install_scripts() {
     local target_dir="$1"
     local scripts_dir="${target_dir}/.claude/scripts"
@@ -154,33 +184,38 @@ install_scripts() {
 
     mkdir -p "$scripts_dir" "$hooks_dir" "$commands_dir"
 
-    log_info "Downloading hook scripts..."
+    if [[ -n "$LOCAL_CHECKOUT" ]]; then
+        log_info "Copying hook scripts from local checkout..."
+    else
+        log_info "Downloading hook scripts..."
+    fi
 
     # Core scripts
-    download "${RAW_URL}/.claude/scripts/ensure-local-binary.sh" "${scripts_dir}/ensure-local-binary.sh"
-    download "${RAW_URL}/.claude/scripts/run-py.sh" "${scripts_dir}/run-py.sh"
-    download "${RAW_URL}/.claude/scripts/startup-hook.py" "${scripts_dir}/startup-hook.py"
-    download "${RAW_URL}/.claude/scripts/precompact-beads-hook.py" "${scripts_dir}/precompact-beads-hook.py"
-    download "${RAW_URL}/.claude/scripts/quality-check.sh" "${scripts_dir}/quality-check.sh"
-    download "${RAW_URL}/.claude/scripts/jkw-stop-hook.py" "${scripts_dir}/jkw-stop-hook.py"
-    download "${RAW_URL}/.claude/scripts/code-review-hook.py" "${scripts_dir}/code-review-hook.py"
+    copy_or_download ".claude/scripts/ensure-local-binary.sh" "${scripts_dir}/ensure-local-binary.sh"
+    copy_or_download ".claude/scripts/run-py.sh" "${scripts_dir}/run-py.sh"
+    copy_or_download ".claude/scripts/startup-hook.py" "${scripts_dir}/startup-hook.py"
+    copy_or_download ".claude/scripts/precompact-beads-hook.py" "${scripts_dir}/precompact-beads-hook.py"
+    copy_or_download ".claude/scripts/quality-check.sh" "${scripts_dir}/quality-check.sh"
+    copy_or_download ".claude/scripts/jkw-stop-hook.py" "${scripts_dir}/jkw-stop-hook.py"
+    copy_or_download ".claude/scripts/code-review-hook.py" "${scripts_dir}/code-review-hook.py"
 
     # Hook wrappers
-    download "${RAW_URL}/.claude/scripts/hooks/stop.sh" "${hooks_dir}/stop.sh"
-    download "${RAW_URL}/.claude/scripts/hooks/pre-tool-use-no-verify.sh" "${hooks_dir}/pre-tool-use-no-verify.sh"
-    download "${RAW_URL}/.claude/scripts/hooks/pre-tool-use-code-review.sh" "${hooks_dir}/pre-tool-use-code-review.sh"
+    copy_or_download ".claude/scripts/hooks/stop.sh" "${hooks_dir}/stop.sh"
+    copy_or_download ".claude/scripts/hooks/pre-tool-use-no-verify.sh" "${hooks_dir}/pre-tool-use-no-verify.sh"
+    copy_or_download ".claude/scripts/hooks/pre-tool-use-code-review.sh" "${hooks_dir}/pre-tool-use-code-review.sh"
+    copy_or_download ".claude/scripts/hooks/user-prompt-submit.sh" "${hooks_dir}/user-prompt-submit.sh"
 
     # Make scripts executable
     chmod +x "${scripts_dir}"/*.sh "${scripts_dir}"/*.py 2>/dev/null || true
     chmod +x "${hooks_dir}"/*.sh
 
     # Commands (slash commands)
-    download "${RAW_URL}/.claude/commands/just-keep-working.md" "${commands_dir}/just-keep-working.md"
-    download "${RAW_URL}/.claude/commands/cancel-just-keep-working.md" "${commands_dir}/cancel-just-keep-working.md"
-    download "${RAW_URL}/.claude/commands/quality-check.md" "${commands_dir}/quality-check.md"
-    download "${RAW_URL}/.claude/commands/checkpoint.md" "${commands_dir}/checkpoint.md"
-    download "${RAW_URL}/.claude/commands/self-review.md" "${commands_dir}/self-review.md"
-    download "${RAW_URL}/.claude/commands/ideate.md" "${commands_dir}/ideate.md"
+    copy_or_download ".claude/commands/just-keep-working.md" "${commands_dir}/just-keep-working.md"
+    copy_or_download ".claude/commands/cancel-just-keep-working.md" "${commands_dir}/cancel-just-keep-working.md"
+    copy_or_download ".claude/commands/quality-check.md" "${commands_dir}/quality-check.md"
+    copy_or_download ".claude/commands/checkpoint.md" "${commands_dir}/checkpoint.md"
+    copy_or_download ".claude/commands/self-review.md" "${commands_dir}/self-review.md"
+    copy_or_download ".claude/commands/ideate.md" "${commands_dir}/ideate.md"
 
     log_info "Scripts installed to ${scripts_dir}"
 }
@@ -235,21 +270,28 @@ main() {
 
     log_info "Installing claude-reliability to ${target_dir}"
 
-    # Detect platform
-    local artifact_name
-    artifact_name=$(detect_platform)
-    log_info "Detected platform: ${artifact_name}"
-
-    # Get latest version
-    local version
-    version=$(get_latest_version)
-    log_info "Latest version: ${version}"
-
     # Create .claude directory
     mkdir -p "${target_dir}/.claude"
 
-    # Install components
-    install_binary "$target_dir" "$artifact_name" "$version"
+    if [[ -n "$LOCAL_CHECKOUT" ]]; then
+        log_info "Installing from local checkout: ${LOCAL_CHECKOUT}"
+        # For local installs, just set up the plugin source path
+        install_binary "$target_dir" "" ""
+    else
+        # Detect platform
+        local artifact_name
+        artifact_name=$(detect_platform)
+        log_info "Detected platform: ${artifact_name}"
+
+        # Get latest version
+        local version
+        version=$(get_latest_version)
+        log_info "Latest version: ${version}"
+
+        # Install binary from release
+        install_binary "$target_dir" "$artifact_name" "$version"
+    fi
+
     install_scripts "$target_dir"
     install_settings "$target_dir"
 
@@ -260,6 +302,13 @@ main() {
     echo "  1. Review .claude/settings.json to ensure hooks are configured correctly"
     echo "  2. Add .claude/bin/ to .gitignore (binaries should not be committed)"
     echo "  3. Commit the .claude/ directory (excluding binaries)"
+    if [[ -n "$LOCAL_CHECKOUT" ]]; then
+        echo ""
+        echo "Local checkout mode:"
+        echo "  - Binary will be built automatically on first hook invocation"
+        echo "  - Source changes in ${LOCAL_CHECKOUT} will trigger rebuilds"
+        echo "  - Plugin source path saved to .claude/plugin-source.txt"
+    fi
     echo ""
     echo "The plugin provides:"
     echo "  - Pre-commit code review hook"
