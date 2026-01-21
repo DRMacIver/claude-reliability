@@ -95,6 +95,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/session_intro.tera",
         include_str!("../templates/messages/session_intro.tera"),
     );
+    m.insert(
+        "messages/protect_jkw_session.tera",
+        include_str!("../templates/messages/protect_jkw_session.tera"),
+    );
 
     m
 });
@@ -316,6 +320,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[serial_test::serial]
     fn test_init_with_no_templates_dir() {
         reset_cache().unwrap();
         init_templates(Some(Path::new("/nonexistent"))).unwrap();
@@ -328,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_render_with_vars() {
         reset_cache().unwrap();
         init_templates(Some(Path::new("/nonexistent"))).unwrap();
@@ -338,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_filesystem_templates_override_embedded() {
         reset_cache().unwrap();
 
@@ -363,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_render_missing_template_fails() {
         reset_cache().unwrap();
         init_templates(Some(Path::new("/nonexistent"))).unwrap();
@@ -372,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_lazy_init() {
         reset_cache().unwrap();
         // render() should auto-initialize
@@ -382,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_all_embedded_templates_render() {
         // This test verifies that ALL embedded templates can be rendered
         // with sample data. This catches missing variables and syntax errors.
@@ -396,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_init_with_invalid_templates_fails() {
         reset_cache().unwrap();
 
