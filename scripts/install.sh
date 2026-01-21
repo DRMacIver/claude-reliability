@@ -55,9 +55,12 @@ detect_platform() {
                 x86_64|amd64)
                     artifact_name="linux-x86_64"
                     ;;
+                arm64|aarch64)
+                    artifact_name="linux-aarch64"
+                    ;;
                 *)
                     log_error "Unsupported Linux architecture: $arch"
-                    log_error "Currently supported: x86_64"
+                    log_error "Currently supported: x86_64, arm64"
                     exit 1
                     ;;
             esac
