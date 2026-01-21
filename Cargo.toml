@@ -3,7 +3,7 @@ name = "claude-reliability"
 version = "26.121.5"
 edition = "2021"
 rust-version = "1.75"
-description = ""
+description = "A plugin for Claude to improve its reliability through testing infrastructure"
 license = "MIT"
 
 [lib]
