@@ -710,22 +710,41 @@ mod tests {
         assert!(!base.join(WARNING_MARKER_REL).exists());
     }
 
-    // Tests for the wrapper functions that use the current working directory.
-    // These tests depend on the actual workspace having a .beads directory.
+    // Tests for the wrapper functions that use current directory.
+    // These must use #[serial_test::serial] because set_current_dir is not thread-safe.
 
     #[test]
+    #[serial_test::serial]
     fn test_is_beads_available_wrapper() {
-        // This test uses the actual workspace which has a .beads directory
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .beads directory
+        std::fs::create_dir(base.join(".beads")).unwrap();
+
         let mut runner = MockCommandRunner::new();
         runner.set_available("bd");
-        // The wrapper calls is_beads_available_in with Path::new(".")
-        // Since we're in the workspace with .beads, this should return true
-        assert!(is_beads_available(&runner));
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(base).unwrap();
+
+        let result = is_beads_available(&runner);
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert!(result);
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_beads_interaction_wrapper() {
-        // This test uses the actual workspace
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
         let mut runner = MockCommandRunner::new();
         runner.expect(
             "git",
@@ -743,24 +762,36 @@ mod tests {
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
         );
 
-        // Uses the current directory (workspace)
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(base).unwrap();
+
         let status = check_beads_interaction(&runner).unwrap();
-        // No interaction, not already warned (unless marker exists from previous test)
+
+        std::env::set_current_dir(original_dir).unwrap();
+
         assert!(!status.has_interaction);
+        assert!(!status.already_warned);
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_mark_and_clear_beads_warning_wrapper() {
-        // This test uses the actual workspace
-        // First clear any existing warning
-        let _ = clear_beads_warning();
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(base).unwrap();
 
         // Mark warning
         mark_beads_warning_given().unwrap();
-        assert!(std::path::Path::new(WARNING_MARKER_REL).exists());
+        assert!(base.join(WARNING_MARKER_REL).exists());
 
         // Clear warning
         clear_beads_warning().unwrap();
-        assert!(!std::path::Path::new(WARNING_MARKER_REL).exists());
+        assert!(!base.join(WARNING_MARKER_REL).exists());
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 }

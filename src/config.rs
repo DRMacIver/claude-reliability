@@ -1673,6 +1673,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_project_config_save_wrapper() {
         use tempfile::TempDir;
 
