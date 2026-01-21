@@ -38,6 +38,7 @@ detect_platform() {
         Linux)
             case "$arch" in
                 x86_64|amd64) echo "linux-x86_64" ;;
+                arm64|aarch64) echo "linux-aarch64" ;;
                 *) echo "" ;;
             esac
             ;;
@@ -109,5 +110,5 @@ if [[ -n "$artifact_name" ]]; then
 fi
 
 echo "ERROR: Failed to obtain claude-reliability binary" >&2
-echo "Supported platforms: Linux x86_64, macOS ARM64" >&2
+echo "Supported platforms: Linux x86_64, Linux ARM64, macOS ARM64" >&2
 exit 1
