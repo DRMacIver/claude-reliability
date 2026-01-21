@@ -1,8 +1,9 @@
-.cache/
-.devcontainer/.credentials/
-.devcontainer/.ssh/
-.devcontainer/.docker-build-hash
-.claude/jkw-session.local.md
+# claude-reliability managed
+.claude/bin/
+.claude/*.local.md
+.claude/*.local.json
+.claude/*.local
+kw-session.local.md
 .claude/settings.local.json
 .claude/setup.local.md
 .claude/beads-warning-given.local
