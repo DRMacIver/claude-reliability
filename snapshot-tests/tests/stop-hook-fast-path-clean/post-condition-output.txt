@@ -1,0 +1,1 @@
+PASS: Fast path clean exit - no markers created

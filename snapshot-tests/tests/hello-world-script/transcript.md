@@ -27,6 +27,23 @@ Hello world
 
 **Assistant:** Done. I created `hello.sh` with a shebang and an echo command, made it executable, and ran it successfully.
 
+**User:** Stop hook feedback:
+[${CLAUDE_PLUGIN_ROOT}/scripts/hooks/stop.sh]: # Task Completion Check
+
+Before exiting, carefully analyze whether you have fully completed the task.
+
+If you have NOT completed the task:
+  - Continue working to finish it
+
+If you HAVE completed the task:
+  - Provide a clear, concise summary of what was done for the user
+  - Then stop again to exit
+
+
+**Assistant:** I have fully completed the task.
+
+**Summary:** Created `$CLAUDE_PROJECT_DIR/hello.sh` - a shell script that prints "Hello world" - and executed it successfully. The script outputs `Hello world` as expected.
+
 ---
 
 ## Post-Condition Output

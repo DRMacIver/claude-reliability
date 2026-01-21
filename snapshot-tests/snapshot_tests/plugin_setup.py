@@ -104,6 +104,17 @@ def install_plugin(target_dir: Path, home_dir: Path | None = None) -> None:
     if not settings_dir.exists():
         settings_dir.write_text('{"enabledPlugins": ["claude-reliability"]}')
 
+    # Run ensure-gitignore to create .gitignore entries
+    # This is normally done by the session-start hook, but during replay no hooks run
+    binary_path = bin_dir / "claude-reliability"
+    if binary_path.exists():
+        import subprocess
+        subprocess.run(
+            [str(binary_path), "ensure-gitignore"],
+            cwd=target_dir,
+            capture_output=True,
+        )
+
 
 def install_plugin_binary_only(target_dir: Path) -> None:
     """Install just the claude-reliability binary (no hooks).

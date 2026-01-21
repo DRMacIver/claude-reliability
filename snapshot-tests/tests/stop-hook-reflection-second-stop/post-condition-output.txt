@@ -1,0 +1,2 @@
+INFO: Reflection marker was cleared (recording mode)
+PASS: Test completed successfully

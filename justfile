@@ -30,7 +30,7 @@ build:
 build-release:
 	cargo build --release
 
-check: lint test-cov
+check: lint test-cov snapshot-tests
 
 check-bin-size:
 	#!/usr/bin/env bash

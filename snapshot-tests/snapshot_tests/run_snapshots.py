@@ -35,12 +35,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from enum import Enum, auto
+
 from snapshot_tests.placeholder import PlaceholderRegistry
 from snapshot_tests.transcript import parse_transcript, extract_tool_calls, get_project_directory
 from snapshot_tests.simulator import ToolSimulator
 from snapshot_tests.compile_transcript import compile_transcript
 from snapshot_tests.plugin_setup import install_plugin
 from snapshot_tests.pty_runner import run_claude_pty
+
+
+class ErrorCategory(Enum):
+    """Categories of test failures with associated remediation actions."""
+
+    NO_TRANSCRIPT = auto()  # No transcript.jsonl exists
+    EXECUTION_ERROR = auto()  # Tool failed during replay
+    DIRECTORY_MISMATCH = auto()  # Write/Edit produced different files
+    POST_CONDITION_FAILED = auto()  # Post-condition script failed
+    RECORDING_FAILED = auto()  # Claude Code failed during recording
+    OTHER = auto()  # Generic/unknown error
 
 
 # Patterns for paths to exclude from directory snapshots
@@ -53,6 +66,9 @@ SNAPSHOT_EXCLUDE_PATTERNS = {
     ".pyo",
     "target",  # Rust build directory
     "Cargo.lock",  # Varies between builds
+    ".coverage",  # Created by pytest during recording but not replay
+    ".pytest_cache",  # Pytest cache varies between runs
+    ".gitignore",  # Modified by plugin setup, varies between recording and replay
 }
 
 
@@ -200,8 +216,44 @@ class TestResult:
     name: str
     passed: bool
     error: str | None = None
+    error_category: ErrorCategory | None = None
     output: str = ""
     post_condition_output: str = ""
+
+
+def get_suggestion_for_error(category: ErrorCategory | None, test_name: str) -> str | None:
+    """Get an actionable suggestion based on error category.
+
+    Args:
+        category: The error category
+        test_name: Name of the test that failed
+
+    Returns:
+        A helpful suggestion string, or None if no specific suggestion
+    """
+    if category == ErrorCategory.NO_TRANSCRIPT:
+        return f"  -> Run: just snapshot-tests-record {test_name}"
+    elif category == ErrorCategory.DIRECTORY_MISMATCH:
+        return (
+            "  -> If changes are expected, review them and run:\n"
+            f"     just snapshot-tests --save-snapshot {test_name}"
+        )
+    elif category == ErrorCategory.EXECUTION_ERROR:
+        return (
+            "  -> The recorded tool call could not be replayed. This may indicate:\n"
+            "     - Test setup.py doesn't match original environment\n"
+            "     - Files referenced in transcript are missing\n"
+            f"     Consider re-recording: just snapshot-tests-record {test_name}"
+        )
+    elif category == ErrorCategory.POST_CONDITION_FAILED:
+        return "  -> Check the post-condition.py script for your test"
+    elif category == ErrorCategory.RECORDING_FAILED:
+        return (
+            "  -> Claude Code failed during recording. Check:\n"
+            "     - Claude Code is installed and authenticated\n"
+            "     - The test prompt in story.md is valid"
+        )
+    return None
 
 
 def find_tests(tests_dir: Path, selected: list[str] | None = None) -> list[TestConfig]:
@@ -409,6 +461,7 @@ def run_replay(
             name=test.name,
             passed=False,
             error="No transcript.jsonl found",
+            error_category=ErrorCategory.NO_TRANSCRIPT,
         )
 
     # Parse transcript
@@ -472,6 +525,7 @@ def run_replay(
             name=test.name,
             passed=False,
             error="\n".join(execution_errors),
+            error_category=ErrorCategory.EXECUTION_ERROR,
         )
 
     # Compare directory snapshot to ensure file states are byte-wise identical
@@ -490,6 +544,7 @@ def run_replay(
                 passed=False,
                 error="Directory state mismatch (Write/Edit produced different files):\n"
                 + "\n".join(snapshot_diffs[:5]),  # Limit to first 5 diffs
+                error_category=ErrorCategory.DIRECTORY_MISMATCH,
             )
         if verbose:
             print(f"  Directory snapshot verified ({len(actual_snapshot)} files match)")
@@ -531,6 +586,7 @@ def run_replay(
                 name=test.name,
                 passed=False,
                 error=error_msg,
+                error_category=ErrorCategory.POST_CONDITION_FAILED,
                 post_condition_output=e.stdout or "",
             )
 
@@ -606,6 +662,7 @@ def run_record(
             name=test.name,
             passed=False,
             error="No prompt found in story.md (need ## Prompt section with ```code block```)",
+            error_category=ErrorCategory.OTHER,
         )
 
     if verbose:
@@ -640,6 +697,7 @@ def run_record(
             name=test.name,
             passed=False,
             error=f"Claude Code PTY error: {pty_result.error}",
+            error_category=ErrorCategory.RECORDING_FAILED,
         )
 
     if verbose:
@@ -671,6 +729,7 @@ def run_record(
             name=test.name,
             passed=False,
             error=f"Transcript not found for session {session_id}",
+            error_category=ErrorCategory.RECORDING_FAILED,
         )
 
     # Capture directory snapshot for replay verification
@@ -714,6 +773,7 @@ def run_record(
                 name=test.name,
                 passed=False,
                 error=error_msg,
+                error_category=ErrorCategory.POST_CONDITION_FAILED,
                 post_condition_output=e.stdout or "",
             )
 
@@ -761,6 +821,7 @@ def run_test(
                     name=test.name,
                     passed=False,
                     error=f"Unknown mode: {mode}",
+                    error_category=ErrorCategory.OTHER,
                 )
 
         except Exception as e:
@@ -768,6 +829,7 @@ def run_test(
                 name=test.name,
                 passed=False,
                 error=str(e),
+                error_category=ErrorCategory.OTHER,
             )
         finally:
             # Clean up directories created outside the temp dir
@@ -875,6 +937,9 @@ def main():
             print("  PASS")
         else:
             print(f"  FAIL: {result.error}")
+            suggestion = get_suggestion_for_error(result.error_category, result.name)
+            if suggestion:
+                print(suggestion)
 
         print()
 
@@ -883,7 +948,66 @@ def main():
     failed = len(results) - passed
 
     print(f"Results: {passed} passed, {failed} failed")
-    print()
+
+    # Show actionable summary if there are failures
+    if failed > 0:
+        print()
+        print("=" * 60)
+        print("FAILED TESTS - SUGGESTED ACTIONS:")
+        print("=" * 60)
+
+        # Group failures by category for cleaner output
+        failures_by_category: dict[ErrorCategory | None, list[TestResult]] = {}
+        for r in results:
+            if not r.passed:
+                cat = r.error_category
+                if cat not in failures_by_category:
+                    failures_by_category[cat] = []
+                failures_by_category[cat].append(r)
+
+        # Show suggestions by category
+        if ErrorCategory.NO_TRANSCRIPT in failures_by_category:
+            tests_list = [r.name for r in failures_by_category[ErrorCategory.NO_TRANSCRIPT]]
+            print()
+            print(f"Missing transcripts ({len(tests_list)} test(s)):")
+            for name in tests_list:
+                print(f"  - {name}")
+            print()
+            print("  Record transcripts with:")
+            print(f"    just snapshot-tests-record {' '.join(tests_list)}")
+
+        if ErrorCategory.DIRECTORY_MISMATCH in failures_by_category:
+            tests_list = [r.name for r in failures_by_category[ErrorCategory.DIRECTORY_MISMATCH]]
+            print()
+            print(f"Directory snapshot mismatches ({len(tests_list)} test(s)):")
+            for name in tests_list:
+                print(f"  - {name}")
+            print()
+            print("  After reviewing the changes, save new snapshots with:")
+            print(f"    just snapshot-tests --save-snapshot {' '.join(tests_list)}")
+
+        if ErrorCategory.EXECUTION_ERROR in failures_by_category:
+            tests_list = [r.name for r in failures_by_category[ErrorCategory.EXECUTION_ERROR]]
+            print()
+            print(f"Execution errors ({len(tests_list)} test(s)):")
+            for name in tests_list:
+                print(f"  - {name}")
+            print()
+            print("  Re-record transcripts with:")
+            print(f"    just snapshot-tests-record {' '.join(tests_list)}")
+
+        if ErrorCategory.POST_CONDITION_FAILED in failures_by_category:
+            tests_list = [r.name for r in failures_by_category[ErrorCategory.POST_CONDITION_FAILED]]
+            print()
+            print(f"Post-condition failures ({len(tests_list)} test(s)):")
+            for name in tests_list:
+                print(f"  - {name}")
+            print()
+            print("  Check the post-condition.py scripts for these tests")
+
+        print()
+    else:
+        print()
 
     # Compile transcripts to markdown
     compile_all_transcripts(tests, args.verbose)
