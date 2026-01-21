@@ -39,3 +39,11 @@ Stop if no progress for 5 iterations (same issues, no closes).
 - Staleness detected
 - User intervention required
 - Quality gates failing repeatedly
+
+## Session File Cleanup
+
+**Do not manually delete session files** (`.claude/jkw-session.local.md` or
+`.claude/jkw-state.local.yaml`). The stop hook automatically cleans up these
+files when JKW mode ends normally (via exit phrase or staleness detection).
+
+If you need to cancel JKW mode, use `/cancel-just-keep-working` instead.
