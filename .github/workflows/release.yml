@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'templates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
 
