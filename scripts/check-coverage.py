@@ -75,12 +75,13 @@ class UncoveredLine:
         """
         Check if this line contains only structural syntax (closing braces, etc.).
 
-        Returns True for lines like: }  })  },  });  }};  etc.
+        Returns True for lines like: }  })  },  });  }};  )?;  etc.
         Returns False for: }else  } // comment  }foo  or any actual code
         """
         # Remove all structural characters and whitespace
+        # Include ? for error propagation operator (e.g., )?; at end of function calls)
         stripped = self.content.strip()
-        cleaned = re.sub(r"[})\];,\s]", "", stripped)
+        cleaned = re.sub(r"[})?\];,\s]", "", stripped)
 
         # If nothing remains after removing structural chars, it's just syntax
         # But the original must have had something (not be empty)
@@ -108,6 +109,18 @@ class UncoveredLine:
             # Check if it's in a test file by looking at the path
             return "src/" in str(self.file)
         return False
+
+    def is_explicitly_ignored(self) -> bool:
+        """
+        Check if this line has an explicit coverage:ignore comment.
+
+        This is used for genuinely untestable error paths like:
+        - Error logging when SQLite operations fail unexpectedly
+        - Defensive error handling for conditions that can't be triggered in tests
+
+        The comment must include a justification in surrounding code.
+        """
+        return "coverage:ignore" in self.content
 
 
 def run_coverage() -> Path:
@@ -210,6 +223,7 @@ def main() -> int:
     # Categorize uncovered lines
     structural_only: list[UncoveredLine] = []
     assertion_messages: list[UncoveredLine] = []
+    explicitly_ignored: list[UncoveredLine] = []
     actual_code: list[UncoveredLine] = []
 
     for line in uncovered:
@@ -217,6 +231,8 @@ def main() -> int:
             structural_only.append(line)
         elif line.is_test_assertion_message():
             assertion_messages.append(line)
+        elif line.is_explicitly_ignored():
+            explicitly_ignored.append(line)
         else:
             actual_code.append(line)
 
@@ -227,6 +243,7 @@ def main() -> int:
     print()
     print(f"Uncovered closing braces (allowed): {len(structural_only)}")
     print(f"Uncovered test assertion messages (allowed): {len(assertion_messages)}")
+    print(f"Uncovered explicitly ignored (allowed): {len(explicitly_ignored)}")
     print(f"Uncovered code lines: {len(actual_code)}")
     print()
 

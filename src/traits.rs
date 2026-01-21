@@ -1,6 +1,8 @@
 //! Core traits for testability and abstraction.
 
 use crate::error::Result;
+use crate::session::SessionConfig;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Output from a command execution.
@@ -116,4 +118,62 @@ pub trait SubAgent {
         files: &[String],
         review_guide: Option<&str>,
     ) -> Result<(bool, String)>;
+}
+
+/// Trait for persistent state storage.
+///
+/// This trait abstracts state storage operations for testability.
+/// The production implementation uses `SQLite`, while tests use an in-memory mock.
+pub trait StateStore {
+    /// Get the current session state (JKW mode).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn get_session_state(&self) -> Result<Option<SessionConfig>>;
+
+    /// Set the session state (JKW mode).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn set_session_state(&self, state: &SessionConfig) -> Result<()>;
+
+    /// Clear the session state (JKW mode ended).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn clear_session_state(&self) -> Result<()>;
+
+    /// Get the issue snapshot (set of issue IDs).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn get_issue_snapshot(&self) -> Result<HashSet<String>>;
+
+    /// Set the issue snapshot (list of issue IDs).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn set_issue_snapshot(&self, issues: &[String]) -> Result<()>;
+
+    /// Check if a boolean marker is set.
+    fn has_marker(&self, name: &str) -> bool;
+
+    /// Set a boolean marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn set_marker(&self, name: &str) -> Result<()>;
+
+    /// Clear a boolean marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    fn clear_marker(&self, name: &str) -> Result<()>;
 }

@@ -20,10 +20,12 @@
 
 use crate::hooks::{HookInput, PreToolUseOutput};
 use crate::session::{
-    clear_jkw_setup_required, is_jkw_setup_required, jkw_session_file_exists,
-    set_jkw_setup_required, SESSION_NOTES_PATH,
+    clear_jkw_setup_required_with_store, is_jkw_setup_required_with_store, jkw_session_file_exists,
+    set_jkw_setup_required_with_store, SESSION_NOTES_PATH,
 };
+use crate::storage::SqliteStore;
 use crate::templates;
+use crate::traits::StateStore;
 use std::path::Path;
 use tera::Context;
 
@@ -58,6 +60,30 @@ fn is_jkw_session_path(file_path: &str) -> bool {
 /// `include_str!` and verified by `test_all_embedded_templates_render`, so
 /// this should only occur if a template has a bug that escaped tests.
 pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutput {
+    // Create a store for this request
+    let store = match SqliteStore::new(base_dir) {
+        Ok(s) => {
+            // Migrate from old files if needed
+            let _ = s.migrate_from_files(base_dir);
+            s
+        }
+        Err(e) => {
+            // If we can't create the store, log a warning and skip setup enforcement
+            eprintln!("Warning: Failed to open state store: {e}");
+            return PreToolUseOutput::allow(None);
+        }
+    };
+    run_jkw_setup_hook_with_store(input, base_dir, &store)
+}
+
+/// Run the JKW setup enforcement hook with a provided store.
+///
+/// This variant is useful for testing with mock stores.
+pub fn run_jkw_setup_hook_with_store(
+    input: &HookInput,
+    base_dir: &Path,
+    store: &dyn StateStore,
+) -> PreToolUseOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
     let tool_input = input.tool_input.as_ref();
 
@@ -68,7 +94,7 @@ pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutpu
                 // JKW is being invoked - check if session file exists
                 if !jkw_session_file_exists(base_dir) {
                     // Set the marker to enforce setup
-                    if let Err(e) = set_jkw_setup_required(base_dir) {
+                    if let Err(e) = set_jkw_setup_required_with_store(store) {
                         eprintln!("Warning: Failed to set JKW setup marker: {e}");
                     }
                 }
@@ -79,11 +105,11 @@ pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutpu
     }
 
     // Check if JKW setup is required
-    if is_jkw_setup_required(base_dir) {
+    if is_jkw_setup_required_with_store(store) {
         // Check if session file now exists
         if jkw_session_file_exists(base_dir) {
             // Session file created - clear the marker
-            if let Err(e) = clear_jkw_setup_required(base_dir) {
+            if let Err(e) = clear_jkw_setup_required_with_store(store) {
                 eprintln!("Warning: Failed to clear JKW setup marker: {e}");
             }
             return PreToolUseOutput::allow(None);
@@ -112,6 +138,7 @@ pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutpu
 mod tests {
     use super::*;
     use crate::hooks::ToolInput;
+    use crate::session::{is_jkw_setup_required, set_jkw_setup_required};
     use std::fs;
     use tempfile::TempDir;
 
@@ -350,54 +377,54 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_marker_fails_gracefully() {
-        // Use a directory where we can set the marker but then make it non-removable
-        // This is tricky on Unix. Instead, we'll use a non-existent base where
-        // is_jkw_setup_required returns false but clear would fail if attempted.
-        // Actually, since is_jkw_setup_required checks existence first, the
-        // clear path is only taken when the marker exists.
-
-        // For this test, we need to manually create a scenario where
-        // clear_jkw_setup_required fails. We can do this by making the
-        // marker file read-only and the directory read-only.
+    fn test_clear_marker_fails_gracefully_with_failing_store() {
+        // Use FailingClearMarkerStore to simulate storage failure on clear
+        use crate::storage::markers;
+        use crate::testing::{FailingClearMarkerStore, MockStateStore};
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create the marker
-        set_jkw_setup_required(base).unwrap();
-
-        // Make the .claude directory read-only (so we can't delete files)
-        let claude_dir = base.join(".claude");
-        let original_perms = fs::metadata(&claude_dir).unwrap().permissions();
-        let mut read_only = original_perms.clone();
-        read_only.set_readonly(true);
-        fs::set_permissions(&claude_dir, read_only).unwrap();
-
         // Create the session file so the hook tries to clear the marker
-        // But wait - we can't create files in a read-only directory.
-        // Let's restore permissions first.
-        fs::set_permissions(&claude_dir, original_perms.clone()).unwrap();
         let session_path = base.join(SESSION_NOTES_PATH);
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
         fs::write(&session_path, "# Session").unwrap();
 
-        // Now make it read-only again
-        fs::set_permissions(&claude_dir, {
-            let mut p = original_perms.clone();
-            p.set_readonly(true);
-            p
-        })
-        .unwrap();
+        // Create a store that has the marker but fails on clear
+        let inner_store = MockStateStore::new();
+        inner_store.set_marker(markers::JKW_SETUP_REQUIRED).unwrap();
 
-        // Try a tool call - this should trigger clear_jkw_setup_required which will fail
+        let failing_store = FailingClearMarkerStore::new(inner_store, "simulated failure");
+
+        // Try a tool call - the marker is set, session file exists, so it will
+        // try to clear the marker (which will fail)
         let input = make_input("Write", None, Some("src/main.rs"));
-        let output = run_jkw_setup_hook(&input, base);
-
-        // Restore permissions for cleanup
-        fs::set_permissions(&claude_dir, original_perms).unwrap();
+        let output = run_jkw_setup_hook_with_store(&input, base, &failing_store);
 
         // The hook should still allow (because session file exists) even though
         // clear failed
+        assert!(output.hook_specific_output.permission_decision == "allow");
+    }
+
+    #[test]
+    fn test_set_marker_fails_gracefully_with_failing_store() {
+        // Use FailingSetMarkerStore to simulate storage failure on set_marker
+        use crate::testing::{FailingSetMarkerStore, MockStateStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // No session file exists, so invoking JKW will try to set the marker
+
+        // Create a store that fails on set_marker
+        let inner_store = MockStateStore::new();
+        let failing_store = FailingSetMarkerStore::new(inner_store, "simulated set failure");
+
+        // Invoke JKW skill - should try to set marker (which will fail)
+        let input = make_input("Skill", Some("just-keep-working"), None);
+        let output = run_jkw_setup_hook_with_store(&input, base, &failing_store);
+
+        // The hook should still allow the skill call even though marker setting failed
         assert!(output.hook_specific_output.permission_decision == "allow");
     }
 }

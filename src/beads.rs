@@ -6,18 +6,26 @@
 //! 2. A `.beads/` directory exists in the repository
 
 use crate::error::Result;
-use crate::traits::CommandRunner;
+use crate::storage::{markers, SqliteStore};
+use crate::traits::{CommandRunner, StateStore};
 use std::collections::HashSet;
 use std::path::Path;
 
 /// Directory containing beads data.
 pub const BEADS_DIR: &str = ".beads";
 
-/// Marker file for tracking beads warning state (relative to base).
+/// Marker file for tracking beads warning state (legacy, for migration).
 const WARNING_MARKER_REL: &str = ".claude/beads-warning-given.local";
 
-/// Marker file for tracking beads warning state.
+/// Marker file for tracking beads warning state (legacy, for migration).
 pub const BEADS_WARNING_MARKER: &str = ".claude/beads-warning-given.local";
+
+/// Get or create a `SQLite` store for the given base directory.
+fn get_store(base_dir: &Path) -> Result<SqliteStore> {
+    let store = SqliteStore::new(base_dir)?;
+    store.migrate_from_files(base_dir)?;
+    Ok(store)
+}
 
 /// Check if beads is available (CLI present and repo has .beads/).
 pub fn is_beads_available(runner: &dyn CommandRunner) -> bool {
@@ -62,8 +70,21 @@ pub fn check_beads_interaction_in(
     runner: &dyn CommandRunner,
     base_dir: &Path,
 ) -> Result<BeadsInteractionStatus> {
-    let marker_path = base_dir.join(WARNING_MARKER_REL);
-    let already_warned = marker_path.exists();
+    let store = get_store(base_dir)?;
+    check_beads_interaction_in_with_store(runner, base_dir, &store)
+}
+
+/// Check if the agent has interacted with beads using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if git commands fail.
+pub fn check_beads_interaction_in_with_store(
+    runner: &dyn CommandRunner,
+    base_dir: &Path,
+    store: &dyn StateStore,
+) -> Result<BeadsInteractionStatus> {
+    let already_warned = store.has_marker(markers::BEADS_WARNING);
 
     // Check for uncommitted beads changes (staged or unstaged)
     let beads_diff = runner.run("git", &["diff", "--name-only", "--", ".beads/"], None)?;
@@ -72,6 +93,9 @@ pub fn check_beads_interaction_in(
 
     if !beads_diff.stdout.trim().is_empty() || !beads_staged.stdout.trim().is_empty() {
         // Beads was modified - clear any warning marker
+        let _ = store.clear_marker(markers::BEADS_WARNING);
+        // Also clean up legacy file if it exists
+        let marker_path = base_dir.join(WARNING_MARKER_REL);
         if marker_path.exists() {
             let _ = std::fs::remove_file(&marker_path);
         }
@@ -84,6 +108,9 @@ pub fn check_beads_interaction_in(
 
     if !recent_beads.stdout.trim().is_empty() {
         // Recent beads activity found - clear any warning marker
+        let _ = store.clear_marker(markers::BEADS_WARNING);
+        // Also clean up legacy file if it exists
+        let marker_path = base_dir.join(WARNING_MARKER_REL);
         if marker_path.exists() {
             let _ = std::fs::remove_file(&marker_path);
         }
@@ -97,7 +124,7 @@ pub fn check_beads_interaction_in(
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be written.
+/// Returns an error if the database operation fails.
 pub fn mark_beads_warning_given() -> Result<()> {
     mark_beads_warning_given_in(Path::new("."))
 }
@@ -106,22 +133,25 @@ pub fn mark_beads_warning_given() -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be written.
+/// Returns an error if the database operation fails.
 pub fn mark_beads_warning_given_in(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(WARNING_MARKER_REL);
-    // Ensure parent directory exists
-    if let Some(parent) = marker_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(marker_path, "")?;
-    Ok(())
+    get_store(base_dir)?.set_marker(markers::BEADS_WARNING)
+}
+
+/// Mark that a beads warning has been given using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn mark_beads_warning_given_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::BEADS_WARNING)
 }
 
 /// Clear the beads warning marker.
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
+/// Returns an error if the database operation fails.
 pub fn clear_beads_warning() -> Result<()> {
     clear_beads_warning_in(Path::new("."))
 }
@@ -130,13 +160,18 @@ pub fn clear_beads_warning() -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
+/// Returns an error if the database operation fails.
 pub fn clear_beads_warning_in(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(WARNING_MARKER_REL);
-    if marker_path.exists() {
-        std::fs::remove_file(marker_path)?;
-    }
-    Ok(())
+    get_store(base_dir)?.clear_marker(markers::BEADS_WARNING)
+}
+
+/// Clear the beads warning marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_beads_warning_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::BEADS_WARNING)
 }
 
 /// Get the count of open issues.
@@ -242,7 +277,7 @@ fn extract_issue_ids(output: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::MockCommandRunner;
+    use crate::testing::{MockCommandRunner, MockStateStore};
     use crate::traits::CommandOutput;
     use tempfile::TempDir;
 
@@ -327,17 +362,36 @@ mod tests {
     fn test_beads_warning_marker() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
+        let store = get_store(base).unwrap();
 
         // Marker doesn't exist initially
-        assert!(!base.join(WARNING_MARKER_REL).exists());
+        assert!(!store.has_marker(markers::BEADS_WARNING));
 
-        // Create the .claude directory and marker
+        // Set the marker
         mark_beads_warning_given_in(base).unwrap();
-        assert!(base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
 
         // Clear it
         clear_beads_warning_in(base).unwrap();
-        assert!(!base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(!store.has_marker(markers::BEADS_WARNING));
+    }
+
+    #[test]
+    fn test_beads_warning_marker_with_store() {
+        let store = MockStateStore::new();
+
+        // Marker doesn't exist initially
+        assert!(!store.has_marker(markers::BEADS_WARNING));
+
+        // Set the marker
+        mark_beads_warning_given_with_store(&store).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
+
+        // Clear it
+        clear_beads_warning_with_store(&store).unwrap();
+        assert!(!store.has_marker(markers::BEADS_WARNING));
     }
 
     #[test]
@@ -633,6 +687,37 @@ mod tests {
     }
 
     #[test]
+    fn test_check_beads_interaction_already_warned_with_store() {
+        let store = MockStateStore::new();
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set warning marker
+        store.set_marker(markers::BEADS_WARNING).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["log", "--oneline", "-10", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let status = check_beads_interaction_in_with_store(&runner, base, &store).unwrap();
+        assert!(!status.has_interaction);
+        assert!(status.already_warned);
+    }
+
+    #[test]
     fn test_clear_beads_warning_not_exists() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
@@ -643,13 +728,14 @@ mod tests {
 
     #[test]
     fn test_check_beads_interaction_uncommitted_clears_warning() {
-        // Test that uncommitted beads changes clear the warning marker (line 76)
+        // Test that uncommitted beads changes clear the warning marker
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
         // Create warning marker first
         mark_beads_warning_given_in(base).unwrap();
-        assert!(base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
 
         let mut runner = MockCommandRunner::new();
         // Uncommitted beads changes exist
@@ -673,18 +759,54 @@ mod tests {
         assert!(status.already_warned); // Was true before the check
 
         // Warning marker should be cleared now
-        assert!(!base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(!store.has_marker(markers::BEADS_WARNING));
+    }
+
+    #[test]
+    fn test_check_beads_interaction_uncommitted_clears_warning_with_store() {
+        let store = MockStateStore::new();
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set warning marker
+        store.set_marker(markers::BEADS_WARNING).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--name-only", "--", ".beads/"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: ".beads/issues.yml\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let status = check_beads_interaction_in_with_store(&runner, base, &store).unwrap();
+        assert!(status.has_interaction);
+        assert!(status.already_warned);
+
+        // Warning marker should be cleared
+        assert!(!store.has_marker(markers::BEADS_WARNING));
     }
 
     #[test]
     fn test_check_beads_interaction_recent_commits_clears_warning() {
-        // Test that recent beads commits clear the warning marker (line 88)
+        // Test that recent beads commits clear the warning marker
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
         // Create warning marker first
         mark_beads_warning_given_in(base).unwrap();
-        assert!(base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
 
         let mut runner = MockCommandRunner::new();
         // No uncommitted changes
@@ -714,7 +836,8 @@ mod tests {
         assert!(status.already_warned);
 
         // Warning marker should be cleared now
-        assert!(!base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(!store.has_marker(markers::BEADS_WARNING));
     }
 
     // Tests for the wrapper functions that use current directory.
@@ -793,12 +916,99 @@ mod tests {
 
         // Mark warning
         mark_beads_warning_given().unwrap();
-        assert!(base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(store.has_marker(markers::BEADS_WARNING));
 
         // Clear warning
         clear_beads_warning().unwrap();
-        assert!(!base.join(WARNING_MARKER_REL).exists());
+        let store = get_store(base).unwrap();
+        assert!(!store.has_marker(markers::BEADS_WARNING));
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_check_beads_interaction_uncommitted_removes_legacy_file() {
+        // Test that uncommitted beads changes also remove the legacy marker file
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Use MockStateStore to avoid get_store() migration that would delete the file
+        let store = MockStateStore::new();
+
+        // Create the legacy marker file AFTER any migration would happen
+        let legacy_path = base.join(WARNING_MARKER_REL);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "").unwrap();
+        assert!(legacy_path.exists());
+
+        let mut runner = MockCommandRunner::new();
+        // Uncommitted beads changes exist
+        runner.expect(
+            "git",
+            &["diff", "--name-only", "--", ".beads/"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: ".beads/issues.yml\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+
+        let status = check_beads_interaction_in_with_store(&runner, base, &store).unwrap();
+        assert!(status.has_interaction);
+
+        // Legacy file should be removed
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn test_check_beads_interaction_recent_commits_removes_legacy_file() {
+        // Test that recent beads commits also remove the legacy marker file
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Use MockStateStore to avoid get_store() migration that would delete the file
+        let store = MockStateStore::new();
+
+        // Create the legacy marker file AFTER any migration would happen
+        let legacy_path = base.join(WARNING_MARKER_REL);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "").unwrap();
+        assert!(legacy_path.exists());
+
+        let mut runner = MockCommandRunner::new();
+        // No uncommitted changes
+        runner.expect(
+            "git",
+            &["diff", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // No staged changes
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only", "--", ".beads/"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        // Recent commits have beads changes
+        runner.expect(
+            "git",
+            &["log", "--oneline", "-10", "--name-only", "--", ".beads/"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "abc123 commit\n.beads/issues.yml\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let status = check_beads_interaction_in_with_store(&runner, base, &store).unwrap();
+        assert!(status.has_interaction);
+
+        // Legacy file should be removed
+        assert!(!legacy_path.exists());
     }
 }

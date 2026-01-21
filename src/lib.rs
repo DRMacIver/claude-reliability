@@ -12,6 +12,7 @@ pub mod git;
 pub mod hooks;
 pub mod question;
 pub mod session;
+pub mod storage;
 pub mod subagent;
 pub mod templates;
 pub mod testing;

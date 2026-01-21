@@ -1581,6 +1581,9 @@ mod tests {
 
     #[test]
     fn test_bypass_human_input_phrase_allows_exit() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
         let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
         let runner = mock_with_uncommitted_for_bypass();
         let sub_agent = MockSubAgent::new();
@@ -1588,7 +1591,8 @@ mod tests {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
             ..Default::default()
         };
-        let config = StopHookConfig::default();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);

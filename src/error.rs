@@ -17,6 +17,10 @@ pub enum Error {
     #[error("YAML error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    /// A `SQLite` database error occurred.
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
     /// A regex error occurred.
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),

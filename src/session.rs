@@ -1,20 +1,61 @@
 //! Session file parsing for just-keep-working mode.
 //!
-//! Session state is split into two files:
-//! - `.claude/jkw-state.local.yaml` - Hook-managed YAML state (iteration, staleness)
-//! - `.claude/jkw-session.local.md` - LLM-editable markdown (session notes, goals)
+//! Session state is now stored in a `SQLite` database at
+//! `.claude/claude-reliability-working-memory.sqlite3`.
 //!
-//! This separation prevents the LLM from accidentally breaking the YAML
-//! state when editing session notes.
+//! The session notes file `.claude/jkw-session.local.md` remains a markdown
+//! file for direct LLM editing.
+//!
+//! This module provides both:
+//! - Path-based functions for backward compatibility (create `SqliteStore` internally)
+//! - Store-based functions for testability (take a `&dyn StateStore` parameter)
 
 use crate::error::Result;
+use crate::storage::{markers, SqliteStore};
+use crate::traits::StateStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
 /// Path for hook-managed session state (YAML).
+/// Note: This is kept for backward compatibility and migration. New state
+/// is stored in the `SQLite` database.
 pub const SESSION_STATE_PATH: &str = ".claude/jkw-state.local.yaml";
+
+/// Get or create a `SQLite` store for the given base directory.
+///
+/// This also performs migration from old file-based state if needed.
+fn get_store(base_dir: &Path) -> Result<SqliteStore> {
+    let store = SqliteStore::new(base_dir)?;
+    // Migrate any existing file-based state
+    store.migrate_from_files(base_dir)?;
+    Ok(store)
+}
+
+/// Extract base directory from a path that might end with `SESSION_STATE_PATH`.
+///
+/// For backward compatibility, the path-based API expects paths like
+/// `some/base/.claude/jkw-state.local.yaml`. This function extracts
+/// `some/base` from such paths.
+fn extract_base_dir(path: &Path) -> std::path::PathBuf {
+    let path_str = path.to_string_lossy();
+    path_str.strip_suffix(SESSION_STATE_PATH).map_or_else(
+        || {
+            // If not the expected path, use parent directory
+            path.parent()
+                .and_then(|p| p.parent())
+                .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
+        },
+        |base| {
+            if base.is_empty() {
+                std::path::PathBuf::from(".")
+            } else {
+                std::path::PathBuf::from(base.trim_end_matches('/'))
+            }
+        },
+    )
+}
 
 /// Path for LLM-editable session notes (markdown).
 pub const SESSION_NOTES_PATH: &str = ".claude/jkw-session.local.md";
@@ -60,125 +101,158 @@ impl SessionConfig {
     }
 }
 
-/// Parse the session state file (YAML).
-///
-/// The file format is plain YAML:
-/// ```yaml
-/// iteration: 5
-/// last_issue_change_iteration: 3
-/// issue_snapshot:
-///   - project-123
-///   - project-456
-/// ```
+/// Parse the session state from the database.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or parsed.
+/// Returns an error if the database operation fails.
 pub fn parse_session_state(path: &Path) -> Result<Option<SessionConfig>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(path)?;
-    let config: SessionConfig = serde_yaml::from_str(&content)?;
-
-    Ok(Some(config))
+    let base_dir = extract_base_dir(path);
+    get_store(&base_dir)?.get_session_state()
 }
 
-/// Write the session state file (YAML).
+/// Parse the session state using a provided store.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be written.
+/// Returns an error if the database operation fails.
+pub fn parse_session_state_with_store(store: &dyn StateStore) -> Result<Option<SessionConfig>> {
+    store.get_session_state()
+}
+
+/// Write the session state to the database.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
 pub fn write_session_state(path: &Path, config: &SessionConfig) -> Result<()> {
-    let yaml = serde_yaml::to_string(config)?;
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(path, yaml)?;
-    Ok(())
+    let base_dir = extract_base_dir(path);
+    get_store(&base_dir)?.set_session_state(config)
 }
 
-/// Delete the session state file if it exists.
+/// Write the session state using a provided store.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be removed.
+/// Returns an error if the database operation fails.
+pub fn write_session_state_with_store(
+    store: &dyn StateStore,
+    config: &SessionConfig,
+) -> Result<()> {
+    store.set_session_state(config)
+}
+
+/// Clear the session state from the database.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
 pub fn cleanup_session_state(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
+    let base_dir = extract_base_dir(path);
+    get_store(&base_dir)?.clear_session_state()
 }
 
-/// Delete both session files (state and notes) if they exist.
+/// Clear the session state using a provided store.
 ///
 /// # Errors
 ///
-/// Returns an error if files cannot be removed.
-pub fn cleanup_session_files(base_dir: &Path) -> Result<()> {
-    let state_path = base_dir.join(SESSION_STATE_PATH);
-    let notes_path = base_dir.join(SESSION_NOTES_PATH);
+/// Returns an error if the database operation fails.
+pub fn cleanup_session_state_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_session_state()
+}
 
-    if state_path.exists() {
-        fs::remove_file(state_path)?;
-    }
+/// Delete session state and notes file if they exist.
+///
+/// # Errors
+///
+/// Returns an error if operations fail.
+pub fn cleanup_session_files(base_dir: &Path) -> Result<()> {
+    // Clear database state
+    get_store(base_dir)?.clear_session_state()?;
+
+    // Also remove the notes file (still a markdown file on disk)
+    let notes_path = base_dir.join(SESSION_NOTES_PATH);
     if notes_path.exists() {
         fs::remove_file(notes_path)?;
     }
+
+    // Note: Legacy YAML file cleanup is handled by migrate_from_files() which
+    // runs when get_store() is called above, so we don't need to check here.
+
     Ok(())
 }
 
-/// Default path for the problem mode marker file.
+/// Delete session state and notes file using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if operations fail.
+pub fn cleanup_session_files_with_store(store: &dyn StateStore, base_dir: &Path) -> Result<()> {
+    store.clear_session_state()?;
+
+    let notes_path = base_dir.join(SESSION_NOTES_PATH);
+    if notes_path.exists() {
+        fs::remove_file(notes_path)?;
+    }
+
+    Ok(())
+}
+
+/// Default path for the problem mode marker file (legacy, for migration).
 pub const PROBLEM_MODE_MARKER_PATH: &str = ".claude/problem-mode.local";
 
-/// Path for JKW setup required marker file.
-/// This marker is set when JKW is invoked but the session file doesn't exist yet.
+/// Path for JKW setup required marker file (legacy, for migration).
 pub const JKW_SETUP_REQUIRED_MARKER_PATH: &str = ".claude/jkw-setup-required.local";
 
-/// Check if JKW setup is required (marker file exists).
+/// Check if JKW setup is required (marker exists in database).
 ///
 /// When this returns true, Write/Edit operations should be blocked
 /// until the JKW session file exists.
 #[must_use]
 pub fn is_jkw_setup_required(base_dir: &Path) -> bool {
-    base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH).exists()
+    get_store(base_dir).map(|s| s.has_marker(markers::JKW_SETUP_REQUIRED)).unwrap_or(false)
+}
+
+/// Check if JKW setup is required using a provided store.
+#[must_use]
+pub fn is_jkw_setup_required_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::JKW_SETUP_REQUIRED)
 }
 
 /// Mark that JKW setup is required (session file doesn't exist yet).
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be created.
+/// Returns an error if the database operation fails.
 pub fn set_jkw_setup_required(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH);
+    get_store(base_dir)?.set_marker(markers::JKW_SETUP_REQUIRED)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = marker_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(
-        &marker_path,
-        "JKW setup required - Write/Edit blocked until session file is created",
-    )?;
-    Ok(())
+/// Mark that JKW setup is required using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_jkw_setup_required_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::JKW_SETUP_REQUIRED)
 }
 
 /// Clear the JKW setup required marker (session file now exists).
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
+/// Returns an error if the database operation fails.
 pub fn clear_jkw_setup_required(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(JKW_SETUP_REQUIRED_MARKER_PATH);
-    if marker_path.exists() {
-        fs::remove_file(marker_path)?;
-    }
-    Ok(())
+    get_store(base_dir)?.clear_marker(markers::JKW_SETUP_REQUIRED)
+}
+
+/// Clear the JKW setup required marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_jkw_setup_required_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::JKW_SETUP_REQUIRED)
 }
 
 /// Check if the JKW session notes file exists.
@@ -187,147 +261,184 @@ pub fn jkw_session_file_exists(base_dir: &Path) -> bool {
     base_dir.join(SESSION_NOTES_PATH).exists()
 }
 
-/// Check if problem mode is active (marker file exists).
+/// Check if problem mode is active (marker exists in database).
 #[must_use]
 pub fn is_problem_mode_active(base_dir: &Path) -> bool {
-    base_dir.join(PROBLEM_MODE_MARKER_PATH).exists()
+    get_store(base_dir).map(|s| s.has_marker(markers::PROBLEM_MODE)).unwrap_or(false)
 }
 
-/// Enter problem mode by creating the marker file.
+/// Check if problem mode is active using a provided store.
+#[must_use]
+pub fn is_problem_mode_active_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::PROBLEM_MODE)
+}
+
+/// Enter problem mode by setting the marker in the database.
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be created.
+/// Returns an error if the database operation fails.
 pub fn enter_problem_mode(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(PROBLEM_MODE_MARKER_PATH);
-
-    // Ensure parent directory exists
-    if let Some(parent) = marker_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(&marker_path, "Problem mode active - tool use blocked until next stop")?;
-    Ok(())
+    get_store(base_dir)?.set_marker(markers::PROBLEM_MODE)
 }
 
-/// Exit problem mode by removing the marker file.
+/// Enter problem mode using a provided store.
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
-pub fn exit_problem_mode(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(PROBLEM_MODE_MARKER_PATH);
-    if marker_path.exists() {
-        fs::remove_file(marker_path)?;
-    }
-    Ok(())
+/// Returns an error if the database operation fails.
+pub fn enter_problem_mode_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::PROBLEM_MODE)
 }
 
-/// Path for "needs validation" marker file.
-/// This marker indicates that modifying tools have been used and validation
-/// must run before stopping.
+/// Exit problem mode by clearing the marker in the database.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn exit_problem_mode(base_dir: &Path) -> Result<()> {
+    get_store(base_dir)?.clear_marker(markers::PROBLEM_MODE)
+}
+
+/// Exit problem mode using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn exit_problem_mode_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::PROBLEM_MODE)
+}
+
+/// Path for "needs validation" marker file (legacy, for migration).
 pub const NEEDS_VALIDATION_MARKER_PATH: &str = ".claude/needs-validation.local";
 
-/// Check if validation is needed (marker file exists).
+/// Check if validation is needed (marker exists in database).
 #[must_use]
 pub fn needs_validation(base_dir: &Path) -> bool {
-    base_dir.join(NEEDS_VALIDATION_MARKER_PATH).exists()
+    get_store(base_dir).map(|s| s.has_marker(markers::NEEDS_VALIDATION)).unwrap_or(false)
+}
+
+/// Check if validation is needed using a provided store.
+#[must_use]
+pub fn needs_validation_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::NEEDS_VALIDATION)
 }
 
 /// Mark that validation is needed (modifying tool was used).
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be created.
+/// Returns an error if the database operation fails.
 pub fn set_needs_validation(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(NEEDS_VALIDATION_MARKER_PATH);
+    get_store(base_dir)?.set_marker(markers::NEEDS_VALIDATION)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = marker_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(&marker_path, "Validation needed - modifying tool was used")?;
-    Ok(())
+/// Mark that validation is needed using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_needs_validation_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::NEEDS_VALIDATION)
 }
 
 /// Clear the needs validation marker (validation passed or user sent message).
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
+/// Returns an error if the database operation fails.
 pub fn clear_needs_validation(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(NEEDS_VALIDATION_MARKER_PATH);
-    if marker_path.exists() {
-        fs::remove_file(marker_path)?;
-    }
-    Ok(())
+    get_store(base_dir)?.clear_marker(markers::NEEDS_VALIDATION)
 }
 
-/// Path for "must reflect" marker file.
-/// This marker indicates that the agent should reflect on its work before stopping.
+/// Clear the needs validation marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_needs_validation_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::NEEDS_VALIDATION)
+}
+
+/// Path for "must reflect" marker file (legacy, for migration).
 pub const MUST_REFLECT_MARKER_PATH: &str = ".claude/must-reflect.local";
 
 /// Check if the `must_reflect` marker exists.
 #[must_use]
 pub fn has_reflect_marker(base_dir: &Path) -> bool {
-    base_dir.join(MUST_REFLECT_MARKER_PATH).exists()
+    get_store(base_dir).map(|s| s.has_marker(markers::MUST_REFLECT)).unwrap_or(false)
+}
+
+/// Check if the `must_reflect` marker exists using a provided store.
+#[must_use]
+pub fn has_reflect_marker_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::MUST_REFLECT)
 }
 
 /// Set the `must_reflect` marker.
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be created.
+/// Returns an error if the database operation fails.
 pub fn set_reflect_marker(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(MUST_REFLECT_MARKER_PATH);
-    if let Some(parent) = marker_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&marker_path, "Reflection prompted - waiting for next stop")?;
-    Ok(())
+    get_store(base_dir)?.set_marker(markers::MUST_REFLECT)
+}
+
+/// Set the `must_reflect` marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_reflect_marker_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::MUST_REFLECT)
 }
 
 /// Clear the `must_reflect` marker.
 ///
 /// # Errors
 ///
-/// Returns an error if the marker file cannot be removed.
+/// Returns an error if the database operation fails.
 pub fn clear_reflect_marker(base_dir: &Path) -> Result<()> {
-    let marker_path = base_dir.join(MUST_REFLECT_MARKER_PATH);
-    if marker_path.exists() {
-        fs::remove_file(marker_path)?;
-    }
-    Ok(())
+    get_store(base_dir)?.clear_marker(markers::MUST_REFLECT)
+}
+
+/// Clear the `must_reflect` marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_reflect_marker_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::MUST_REFLECT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::SqliteStore;
+    use crate::testing::MockStateStore;
     use tempfile::TempDir;
 
     #[test]
     fn test_parse_session_state_not_exists() {
-        let result = parse_session_state(Path::new("/nonexistent/file.yaml")).unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SESSION_STATE_PATH);
+        // No state set yet
+        let result = parse_session_state(&path).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_parse_session_state_valid() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("state.yaml");
-        fs::write(
-            &path,
-            r"iteration: 5
-last_issue_change_iteration: 3
-issue_snapshot:
-  - project-123
-  - project-456
-",
-        )
-        .unwrap();
+    fn test_parse_session_state_with_store() {
+        let store = MockStateStore::new();
+        let state = SessionConfig {
+            iteration: 5,
+            last_issue_change_iteration: 3,
+            issue_snapshot: vec!["project-123".to_string(), "project-456".to_string()],
+            git_diff_hash: None,
+        };
+        store.set_session_state(&state).unwrap();
 
-        let config = parse_session_state(&path).unwrap().unwrap();
+        let config = parse_session_state_with_store(&store).unwrap().unwrap();
         assert_eq!(config.iteration, 5);
         assert_eq!(config.last_issue_change_iteration, 3);
         assert_eq!(config.issue_snapshot, vec!["project-123", "project-456"]);
@@ -335,16 +446,16 @@ issue_snapshot:
 
     #[test]
     fn test_parse_session_state_empty_snapshot() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("state.yaml");
-        fs::write(
-            &path,
-            r"iteration: 1
-",
-        )
-        .unwrap();
+        let store = MockStateStore::new();
+        let state = SessionConfig {
+            iteration: 1,
+            last_issue_change_iteration: 0,
+            issue_snapshot: vec![],
+            git_diff_hash: None,
+        };
+        store.set_session_state(&state).unwrap();
 
-        let config = parse_session_state(&path).unwrap().unwrap();
+        let config = parse_session_state_with_store(&store).unwrap().unwrap();
         assert_eq!(config.iteration, 1);
         assert_eq!(config.last_issue_change_iteration, 0);
         assert!(config.issue_snapshot.is_empty());
@@ -353,7 +464,7 @@ issue_snapshot:
     #[test]
     fn test_write_session_state() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("state.yaml");
+        let path = dir.path().join(SESSION_STATE_PATH);
 
         let config = SessionConfig {
             iteration: 3,
@@ -371,21 +482,59 @@ issue_snapshot:
     }
 
     #[test]
+    fn test_write_session_state_with_store() {
+        let store = MockStateStore::new();
+
+        let config = SessionConfig {
+            iteration: 3,
+            last_issue_change_iteration: 2,
+            issue_snapshot: vec!["issue-1".to_string(), "issue-2".to_string()],
+            ..Default::default()
+        };
+
+        write_session_state_with_store(&store, &config).unwrap();
+
+        let parsed = parse_session_state_with_store(&store).unwrap().unwrap();
+        assert_eq!(parsed.iteration, 3);
+        assert_eq!(parsed.issue_snapshot, vec!["issue-1", "issue-2"]);
+    }
+
+    #[test]
     fn test_cleanup_session_state() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("state.yaml");
-        fs::write(&path, "content").unwrap();
+        let path = dir.path().join(SESSION_STATE_PATH);
 
-        assert!(path.exists());
+        // Write some state first
+        let config = SessionConfig { iteration: 1, ..Default::default() };
+        write_session_state(&path, &config).unwrap();
+
+        // Now cleanup
         cleanup_session_state(&path).unwrap();
-        assert!(!path.exists());
+
+        // State should be gone
+        assert!(parse_session_state(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cleanup_session_state_with_store() {
+        let store = MockStateStore::new();
+
+        // Write state
+        let config = SessionConfig { iteration: 1, ..Default::default() };
+        store.set_session_state(&config).unwrap();
+        assert!(store.get_session_state().unwrap().is_some());
+
+        // Cleanup
+        cleanup_session_state_with_store(&store).unwrap();
+        assert!(store.get_session_state().unwrap().is_none());
     }
 
     #[test]
     fn test_cleanup_session_state_not_exists() {
-        let path = Path::new("/nonexistent/file.yaml");
-        // Should not error
-        cleanup_session_state(path).unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SESSION_STATE_PATH);
+        // Should not error when nothing to cleanup
+        cleanup_session_state(&path).unwrap();
     }
 
     #[test]
@@ -393,20 +542,45 @@ issue_snapshot:
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create both files
+        // Create session state and notes file
+        let config = SessionConfig { iteration: 1, ..Default::default() };
         let state_path = base.join(SESSION_STATE_PATH);
+        write_session_state(&state_path, &config).unwrap();
+
         let notes_path = base.join(SESSION_NOTES_PATH);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(&state_path, "state").unwrap();
+        fs::create_dir_all(notes_path.parent().unwrap()).unwrap();
         fs::write(&notes_path, "notes").unwrap();
 
-        assert!(state_path.exists());
         assert!(notes_path.exists());
 
         cleanup_session_files(base).unwrap();
 
-        assert!(!state_path.exists());
+        // Notes file should be removed
         assert!(!notes_path.exists());
+        // State should be cleared from database
+        assert!(parse_session_state(&state_path).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cleanup_session_files_removes_legacy_yaml_via_migration() {
+        // Legacy YAML file removal is now handled by migration in get_store()
+        // This test verifies that cleanup_session_files works when a legacy
+        // file exists - migration will clean it up when get_store() is called
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create legacy YAML file before any store access
+        let state_path = base.join(SESSION_STATE_PATH);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, "iteration: 1").unwrap();
+        assert!(state_path.exists());
+
+        // cleanup_session_files calls get_store() which triggers migration
+        // Migration will delete the legacy file
+        cleanup_session_files(base).unwrap();
+
+        // Legacy file should be removed (by migration)
+        assert!(!state_path.exists());
     }
 
     #[test]
@@ -449,21 +623,16 @@ issue_snapshot:
     #[test]
     fn test_write_session_state_creates_parent_directory() {
         let dir = TempDir::new().unwrap();
-        // Path with non-existent parent directory
-        let nested = dir.path().join("deeply").join("nested").join("path");
-        let path = nested.join("state.yaml");
-
-        // Verify parent doesn't exist yet
-        assert!(!nested.exists());
+        // Use a path under .claude which is where the database will be created
+        let path = dir.path().join(SESSION_STATE_PATH);
 
         let config =
             SessionConfig { iteration: 1, last_issue_change_iteration: 1, ..Default::default() };
 
         write_session_state(&path, &config).unwrap();
 
-        // Verify both parent and file now exist
-        assert!(nested.exists());
-        assert!(path.exists());
+        // .claude directory should be created for the database
+        assert!(dir.path().join(".claude").exists());
     }
 
     #[test]
@@ -479,9 +648,19 @@ issue_snapshot:
         // Enter problem mode
         enter_problem_mode(dir.path()).unwrap();
 
-        // Verify marker file exists
+        // Verify mode is active
         assert!(is_problem_mode_active(dir.path()));
-        assert!(dir.path().join(PROBLEM_MODE_MARKER_PATH).exists());
+    }
+
+    #[test]
+    fn test_enter_problem_mode_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!is_problem_mode_active_with_store(&store));
+
+        enter_problem_mode_with_store(&store).unwrap();
+
+        assert!(is_problem_mode_active_with_store(&store));
     }
 
     #[test]
@@ -494,6 +673,17 @@ issue_snapshot:
 
         exit_problem_mode(dir.path()).unwrap();
         assert!(!is_problem_mode_active(dir.path()));
+    }
+
+    #[test]
+    fn test_exit_problem_mode_with_store() {
+        let store = MockStateStore::new();
+
+        enter_problem_mode_with_store(&store).unwrap();
+        assert!(is_problem_mode_active_with_store(&store));
+
+        exit_problem_mode_with_store(&store).unwrap();
+        assert!(!is_problem_mode_active_with_store(&store));
     }
 
     #[test]
@@ -529,7 +719,17 @@ issue_snapshot:
         set_jkw_setup_required(dir.path()).unwrap();
 
         assert!(is_jkw_setup_required(dir.path()));
-        assert!(dir.path().join(JKW_SETUP_REQUIRED_MARKER_PATH).exists());
+    }
+
+    #[test]
+    fn test_set_jkw_setup_required_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!is_jkw_setup_required_with_store(&store));
+
+        set_jkw_setup_required_with_store(&store).unwrap();
+
+        assert!(is_jkw_setup_required_with_store(&store));
     }
 
     #[test]
@@ -541,6 +741,17 @@ issue_snapshot:
 
         clear_jkw_setup_required(dir.path()).unwrap();
         assert!(!is_jkw_setup_required(dir.path()));
+    }
+
+    #[test]
+    fn test_clear_jkw_setup_required_with_store() {
+        let store = MockStateStore::new();
+
+        set_jkw_setup_required_with_store(&store).unwrap();
+        assert!(is_jkw_setup_required_with_store(&store));
+
+        clear_jkw_setup_required_with_store(&store).unwrap();
+        assert!(!is_jkw_setup_required_with_store(&store));
     }
 
     #[test]
@@ -579,24 +790,6 @@ issue_snapshot:
     }
 
     #[test]
-    fn test_set_jkw_setup_required_write_fails() {
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create the .claude directory
-        let claude_dir = base.join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
-
-        // Create a directory at the marker path (can't write file over directory)
-        let marker_path = base.join(JKW_SETUP_REQUIRED_MARKER_PATH);
-        fs::create_dir_all(&marker_path).unwrap();
-
-        // Now set_jkw_setup_required should fail because it can't write over a directory
-        let result = set_jkw_setup_required(base);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_needs_validation_not_set_by_default() {
         let dir = TempDir::new().unwrap();
         assert!(!needs_validation(dir.path()));
@@ -612,6 +805,17 @@ issue_snapshot:
     }
 
     #[test]
+    fn test_set_needs_validation_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!needs_validation_with_store(&store));
+
+        set_needs_validation_with_store(&store).unwrap();
+
+        assert!(needs_validation_with_store(&store));
+    }
+
+    #[test]
     fn test_clear_needs_validation() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
@@ -621,6 +825,17 @@ issue_snapshot:
 
         clear_needs_validation(base).unwrap();
         assert!(!needs_validation(base));
+    }
+
+    #[test]
+    fn test_clear_needs_validation_with_store() {
+        let store = MockStateStore::new();
+
+        set_needs_validation_with_store(&store).unwrap();
+        assert!(needs_validation_with_store(&store));
+
+        clear_needs_validation_with_store(&store).unwrap();
+        assert!(!needs_validation_with_store(&store));
     }
 
     #[test]
@@ -649,6 +864,17 @@ issue_snapshot:
     }
 
     #[test]
+    fn test_set_reflect_marker_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!has_reflect_marker_with_store(&store));
+
+        set_reflect_marker_with_store(&store).unwrap();
+
+        assert!(has_reflect_marker_with_store(&store));
+    }
+
+    #[test]
     fn test_clear_reflect_marker() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
@@ -658,6 +884,17 @@ issue_snapshot:
 
         clear_reflect_marker(base).unwrap();
         assert!(!has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_clear_reflect_marker_with_store() {
+        let store = MockStateStore::new();
+
+        set_reflect_marker_with_store(&store).unwrap();
+        assert!(has_reflect_marker_with_store(&store));
+
+        clear_reflect_marker_with_store(&store).unwrap();
+        assert!(!has_reflect_marker_with_store(&store));
     }
 
     #[test]
@@ -680,5 +917,195 @@ issue_snapshot:
 
         assert!(base.join(".claude").exists());
         assert!(has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_migration_from_yaml_file() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create legacy YAML file
+        let yaml_path = base.join(".claude/jkw-state.local.yaml");
+        fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+        fs::write(
+            &yaml_path,
+            r"iteration: 5
+last_issue_change_iteration: 3
+issue_snapshot:
+  - project-123
+",
+        )
+        .unwrap();
+
+        // Get store (triggers migration)
+        let store = get_store(base).unwrap();
+
+        // State should be migrated
+        let state = store.get_session_state().unwrap().unwrap();
+        assert_eq!(state.iteration, 5);
+        assert_eq!(state.last_issue_change_iteration, 3);
+
+        // Legacy file should be removed
+        assert!(!yaml_path.exists());
+    }
+
+    #[test]
+    fn test_migration_from_marker_files() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create legacy marker files
+        let claude_dir = base.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(base.join(".claude/problem-mode.local"), "").unwrap();
+        fs::write(base.join(".claude/needs-validation.local"), "").unwrap();
+
+        // Get store (triggers migration)
+        let store = get_store(base).unwrap();
+
+        // Markers should be migrated
+        assert!(store.has_marker(markers::PROBLEM_MODE));
+        assert!(store.has_marker(markers::NEEDS_VALIDATION));
+
+        // Legacy files should be removed
+        assert!(!base.join(".claude/problem-mode.local").exists());
+        assert!(!base.join(".claude/needs-validation.local").exists());
+    }
+
+    #[test]
+    fn test_cleanup_session_files_with_store() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let store = SqliteStore::new(base).unwrap();
+
+        // Create session state and notes
+        let config = SessionConfig { iteration: 1, ..Default::default() };
+        store.set_session_state(&config).unwrap();
+
+        let notes_path = base.join(SESSION_NOTES_PATH);
+        fs::create_dir_all(notes_path.parent().unwrap()).unwrap();
+        fs::write(&notes_path, "notes").unwrap();
+
+        cleanup_session_files_with_store(&store, base).unwrap();
+
+        assert!(store.get_session_state().unwrap().is_none());
+        assert!(!notes_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_session_state_exact_path() {
+        // Test when the path is exactly SESSION_STATE_PATH (empty base)
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Create the .claude directory and state
+        fs::create_dir_all(".claude").unwrap();
+        let store = get_store(Path::new(".")).unwrap();
+        let config = SessionConfig { iteration: 7, ..Default::default() };
+        store.set_session_state(&config).unwrap();
+
+        // Use just the SESSION_STATE_PATH (no leading directory)
+        let path = Path::new(SESSION_STATE_PATH);
+        let result = parse_session_state(path).unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().iteration, 7);
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_parse_session_state_non_standard_path() {
+        // Test fallback path when path doesn't match SESSION_STATE_PATH
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create state in the expected location
+        let store = get_store(base).unwrap();
+        let config = SessionConfig { iteration: 11, ..Default::default() };
+        store.set_session_state(&config).unwrap();
+
+        // Use a non-standard path (within .claude but different file)
+        let non_standard_path = base.join(".claude/some-other-file.yaml");
+        let result = parse_session_state(&non_standard_path).unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().iteration, 11);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_write_session_state_exact_path() {
+        // Test when the path is exactly SESSION_STATE_PATH (empty base)
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let config = SessionConfig { iteration: 13, ..Default::default() };
+        let path = Path::new(SESSION_STATE_PATH);
+        write_session_state(path, &config).unwrap();
+
+        // Read back and verify
+        let result = parse_session_state(path).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().iteration, 13);
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_write_session_state_non_standard_path() {
+        // Test fallback path when path doesn't match SESSION_STATE_PATH
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let config = SessionConfig { iteration: 17, ..Default::default() };
+        // Use a non-standard path (within .claude but different file)
+        let non_standard_path = base.join(".claude/custom-state.yaml");
+        write_session_state(&non_standard_path, &config).unwrap();
+
+        // Read back using the non-standard path
+        let result = parse_session_state(&non_standard_path).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().iteration, 17);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_cleanup_session_state_exact_path() {
+        // Test when the path is exactly SESSION_STATE_PATH (empty base)
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let config = SessionConfig { iteration: 19, ..Default::default() };
+        let path = Path::new(SESSION_STATE_PATH);
+        write_session_state(path, &config).unwrap();
+        assert!(parse_session_state(path).unwrap().is_some());
+
+        cleanup_session_state(path).unwrap();
+        assert!(parse_session_state(path).unwrap().is_none());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_session_state_non_standard_path() {
+        // Test fallback path when path doesn't match SESSION_STATE_PATH
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create state
+        let config = SessionConfig { iteration: 23, ..Default::default() };
+        let non_standard_path = base.join(".claude/other-state.yaml");
+        write_session_state(&non_standard_path, &config).unwrap();
+        assert!(parse_session_state(&non_standard_path).unwrap().is_some());
+
+        // Cleanup using non-standard path
+        cleanup_session_state(&non_standard_path).unwrap();
+        assert!(parse_session_state(&non_standard_path).unwrap().is_none());
     }
 }
