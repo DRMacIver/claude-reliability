@@ -267,8 +267,7 @@ pub fn run_stop_hook(
                         .with_message(format!("  \"{PROBLEM_NEEDS_USER}\"")));
                 }
             }
-            // Bypass allowed
-            session::cleanup_session_files(config.base_dir())?;
+            // Bypass allowed - but don't cleanup session files so JKW can resume
             return Ok(StopHookResult::allow());
         }
     }
@@ -710,10 +709,9 @@ fn handle_jkw_mode(
     // Update session state file
     session::write_session_state(&session_state_path, session)?;
 
-    // Check staleness
+    // Check staleness - allow stop but don't cleanup session files so JKW can resume
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
-        session::cleanup_session_files(config.base_dir())?;
         let change_type = if beads_available { "issue" } else { "git" };
         return Ok(StopHookResult::allow()
             .with_message("# Staleness Detected")
@@ -721,9 +719,9 @@ fn handle_jkw_mode(
             .with_message(format!(
                 "No {change_type} changes for {iterations_since_change} iterations."
             ))
-            .with_message("Just-keep-working mode stopped due to lack of progress.")
+            .with_message("Just-keep-working mode paused due to lack of progress.")
             .with_message("")
-            .with_message("Run `/just-keep-working` to start a new session."));
+            .with_message("Session preserved - JKW mode will resume on next message."));
     }
 
     // Check if all work is done (only when beads is available to track issues)
