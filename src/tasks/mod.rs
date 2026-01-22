@@ -29,9 +29,10 @@ pub mod id;
 pub mod models;
 pub mod store;
 
-pub use models::{AuditEntry, InvalidPriority, InvalidStatus, Note, Priority, Status, Task};
+pub use models::{AuditEntry, HowTo, InvalidPriority, InvalidStatus, Note, Priority, Status, Task};
 pub use store::{
-    CircularDependency, SqliteTaskStore, TaskFilter, TaskNotFound, TaskStore, TaskUpdate,
+    CircularDependency, HowToNotFound, HowToUpdate, SqliteTaskStore, TaskFilter, TaskNotFound,
+    TaskStore, TaskUpdate,
 };
 
 use std::path::Path;

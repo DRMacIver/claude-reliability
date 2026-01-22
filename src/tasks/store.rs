@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::tasks::id::generate_task_id;
-use crate::tasks::models::{AuditEntry, Note, Priority, Status, Task};
+use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Status, Task};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::hash_map::RandomState;
 use std::collections::HashSet;
@@ -68,6 +68,35 @@ pub trait TaskStore {
 
     /// Pick a random task from the highest priority ready tasks.
     fn pick_task(&self) -> Result<Option<Task>>;
+
+    // How-to CRUD
+    /// Create a new how-to guide with the given title and instructions.
+    fn create_howto(&self, title: &str, instructions: &str) -> Result<HowTo>;
+
+    /// Get a how-to by ID.
+    fn get_howto(&self, id: &str) -> Result<Option<HowTo>>;
+
+    /// Update a how-to's fields.
+    fn update_howto(&self, id: &str, update: HowToUpdate) -> Result<Option<HowTo>>;
+
+    /// Delete a how-to by ID.
+    fn delete_howto(&self, id: &str) -> Result<bool>;
+
+    /// List all how-tos.
+    fn list_howtos(&self) -> Result<Vec<HowTo>>;
+
+    /// Full-text search across how-tos.
+    fn search_howtos(&self, query: &str) -> Result<Vec<HowTo>>;
+
+    // Task-HowTo guidance
+    /// Link a task to a how-to guide for guidance.
+    fn link_task_to_howto(&self, task_id: &str, howto_id: &str) -> Result<()>;
+
+    /// Unlink a task from a how-to guide.
+    fn unlink_task_from_howto(&self, task_id: &str, howto_id: &str) -> Result<bool>;
+
+    /// Get all how-to IDs linked to a task (guidance).
+    fn get_task_guidance(&self, task_id: &str) -> Result<Vec<String>>;
 }
 
 /// Fields that can be updated on a task.
@@ -136,6 +165,35 @@ impl std::fmt::Display for TaskNotFound {
 
 impl std::error::Error for TaskNotFound {}
 
+/// Error when a referenced how-to is not found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HowToNotFound(pub String);
+
+impl std::fmt::Display for HowToNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "how-to not found: {}", self.0)
+    }
+}
+
+impl std::error::Error for HowToNotFound {}
+
+/// Fields that can be updated on a how-to.
+#[derive(Debug, Default, Clone)]
+pub struct HowToUpdate {
+    /// New title (if Some).
+    pub title: Option<String>,
+    /// New instructions (if Some).
+    pub instructions: Option<String>,
+}
+
+impl HowToUpdate {
+    /// Check if any fields are set for update.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.title.is_none() && self.instructions.is_none()
+    }
+}
+
 /// SQLite-based task store.
 #[derive(Debug, Clone)]
 pub struct SqliteTaskStore {
@@ -181,6 +239,7 @@ impl SqliteTaskStore {
     }
 
     /// Initialize the database schema.
+    #[allow(clippy::too_many_lines)]
     fn init_schema(&self) -> Result<()> {
         let conn = self.open()?;
 
@@ -273,6 +332,50 @@ impl SqliteTaskStore {
                 INSERT INTO task_notes_fts(task_notes_fts, rowid, task_id, content)
                 VALUES ('delete', OLD.id, OLD.task_id, OLD.content);
             END;
+
+            -- How-to guides table
+            CREATE TABLE IF NOT EXISTS howtos (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                instructions TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Task guidance (links tasks to how-tos)
+            CREATE TABLE IF NOT EXISTS task_guidance (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                howto_id TEXT NOT NULL REFERENCES howtos(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (task_id, howto_id)
+            );
+
+            -- Index for looking up guidance by how-to
+            CREATE INDEX IF NOT EXISTS idx_task_guidance_howto_id ON task_guidance(howto_id);
+
+            -- FTS5 for full-text search on how-tos
+            CREATE VIRTUAL TABLE IF NOT EXISTS howtos_fts USING fts5(
+                id, title, instructions,
+                content='howtos', content_rowid='rowid'
+            );
+
+            -- Triggers to keep how-to FTS in sync
+            CREATE TRIGGER IF NOT EXISTS howtos_ai AFTER INSERT ON howtos BEGIN
+                INSERT INTO howtos_fts(rowid, id, title, instructions)
+                VALUES (NEW.rowid, NEW.id, NEW.title, NEW.instructions);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS howtos_ad AFTER DELETE ON howtos BEGIN
+                INSERT INTO howtos_fts(howtos_fts, rowid, id, title, instructions)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.title, OLD.instructions);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS howtos_au AFTER UPDATE ON howtos BEGIN
+                INSERT INTO howtos_fts(howtos_fts, rowid, id, title, instructions)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.title, OLD.instructions);
+                INSERT INTO howtos_fts(rowid, id, title, instructions)
+                VALUES (NEW.rowid, NEW.id, NEW.title, NEW.instructions);
+            END;
             ",
         )?;
 
@@ -331,6 +434,17 @@ impl SqliteTaskStore {
             status: Status::from_str(&status_str).unwrap_or(Status::Open),
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
+        })
+    }
+
+    /// Parse a how-to from a row.
+    fn parse_howto(row: &rusqlite::Row) -> rusqlite::Result<HowTo> {
+        Ok(HowTo {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            instructions: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
         })
     }
 
@@ -897,6 +1011,242 @@ impl TaskStore for SqliteTaskStore {
         let index = (hasher.finish() as usize) % top_priority.len();
 
         Ok(Some(top_priority.into_iter().nth(index).unwrap()))
+    }
+
+    fn create_howto(&self, title: &str, instructions: &str) -> Result<HowTo> {
+        let conn = self.open()?;
+        let id = generate_task_id(title);
+
+        conn.execute(
+            "INSERT INTO howtos (id, title, instructions) VALUES (?1, ?2, ?3)",
+            params![&id, title, instructions],
+        )?;
+
+        let howto = conn
+            .query_row(
+                "SELECT id, title, instructions, created_at, updated_at FROM howtos WHERE id = ?1",
+                params![&id],
+                Self::parse_howto,
+            )
+            .optional()?
+            .expect("just inserted");
+
+        Self::log_audit(
+            &conn,
+            "create_howto",
+            Some(&id),
+            None,
+            Some(&serde_json::to_string(&howto).unwrap_or_default()),
+            Some(&format!("Created how-to: {title}")),
+        )?;
+
+        Ok(howto)
+    }
+
+    fn get_howto(&self, id: &str) -> Result<Option<HowTo>> {
+        let conn = self.open()?;
+        let howto = conn
+            .query_row(
+                "SELECT id, title, instructions, created_at, updated_at FROM howtos WHERE id = ?1",
+                params![id],
+                Self::parse_howto,
+            )
+            .optional()?;
+        Ok(howto)
+    }
+
+    fn update_howto(&self, id: &str, update: HowToUpdate) -> Result<Option<HowTo>> {
+        if update.is_empty() {
+            return self.get_howto(id);
+        }
+
+        let conn = self.open()?;
+
+        // Get the old value for audit
+        let old_howto: Option<HowTo> = conn
+            .query_row(
+                "SELECT id, title, instructions, created_at, updated_at FROM howtos WHERE id = ?1",
+                params![id],
+                Self::parse_howto,
+            )
+            .optional()?;
+
+        if old_howto.is_none() {
+            return Ok(None);
+        }
+
+        let mut updates = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref title) = update.title {
+            updates.push("title = ?");
+            params_vec.push(Box::new(title.clone()));
+        }
+        if let Some(ref instructions) = update.instructions {
+            updates.push("instructions = ?");
+            params_vec.push(Box::new(instructions.clone()));
+        }
+
+        updates.push("updated_at = datetime('now')");
+
+        let sql = format!("UPDATE howtos SET {} WHERE id = ?", updates.join(", "));
+        params_vec.push(Box::new(id.to_string()));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
+        conn.execute(&sql, params_refs.as_slice())?;
+
+        let new_howto = conn
+            .query_row(
+                "SELECT id, title, instructions, created_at, updated_at FROM howtos WHERE id = ?1",
+                params![id],
+                Self::parse_howto,
+            )
+            .optional()?;
+
+        if let Some(ref new) = new_howto {
+            Self::log_audit(
+                &conn,
+                "update_howto",
+                Some(id),
+                Some(&serde_json::to_string(&old_howto).unwrap_or_default()),
+                Some(&serde_json::to_string(new).unwrap_or_default()),
+                None,
+            )?;
+        }
+
+        Ok(new_howto)
+    }
+
+    fn delete_howto(&self, id: &str) -> Result<bool> {
+        let conn = self.open()?;
+
+        // Get the howto for audit logging
+        let old_howto: Option<HowTo> = conn
+            .query_row(
+                "SELECT id, title, instructions, created_at, updated_at FROM howtos WHERE id = ?1",
+                params![id],
+                Self::parse_howto,
+            )
+            .optional()?;
+
+        let deleted = conn.execute("DELETE FROM howtos WHERE id = ?1", params![id])? > 0;
+
+        if deleted {
+            Self::log_audit(
+                &conn,
+                "delete_howto",
+                Some(id),
+                Some(&serde_json::to_string(&old_howto).unwrap_or_default()),
+                None,
+                None,
+            )?;
+        }
+
+        Ok(deleted)
+    }
+
+    fn list_howtos(&self) -> Result<Vec<HowTo>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, instructions, created_at, updated_at FROM howtos ORDER BY title",
+        )?;
+        let howtos = stmt.query_map([], Self::parse_howto)?.flatten().collect();
+        Ok(howtos)
+    }
+
+    fn search_howtos(&self, query: &str) -> Result<Vec<HowTo>> {
+        let conn = self.open()?;
+
+        // Search using FTS5
+        let fts_query = query
+            .split_whitespace()
+            .map(|word| format!("\"{word}\"*"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.title, h.instructions, h.created_at, h.updated_at
+             FROM howtos h
+             JOIN howtos_fts fts ON h.id = fts.id
+             WHERE howtos_fts MATCH ?1
+             ORDER BY rank",
+        )?;
+
+        let howtos = stmt.query_map(params![&fts_query], Self::parse_howto)?.flatten().collect();
+        Ok(howtos)
+    }
+
+    fn link_task_to_howto(&self, task_id: &str, howto_id: &str) -> Result<()> {
+        let conn = self.open()?;
+
+        // Verify task exists
+        let task_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        if !task_exists {
+            return Err(crate::error::Error::Task(Box::new(TaskNotFound(task_id.to_string()))));
+        }
+
+        // Verify howto exists
+        let howto_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM howtos WHERE id = ?1)",
+            params![howto_id],
+            |row| row.get(0),
+        )?;
+        if !howto_exists {
+            return Err(crate::error::Error::Task(Box::new(HowToNotFound(howto_id.to_string()))));
+        }
+
+        // Insert (ignore if already exists)
+        conn.execute(
+            "INSERT OR IGNORE INTO task_guidance (task_id, howto_id) VALUES (?1, ?2)",
+            params![task_id, howto_id],
+        )?;
+
+        Self::log_audit(
+            &conn,
+            "link_guidance",
+            Some(task_id),
+            None,
+            None,
+            Some(&format!("Linked task {task_id} to how-to {howto_id}")),
+        )?;
+
+        Ok(())
+    }
+
+    fn unlink_task_from_howto(&self, task_id: &str, howto_id: &str) -> Result<bool> {
+        let conn = self.open()?;
+
+        let rows_affected = conn.execute(
+            "DELETE FROM task_guidance WHERE task_id = ?1 AND howto_id = ?2",
+            params![task_id, howto_id],
+        )?;
+        let deleted = rows_affected > 0;
+
+        if deleted {
+            Self::log_audit(
+                &conn,
+                "unlink_guidance",
+                Some(task_id),
+                None,
+                None,
+                Some(&format!("Unlinked task {task_id} from how-to {howto_id}")),
+            )?;
+        }
+
+        Ok(deleted)
+    }
+
+    fn get_task_guidance(&self, task_id: &str) -> Result<Vec<String>> {
+        let conn = self.open()?;
+        let mut stmt = conn
+            .prepare("SELECT howto_id FROM task_guidance WHERE task_id = ?1 ORDER BY howto_id")?;
+        let ids: Vec<String> =
+            stmt.query_map(params![task_id], |row| row.get(0))?.flatten().collect();
+        Ok(ids)
     }
 }
 
@@ -1514,6 +1864,310 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.status, Status::Stuck);
+
+        disable_deterministic_ids();
+    }
+
+    // HowTo tests
+
+    #[test]
+    fn test_create_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Deploy to Prod", "Run the deploy script").unwrap();
+        assert!(howto.id.starts_with("deploy-to-prod-"));
+        assert_eq!(howto.title, "Deploy to Prod");
+        assert_eq!(howto.instructions, "Run the deploy script");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Test Guide", "Testing instructions").unwrap();
+        let retrieved = store.get_howto(&howto.id).unwrap();
+
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.id, howto.id);
+        assert_eq!(retrieved.title, "Test Guide");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_howto_not_found() {
+        let (_dir, store) = create_test_store();
+        let result = store.get_howto("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_update_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Original", "Original instructions").unwrap();
+
+        let updated = store
+            .update_howto(
+                &howto.id,
+                HowToUpdate { title: Some("Updated".to_string()), instructions: None },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.title, "Updated");
+        assert_eq!(updated.instructions, "Original instructions");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_update_howto_instructions() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Guide", "Old").unwrap();
+
+        let updated = store
+            .update_howto(
+                &howto.id,
+                HowToUpdate { title: None, instructions: Some("New instructions".to_string()) },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.instructions, "New instructions");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_update_howto_empty_does_nothing() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+        let updated = store.update_howto(&howto.id, HowToUpdate::default()).unwrap().unwrap();
+
+        assert_eq!(updated.title, howto.title);
+        assert_eq!(updated.instructions, howto.instructions);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_update_howto_not_found() {
+        let (_dir, store) = create_test_store();
+        let result = store
+            .update_howto(
+                "nonexistent",
+                HowToUpdate { title: Some("X".to_string()), ..Default::default() },
+            )
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_delete_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("To Delete", "Instructions").unwrap();
+        assert!(store.delete_howto(&howto.id).unwrap());
+        assert!(store.get_howto(&howto.id).unwrap().is_none());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_delete_howto_not_found() {
+        let (_dir, store) = create_test_store();
+        assert!(!store.delete_howto("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_list_howtos() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        store.create_howto("B Guide", "B").unwrap();
+        store.create_howto("A Guide", "A").unwrap();
+
+        let howtos = store.list_howtos().unwrap();
+        assert_eq!(howtos.len(), 2);
+        // Ordered by title
+        assert_eq!(howtos[0].title, "A Guide");
+        assert_eq!(howtos[1].title, "B Guide");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_search_howtos() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        store.create_howto("Deploy Guide", "Run deploy.sh").unwrap();
+        store.create_howto("Testing Guide", "Run pytest").unwrap();
+
+        let results = store.search_howtos("deploy").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Deploy Guide");
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_link_task_to_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Fix Bug", "", Priority::High).unwrap();
+        let howto = store.create_howto("Debugging Guide", "Use debugger").unwrap();
+
+        store.link_task_to_howto(&task.id, &howto.id).unwrap();
+
+        let guidance = store.get_task_guidance(&task.id).unwrap();
+        assert_eq!(guidance.len(), 1);
+        assert_eq!(guidance[0], howto.id);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_link_task_to_howto_task_not_found() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+        let result = store.link_task_to_howto("nonexistent", &howto.id);
+
+        assert!(result.is_err());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_link_task_to_howto_howto_not_found() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let result = store.link_task_to_howto(&task.id, "nonexistent");
+
+        assert!(result.is_err());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_unlink_task_from_howto() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+
+        store.link_task_to_howto(&task.id, &howto.id).unwrap();
+        assert!(store.unlink_task_from_howto(&task.id, &howto.id).unwrap());
+
+        let guidance = store.get_task_guidance(&task.id).unwrap();
+        assert!(guidance.is_empty());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_unlink_task_from_howto_not_linked() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+
+        assert!(!store.unlink_task_from_howto(&task.id, &howto.id).unwrap());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_task_guidance_multiple() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Complex Task", "", Priority::High).unwrap();
+        let howto1 = store.create_howto("Guide A", "A").unwrap();
+        let howto2 = store.create_howto("Guide B", "B").unwrap();
+
+        store.link_task_to_howto(&task.id, &howto1.id).unwrap();
+        store.link_task_to_howto(&task.id, &howto2.id).unwrap();
+
+        let guidance = store.get_task_guidance(&task.id).unwrap();
+        assert_eq!(guidance.len(), 2);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_howto_not_found_display() {
+        let err = HowToNotFound("test-123".to_string());
+        assert!(err.to_string().contains("test-123"));
+        assert!(err.to_string().contains("how-to not found"));
+    }
+
+    #[test]
+    fn test_howto_update_is_empty() {
+        let empty = HowToUpdate::default();
+        assert!(empty.is_empty());
+
+        let with_title = HowToUpdate { title: Some("Title".to_string()), ..Default::default() };
+        assert!(!with_title.is_empty());
+
+        let with_instructions =
+            HowToUpdate { instructions: Some("Instructions".to_string()), ..Default::default() };
+        assert!(!with_instructions.is_empty());
+    }
+
+    #[test]
+    fn test_howto_cascade_delete_guidance() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+
+        store.link_task_to_howto(&task.id, &howto.id).unwrap();
+
+        // Delete the how-to - guidance should be cascade deleted
+        store.delete_howto(&howto.id).unwrap();
+
+        let guidance = store.get_task_guidance(&task.id).unwrap();
+        assert!(guidance.is_empty());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_task_cascade_delete_guidance() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let howto = store.create_howto("Guide", "Instructions").unwrap();
+
+        store.link_task_to_howto(&task.id, &howto.id).unwrap();
+
+        // Delete the task - guidance should be cascade deleted
+        store.delete_task(&task.id).unwrap();
+
+        // HowTo should still exist
+        assert!(store.get_howto(&howto.id).unwrap().is_some());
 
         disable_deterministic_ids();
     }

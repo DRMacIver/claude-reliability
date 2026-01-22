@@ -3,7 +3,9 @@
 //! This module provides an MCP server that exposes task management
 //! functionality through the Model Context Protocol.
 
-use crate::tasks::{Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate};
+use crate::tasks::{
+    HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
+};
 use rmcp::model::{
     CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
@@ -154,6 +156,66 @@ pub struct GetAuditLogInput {
     pub limit: Option<usize>,
 }
 
+/// Input for creating a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateHowToInput {
+    /// How-to title (required).
+    pub title: String,
+    /// Instructions for how to perform the task.
+    #[serde(default)]
+    pub instructions: String,
+}
+
+/// Input for getting a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetHowToInput {
+    /// How-to ID.
+    pub id: String,
+}
+
+/// Input for updating a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateHowToInput {
+    /// How-to ID.
+    pub id: String,
+    /// New title (optional).
+    pub title: Option<String>,
+    /// New instructions (optional).
+    pub instructions: Option<String>,
+}
+
+/// Input for deleting a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteHowToInput {
+    /// How-to ID.
+    pub id: String,
+}
+
+/// Input for searching how-tos.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchHowTosInput {
+    /// Search query.
+    pub query: String,
+}
+
+/// Input for linking a task to a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LinkTaskToHowToInput {
+    /// Task ID.
+    pub task_id: String,
+    /// How-to ID.
+    pub howto_id: String,
+}
+
+/// Input for unlinking a task from a how-to.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnlinkTaskFromHowToInput {
+    /// Task ID.
+    pub task_id: String,
+    /// How-to ID.
+    pub howto_id: String,
+}
+
 // Output types - defined at module level to avoid items_after_statements
 
 /// Task output representation.
@@ -168,10 +230,11 @@ struct TaskOutput {
     created_at: String,
     updated_at: String,
     dependencies: Vec<String>,
+    guidance: Vec<String>,
 }
 
 impl TaskOutput {
-    fn from_task(task: &crate::tasks::Task, deps: Vec<String>) -> Self {
+    fn from_task(task: &crate::tasks::Task, deps: Vec<String>, guidance: Vec<String>) -> Self {
         Self {
             id: task.id.clone(),
             title: task.title.clone(),
@@ -182,6 +245,7 @@ impl TaskOutput {
             created_at: task.created_at.clone(),
             updated_at: task.updated_at.clone(),
             dependencies: deps,
+            guidance,
         }
     }
 }
@@ -220,6 +284,28 @@ struct TaskSuggestion {
     message: String,
 }
 
+/// How-to output representation.
+#[derive(Debug, Serialize)]
+struct HowToOutput {
+    id: String,
+    title: String,
+    instructions: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl HowToOutput {
+    fn from_howto(howto: &crate::tasks::HowTo) -> Self {
+        Self {
+            id: howto.id.clone(),
+            title: howto.title.clone(),
+            instructions: howto.instructions.clone(),
+            created_at: howto.created_at.clone(),
+            updated_at: howto.updated_at.clone(),
+        }
+    }
+}
+
 /// Get the string label for a priority level.
 const fn priority_label(priority: Priority) -> &'static str {
     match priority {
@@ -252,7 +338,8 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
-        let output = TaskOutput::from_task(&task, deps);
+        let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
+        let output = TaskOutput::from_task(&task, deps, guidance);
         let json = serde_json::to_string_pretty(&output)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -261,7 +348,7 @@ impl TasksServer {
 
     /// Get a task by ID.
     #[allow(clippy::needless_pass_by_value)]
-    #[tool(description = "Get a task by its ID, including dependencies and notes")]
+    #[tool(description = "Get a task by its ID, including dependencies, notes, and guidance")]
     fn get_task(&self, #[tool(aggr)] input: GetTaskInput) -> Result<CallToolResult, McpError> {
         let task = self
             .store
@@ -272,9 +359,10 @@ impl TasksServer {
             Some(task) => {
                 let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
                 let notes = self.store.get_notes(&task.id).unwrap_or_default();
+                let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
 
                 let output = FullTaskOutput {
-                    task: TaskOutput::from_task(&task, deps),
+                    task: TaskOutput::from_task(&task, deps, guidance),
                     notes: notes
                         .into_iter()
                         .map(|n| NoteOutput {
@@ -328,7 +416,8 @@ impl TasksServer {
         match task {
             Some(task) => {
                 let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
-                let output = TaskOutput::from_task(&task, deps);
+                let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
+                let output = TaskOutput::from_task(&task, deps, guidance);
                 let json = serde_json::to_string_pretty(&output)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -397,7 +486,8 @@ impl TasksServer {
             .iter()
             .map(|t| {
                 let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
-                TaskOutput::from_task(t, deps)
+                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps, guidance)
             })
             .collect();
 
@@ -504,7 +594,8 @@ impl TasksServer {
             .iter()
             .map(|t| {
                 let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
-                TaskOutput::from_task(t, deps)
+                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps, guidance)
             })
             .collect();
 
@@ -542,9 +633,10 @@ impl TasksServer {
             Some(task) => {
                 let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
                 let notes = self.store.get_notes(&task.id).unwrap_or_default();
+                let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
 
                 let output = TaskSuggestion {
-                    task: TaskOutput::from_task(&task, deps),
+                    task: TaskOutput::from_task(&task, deps, guidance),
                     notes: notes
                         .into_iter()
                         .map(|n| NoteOutput { id: n.id, content: n.content, created_at: n.created_at })
@@ -566,6 +658,181 @@ impl TasksServer {
             )])),
         }
     }
+
+    // How-to tools
+
+    /// Create a new how-to guide.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Create a new how-to guide with title and instructions")]
+    fn create_howto(
+        &self,
+        #[tool(aggr)] input: CreateHowToInput,
+    ) -> Result<CallToolResult, McpError> {
+        let howto = self
+            .store
+            .create_howto(&input.title, &input.instructions)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output = HowToOutput::from_howto(&howto);
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get a how-to by ID.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Get a how-to guide by its ID")]
+    fn get_howto(&self, #[tool(aggr)] input: GetHowToInput) -> Result<CallToolResult, McpError> {
+        let howto = self
+            .store
+            .get_howto(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match howto {
+            Some(howto) => {
+                let output = HowToOutput::from_howto(&howto);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "How-to not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Update a how-to.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Update a how-to guide's title or instructions")]
+    fn update_howto(
+        &self,
+        #[tool(aggr)] input: UpdateHowToInput,
+    ) -> Result<CallToolResult, McpError> {
+        let update = HowToUpdate { title: input.title, instructions: input.instructions };
+
+        let howto = self
+            .store
+            .update_howto(&input.id, update)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match howto {
+            Some(howto) => {
+                let output = HowToOutput::from_howto(&howto);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "How-to not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Delete a how-to.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Delete a how-to guide by its ID")]
+    fn delete_howto(
+        &self,
+        #[tool(aggr)] input: DeleteHowToInput,
+    ) -> Result<CallToolResult, McpError> {
+        let deleted = self
+            .store
+            .delete_howto(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if deleted {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Deleted how-to: {}",
+                input.id
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "How-to not found: {}",
+                input.id
+            ))]))
+        }
+    }
+
+    /// List all how-tos.
+    #[tool(description = "List all how-to guides")]
+    fn list_howtos(&self) -> Result<CallToolResult, McpError> {
+        let howtos =
+            self.store.list_howtos().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let outputs: Vec<_> = howtos.iter().map(HowToOutput::from_howto).collect();
+
+        let json = serde_json::to_string_pretty(&outputs)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Search how-tos.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Full-text search across how-to guides")]
+    fn search_howtos(
+        &self,
+        #[tool(aggr)] input: SearchHowTosInput,
+    ) -> Result<CallToolResult, McpError> {
+        let howtos = self
+            .store
+            .search_howtos(&input.query)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let outputs: Vec<_> = howtos.iter().map(HowToOutput::from_howto).collect();
+
+        let json = serde_json::to_string_pretty(&outputs)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Link a task to a how-to guide.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Link a task to a how-to guide for guidance")]
+    fn link_task_to_howto(
+        &self,
+        #[tool(aggr)] input: LinkTaskToHowToInput,
+    ) -> Result<CallToolResult, McpError> {
+        self.store
+            .link_task_to_howto(&input.task_id, &input.howto_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Linked task {} to how-to {}",
+            input.task_id, input.howto_id
+        ))]))
+    }
+
+    /// Unlink a task from a how-to guide.
+    #[allow(clippy::needless_pass_by_value)]
+    #[tool(description = "Remove a guidance link between a task and how-to")]
+    fn unlink_task_from_howto(
+        &self,
+        #[tool(aggr)] input: UnlinkTaskFromHowToInput,
+    ) -> Result<CallToolResult, McpError> {
+        let removed = self
+            .store
+            .unlink_task_from_howto(&input.task_id, &input.howto_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if removed {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Unlinked task {} from how-to {}",
+                input.task_id, input.howto_id
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "No link found between task {} and how-to {}",
+                input.task_id, input.howto_id
+            ))]))
+        }
+    }
 }
 
 #[rmcp::tool(tool_box)]
@@ -576,7 +843,7 @@ impl rmcp::ServerHandler for TasksServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation { name: "tasks-mcp".to_string(), version: env!("CARGO_PKG_VERSION").to_string() },
             instructions: Some(
-                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies and notes.".to_string(),
+                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, and how-to guides for guidance.".to_string(),
             ),
         }
     }

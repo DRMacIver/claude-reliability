@@ -165,6 +165,21 @@ pub struct Note {
     pub created_at: String,
 }
 
+/// A how-to guide for performing a particular task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HowTo {
+    /// Unique identifier (slug from title + 4 random hex chars).
+    pub id: String,
+    /// Short title describing what this how-to explains.
+    pub title: String,
+    /// Detailed instructions for how to perform the task.
+    pub instructions: String,
+    /// ISO 8601 timestamp when the how-to was created.
+    pub created_at: String,
+    /// ISO 8601 timestamp when the how-to was last updated.
+    pub updated_at: String,
+}
+
 /// An entry in the audit log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -339,5 +354,20 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn test_howto_serialization() {
+        let howto = HowTo {
+            id: "how-to-deploy-1234".to_string(),
+            title: "How to deploy".to_string(),
+            instructions: "Run the deploy script".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&howto).unwrap();
+        let parsed: HowTo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, howto);
     }
 }
