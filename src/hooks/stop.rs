@@ -13,6 +13,7 @@ use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
+use crate::tasks;
 use crate::templates;
 use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
 use crate::transcript::{self, is_simple_question, TranscriptInfo};
@@ -279,24 +280,43 @@ pub fn run_stop_hook(
 
         // Handle "work complete" phrase
         if has_complete_phrase {
-            // Check if there are remaining issues that can be worked on
-            if beads::is_beads_available_in(runner, config.base_dir()) {
-                let ready_count = beads::get_ready_issues_count(runner)?;
-                if ready_count > 0 {
-                    return Ok(StopHookResult::block()
-                        .with_message("# Exit Phrase Rejected")
+            // Check if there are remaining issues/tasks that can be worked on
+            let beads_count = if beads::is_beads_available_in(runner, config.base_dir()) {
+                beads::get_ready_issues_count(runner).unwrap_or(0)
+            } else {
+                0
+            };
+            let tasks_count = tasks::count_ready_tasks(config.base_dir());
+            let total_pending = beads_count + tasks_count;
+
+            if total_pending > 0 {
+                let mut result = StopHookResult::block()
+                    .with_message("# Exit Phrase Rejected")
+                    .with_message("")
+                    .with_message(format!("There are {total_pending} item(s) ready to work on."))
+                    .with_message("")
+                    .with_message("Please work on the remaining items before exiting.");
+
+                // Add task suggestion if available
+                if let Some((id, title)) = tasks::suggest_task(config.base_dir()) {
+                    result = result
                         .with_message("")
-                        .with_message(format!("There are {ready_count} issue(s) ready to work on."))
+                        .with_message(format!("Suggestion: Work on task \"{id}: {title}\" next."));
+                } else if beads_count > 0 {
+                    result = result
                         .with_message("")
-                        .with_message("Please work on the remaining issues before exiting.")
-                        .with_message("Run `bd ready` to see available work.")
-                        .with_message("")
-                        .with_message(
-                            "If you've hit a blocker you can't resolve, use this phrase instead:",
-                        )
-                        .with_message("")
-                        .with_message(format!("  \"{PROBLEM_NEEDS_USER}\"")));
+                        .with_message("Run `bd ready` to see available work.");
                 }
+
+                result = result
+                    .with_message("")
+                    .with_message(
+                        "If you've hit a blocker you can't resolve, use this phrase instead:",
+                    )
+                    .with_message("")
+                    .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
+
+                return Ok(result);
             }
             // Bypass allowed - but don't cleanup session files so JKW can resume
             return Ok(StopHookResult::allow()
@@ -1757,7 +1777,74 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
-        assert!(result.messages.iter().any(|m| m.contains("2 issue(s) ready")));
+        assert!(result.messages.iter().any(|m| m.contains("2 item(s) ready to work on")));
+    }
+
+    #[test]
+    fn test_bypass_human_input_blocked_with_open_tasks_shows_suggestion() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .claude directory and task database with tasks
+        let claude_dir = base.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.create_task("Fix important bug", "Description", Priority::High).unwrap();
+
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+
+        let mut runner = MockCommandRunner::new();
+        // No beads available
+
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        // check_uncommitted_changes (fast path) - returns changes so we continue
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
+        assert!(result.messages.iter().any(|m| m.contains("1 item(s) ready to work on")));
+        // Check for task suggestion
+        assert!(
+            result.messages.iter().any(|m| m.contains("Suggestion: Work on task")),
+            "Expected task suggestion in messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("Fix important bug")),
+            "Expected task title in suggestion: {:?}",
+            result.messages
+        );
     }
 
     #[test]
