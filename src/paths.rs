@@ -4,6 +4,8 @@
 //! stores its data files. Data is stored in `~/.claude-reliability/` with
 //! project-specific subdirectories based on a hash of the project path.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// The base directory name for claude-reliability data.
@@ -23,8 +25,8 @@ pub fn data_dir() -> Option<PathBuf> {
 
 /// Get the project-specific data directory.
 ///
-/// Returns `~/.claude-reliability/projects/<sanitized-path>/` where `<sanitized-path>` is
-/// the canonical project path with `/` replaced by `-`.
+/// Returns `~/.claude-reliability/projects/<readable-hash>/` where `<readable-hash>` is
+/// a human-readable prefix plus a hash suffix to avoid collisions.
 ///
 /// # Arguments
 ///
@@ -36,8 +38,8 @@ pub fn data_dir() -> Option<PathBuf> {
 #[must_use]
 pub fn project_data_dir(project_dir: &Path) -> Option<PathBuf> {
     let base = data_dir()?;
-    let sanitized = sanitize_path(project_dir);
-    Some(base.join("projects").join(sanitized))
+    let dir_name = create_project_dir_name(project_dir);
+    Some(base.join("projects").join(dir_name))
 }
 
 /// Get the database path for a project.
@@ -56,20 +58,42 @@ pub fn project_db_path(project_dir: &Path) -> Option<PathBuf> {
     project_data_dir(project_dir).map(|dir| dir.join(DATABASE_FILENAME))
 }
 
-/// Sanitize a path for use as a directory name.
+/// Create a directory name for a project.
 ///
-/// Uses the canonical path if available, falling back to the provided path.
-/// Replaces `/` with `-` and removes leading `-`.
-fn sanitize_path(project_dir: &Path) -> String {
+/// Uses a readable prefix (last path component) plus a hash suffix to ensure
+/// uniqueness while remaining human-readable.
+///
+/// Format: `<project-name>-<hash>` e.g., `my-project-a1b2c3d4`
+fn create_project_dir_name(project_dir: &Path) -> String {
     // Use canonical path if available for consistency
-    let path_to_sanitize = project_dir.canonicalize().unwrap_or_else(|_| project_dir.to_path_buf());
+    let path_to_hash = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    // Convert to string and replace / with -
-    let path_str = path_to_sanitize.to_string_lossy();
-    let sanitized = path_str.replace('/', "-");
+    // Get the last component as a readable prefix
+    let prefix = path_to_hash
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
 
-    // Remove leading dash if present (from leading /)
-    sanitized.trim_start_matches('-').to_string()
+    // Sanitize the prefix (replace non-alphanumeric with dash, collapse multiple dashes)
+    let prefix: String = prefix
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let prefix = prefix.trim_matches('-');
+
+    // Hash the full canonical path for uniqueness
+    let hash = hash_path(&path_to_hash);
+
+    format!("{prefix}-{hash:016x}")
+}
+
+/// Compute a stable hash of a path.
+fn hash_path(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -85,13 +109,13 @@ mod tests {
     }
 
     #[test]
-    fn test_project_data_dir_includes_sanitized_path() {
+    fn test_project_data_dir_includes_project_name() {
         let project = PathBuf::from("/some/project/path");
         if let Some(dir) = project_data_dir(&project) {
             assert!(dir.to_string_lossy().contains("projects"));
-            // Directory name should be sanitized path
+            // Directory name should include the project name prefix
             let dir_name = dir.file_name().unwrap().to_string_lossy();
-            assert!(dir_name.contains("some-project-path"));
+            assert!(dir_name.starts_with("path-"));
         }
     }
 
@@ -104,34 +128,52 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_path_replaces_slashes() {
+    fn test_create_project_dir_name_no_slashes() {
         let path = PathBuf::from("/home/user/project");
-        let sanitized = sanitize_path(&path);
-        assert!(!sanitized.contains('/'));
-        assert!(sanitized.contains("home-user-project"));
+        let dir_name = create_project_dir_name(&path);
+        assert!(!dir_name.contains('/'));
     }
 
     #[test]
-    fn test_sanitize_path_removes_leading_dash() {
+    fn test_create_project_dir_name_starts_with_project_name() {
         let path = PathBuf::from("/leading/slash");
-        let sanitized = sanitize_path(&path);
-        assert!(!sanitized.starts_with('-'));
+        let dir_name = create_project_dir_name(&path);
+        assert!(dir_name.starts_with("slash-"));
     }
 
     #[test]
-    fn test_sanitize_path_is_consistent() {
+    fn test_create_project_dir_name_is_consistent() {
         let project = PathBuf::from("/consistent/path");
-        let sanitized1 = sanitize_path(&project);
-        let sanitized2 = sanitize_path(&project);
-        assert_eq!(sanitized1, sanitized2);
+        let dir_name1 = create_project_dir_name(&project);
+        let dir_name2 = create_project_dir_name(&project);
+        assert_eq!(dir_name1, dir_name2);
     }
 
     #[test]
-    fn test_sanitize_path_differs_for_different_paths() {
+    fn test_create_project_dir_name_differs_for_different_paths() {
         let project1 = PathBuf::from("/path/one");
         let project2 = PathBuf::from("/path/two");
-        let sanitized1 = sanitize_path(&project1);
-        let sanitized2 = sanitize_path(&project2);
-        assert_ne!(sanitized1, sanitized2);
+        let dir_name1 = create_project_dir_name(&project1);
+        let dir_name2 = create_project_dir_name(&project2);
+        assert_ne!(dir_name1, dir_name2);
+    }
+
+    #[test]
+    fn test_create_project_dir_name_no_collision_similar_paths() {
+        // This was the original bug: these paths would both map to "home-user-project"
+        let project1 = PathBuf::from("/home/user/project");
+        let project2 = PathBuf::from("/home/user-project");
+        let dir_name1 = create_project_dir_name(&project1);
+        let dir_name2 = create_project_dir_name(&project2);
+        // With hashing, these should be different
+        assert_ne!(dir_name1, dir_name2);
+    }
+
+    #[test]
+    fn test_hash_path_deterministic() {
+        let path = PathBuf::from("/test/path");
+        let hash1 = hash_path(&path);
+        let hash2 = hash_path(&path);
+        assert_eq!(hash1, hash2);
     }
 }
