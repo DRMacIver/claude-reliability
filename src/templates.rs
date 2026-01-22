@@ -50,10 +50,6 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         include_str!("../templates/messages/stop/unpushed_commits.tera"),
     );
     m.insert(
-        "messages/stop/beads_required.tera",
-        include_str!("../templates/messages/stop/beads_required.tera"),
-    );
-    m.insert(
         "messages/stop/open_issues_remaining.tera",
         include_str!("../templates/messages/stop/open_issues_remaining.tera"),
     );
@@ -287,13 +283,9 @@ fn sample_context_for(template_name: &str) -> Context {
     );
     ctx.insert("commits_ahead", &2_u32);
     ctx.insert("open_count", &3_u32);
-    ctx.insert("change_type", "issue");
+    ctx.insert("change_type", "git");
     ctx.insert("iterations_since_change", &2_u32);
     ctx.insert("iteration", &5_u32);
-    ctx.insert("total_outstanding", &3_u32);
-    ctx.insert("beads_available", &true);
-    ctx.insert("open_count", &2_u32);
-    ctx.insert("in_progress_count", &1_u32);
     ctx.insert("staleness_threshold", &5_u32);
 
     // Other hooks

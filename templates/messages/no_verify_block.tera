@@ -9,7 +9,6 @@ The --no-verify flag skips pre-commit hooks, which are
 important for:
 - Running quality checks before commits
 - Preventing secrets from being committed
-- Ensuring beads are properly synced
 
 If the user has explicitly said you can skip hooks, set:
 

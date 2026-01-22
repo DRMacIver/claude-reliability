@@ -68,7 +68,7 @@ If this was accidental, the secret may need to be rotated.
 {% if todo_warnings %}
 ## Untracked Work Items
 
-Consider linking these items to beads issues:
+Consider creating tasks for these items:
 
 {% for w in todo_warnings %}
 {{ w }}

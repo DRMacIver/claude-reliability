@@ -2,41 +2,18 @@
 
 Variables:
   - iteration: Current iteration number
-  - total_outstanding: Total outstanding issues (for beads mode)
   - iterations_since_change: Iterations since last change
-  - beads_available: Whether beads is available (bool)
-  - open_count: Number of open issues (for beads mode)
-  - in_progress_count: Number of in-progress issues (for beads mode)
-  - change_type: Type of changes being tracked ("issue" or "git")
   - staleness_threshold: Threshold for staleness
   - human_input_phrase: Phrase for when work is complete
   - problem_phrase: Phrase for when hitting a problem
 #}
 # Just-Keep-Working Mode Active
 
-{% if beads_available %}
-**Iteration {{ iteration }}** | Outstanding issues: {{ total_outstanding }}
-Iterations since last issue change: {{ iterations_since_change }}
-
-## Current State
-- Open issues: {{ open_count }}
-- In progress: {{ in_progress_count }}
-
-## Action Required
-
-Continue working on outstanding issues:
-
-1. Run `bd ready` to see available work
-2. Pick an issue and work on it
-3. Run quality checks after completing work
-4. Close completed issues with `bd close <id>`
-{% else %}
 **Iteration {{ iteration }}**
 Iterations since last git change: {{ iterations_since_change }}
 
 ## Progress Tracking
 - Tracking progress via git working state
-- Install `bd` (beads) for issue-based tracking
 
 ## Action Required
 
@@ -45,10 +22,9 @@ Continue working:
 1. Make progress on your current task
 2. Stage changes to indicate progress
 3. Run quality checks after completing work
-{% endif %}
 {% if iterations_since_change > 2 %}
 
-**Warning**: No {{ change_type }} changes for {{ iterations_since_change }} loops.
+**Warning**: No git changes for {{ iterations_since_change }} loops.
 Staleness threshold: {{ staleness_threshold }}
 {% endif %}
 

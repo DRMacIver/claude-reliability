@@ -10,6 +10,20 @@ use crate::traits::CommandRunner;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Directory containing beads data.
+const BEADS_DIR: &str = ".beads";
+
+/// Check if beads is available in the specified directory.
+fn is_beads_available_in(runner: &dyn CommandRunner, base_dir: &Path) -> bool {
+    // Check if bd CLI is available
+    if !runner.is_available("bd") {
+        return false;
+    }
+
+    // Check if .beads/ directory exists
+    base_dir.join(BEADS_DIR).is_dir()
+}
+
 /// A beads issue as returned by `bd list --format=json`.
 #[derive(Debug, Deserialize)]
 struct BeadsIssue {
@@ -51,7 +65,7 @@ const fn default_priority() -> u8 {
 /// Returns an error if bd commands fail or database operations fail.
 pub fn sync_beads_to_tasks(runner: &dyn CommandRunner, base_dir: &Path) -> Result<SyncResult> {
     // Check if beads is available
-    if !crate::beads::is_beads_available_in(runner, base_dir) {
+    if !is_beads_available_in(runner, base_dir) {
         return Ok(SyncResult { created: 0, skipped: 0, errors: Vec::new() });
     }
 

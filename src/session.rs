@@ -75,8 +75,8 @@ pub struct SessionConfig {
     /// Snapshot of issue IDs from the last check.
     #[serde(default)]
     pub issue_snapshot: Vec<String>,
-    /// Hash of git diff for staleness detection when beads is not available.
-    /// This provides a fallback mechanism to detect progress via code changes.
+    /// Hash of git diff for staleness detection.
+    /// This tracks progress via code changes.
     #[serde(default)]
     pub git_diff_hash: Option<String>,
 }

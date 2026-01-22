@@ -10,8 +10,7 @@ Main features:
 
 1. A *lot* of guard rails on when Claude is allowed to stop. Tests and linting should pass (or whatever you want to configure here), code should be committed and pushed.
 2. Self-review of code with another model before committing.
-3. Integration with beads if present, trying to make sure the agent tracks state somewhere outside its context.
-4. A just-keep-working mode which causes Claude to actually keep working until it's done.
+3. A just-keep-working mode which causes Claude to actually keep working until it's done.
 
 This is currently alpha-grade software: I expect it to work well, except when it doesn't. Please let me know if you use it, and report any problems you encounter.
 

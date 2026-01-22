@@ -53,54 +53,18 @@ python -m snapshot_tests.run_snapshots --save-snapshot my-test
 - Fix problems properly rather than suppressing errors
 - Type hints on all functions
 
-## Issue Tracking with Beads
-
-This project uses **bd** (beads) for issue tracking. **ALWAYS track your work in beads.**
-
-### CRITICAL: Add Issues Immediately
-
-When the user points out a problem or requests a feature, add it to beads IMMEDIATELY:
-
-```bash
-bd create --title="<description>" --type=task|bug|feature --priority=2
-```
-
-Do NOT wait until the end of the session or until the current task is complete. Context can be lost through conversation compaction or session ends, and if issues aren't tracked immediately, they may be forgotten.
-
-### Common Commands
-
-```bash
-bd ready              # Find available work (no blockers)
-bd list --status=open # All open issues
-bd show <id>          # View issue details
-bd create --title="..." --type=task --priority=2  # Create new issue
-bd update <id> --status=in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
-```
-
-### Priority Levels
-- P0: Critical (blocking)
-- P1: High
-- P2: Medium (default)
-- P3: Low
-- P4: Backlog
-
 ## Landing Work (Session Completion)
 
 When ending a work session, complete ALL steps below. Work is NOT complete until pushed.
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - `just check`
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Push to remote**:
+1. **Run quality gates** (if code changed) - `just check`
+2. **Push to remote**:
    ```bash
    git pull --rebase
-   bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Verify** - All changes committed AND pushed
+3. **Verify** - All changes committed AND pushed
 
 ## Code Review
 
@@ -193,7 +157,7 @@ The file `docs/stop-hook-states.dot` contains a Graphviz state diagram showing a
 Read through `src/hooks/stop.rs` and update `docs/stop-hook-states.dot` to reflect any changes to:
 - Early exit conditions (problem mode, API errors, fast path, bypass phrases)
 - Block conditions (validation, uncommitted changes, unpushed commits, questions, JKW mode, quality checks, self-reflection)
-- Tool use patterns (git commands, beads commands, quality check commands, sub-agent calls)
+- Tool use patterns (git commands, quality check commands, sub-agent calls)
 
 **To render the diagram as PNG:**
 ```bash

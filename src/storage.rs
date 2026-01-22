@@ -26,8 +26,6 @@ pub mod markers {
     pub const NEEDS_VALIDATION: &str = "needs_validation";
     /// Agent should reflect on work before stopping.
     pub const MUST_REFLECT: &str = "must_reflect";
-    /// Beads warning has been given this session.
-    pub const BEADS_WARNING: &str = "beads_warning";
     /// Questions have been shown for reflection.
     pub const QUESTIONS_SHOWN: &str = "questions_shown";
 }
@@ -148,7 +146,6 @@ impl SqliteStore {
             (".claude/jkw-setup-required.local", markers::JKW_SETUP_REQUIRED),
             (".claude/needs-validation.local", markers::NEEDS_VALIDATION),
             (".claude/must-reflect.local", markers::MUST_REFLECT),
-            (".claude/beads-warning-given.local", markers::BEADS_WARNING),
         ];
 
         for (file_path, marker_name) in marker_migrations {
@@ -432,7 +429,6 @@ mod tests {
         assert!(!markers::JKW_SETUP_REQUIRED.is_empty());
         assert!(!markers::NEEDS_VALIDATION.is_empty());
         assert!(!markers::MUST_REFLECT.is_empty());
-        assert!(!markers::BEADS_WARNING.is_empty());
     }
 
     #[test]

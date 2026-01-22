@@ -7,7 +7,6 @@
 //! - Interactive question handling with sub-agent
 
 use crate::analysis::{self, AnalysisResults};
-use crate::beads;
 use crate::error::Result;
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
@@ -66,7 +65,7 @@ pub struct StopHookConfig {
     pub quality_check_command: Option<String>,
     /// Whether to require pushing before exit.
     pub require_push: bool,
-    /// Base directory for beads checks (defaults to current directory).
+    /// Base directory for file operations (defaults to current directory).
     /// Used by tests to avoid changing global CWD.
     pub base_dir: Option<PathBuf>,
     /// Whether to explain why stops are permitted.
@@ -318,32 +317,22 @@ pub fn run_stop_hook(
 
         // Handle "work complete" phrase
         if has_complete_phrase {
-            // Check if there are remaining issues/tasks that can be worked on
-            let beads_count = if beads::is_beads_available_in(runner, config.base_dir()) {
-                beads::get_ready_issues_count(runner).unwrap_or(0)
-            } else {
-                0
-            };
+            // Check if there are remaining tasks that can be worked on
             let tasks_count = tasks::count_ready_tasks(config.base_dir());
-            let total_pending = beads_count + tasks_count;
 
-            if total_pending > 0 {
+            if tasks_count > 0 {
                 let mut result = StopHookResult::block()
                     .with_message("# Exit Phrase Rejected")
                     .with_message("")
-                    .with_message(format!("There are {total_pending} item(s) ready to work on."))
+                    .with_message(format!("There are {tasks_count} task(s) ready to work on."))
                     .with_message("")
-                    .with_message("Please work on the remaining items before exiting.");
+                    .with_message("Please work on the remaining tasks before exiting.");
 
                 // Add task suggestion if available
                 if let Some((id, title)) = tasks::suggest_task(config.base_dir()) {
                     result = result
                         .with_message("")
                         .with_message(format!("Suggestion: Work on task \"{id}: {title}\" next."));
-                } else if beads_count > 0 {
-                    result = result
-                        .with_message("")
-                        .with_message("Run `bd ready` to see available work.");
                 }
 
                 result = result
@@ -576,28 +565,6 @@ fn handle_uncommitted_changes(
     _sub_agent: &dyn SubAgent,
 ) -> Result<StopHookResult> {
     let mut result = StopHookResult::block();
-    let base_dir = config.base_dir();
-
-    // Check beads interaction if beads is available
-    if beads::is_beads_available_in(runner, base_dir) {
-        let beads_status = beads::check_beads_interaction_in(runner, base_dir)?;
-        if !beads_status.has_interaction && !beads_status.already_warned {
-            beads::mark_beads_warning_given_in(base_dir)?;
-            return Ok(result
-                .with_message("# Beads Interaction Required")
-                .with_message("")
-                .with_message("You have uncommitted changes but haven't interacted with beads.")
-                .with_message("")
-                .with_message("In Claude Code sessions, work should be tracked in beads:")
-                .with_message("  - Create an issue: `bd create \"Issue title\"`")
-                .with_message("  - Claim work: `bd update <id> --status in_progress`")
-                .with_message("  - Complete work: `bd close <id>`")
-                .with_message("")
-                .with_message(
-                    "If this work genuinely doesn't need tracking, try stopping again.",
-                ));
-        }
-    }
 
     // Analyze the diff for code quality issues
     let combined_diff = git::combined_diff(runner)?;
@@ -765,7 +732,7 @@ fn add_analysis_messages(result: &mut StopHookResult, analysis: &AnalysisResults
     if !analysis.todo_warnings.is_empty() {
         result.messages.push("## Untracked Work Items".to_string());
         result.messages.push(String::new());
-        result.messages.push("Consider linking these items to beads issues:".to_string());
+        result.messages.push("Consider creating tasks for these items:".to_string());
         result.messages.push(String::new());
         for w in &analysis.todo_warnings {
             result.messages.push(w.format());
@@ -859,32 +826,11 @@ fn handle_jkw_mode(
     session.iteration += 1;
     let iteration = session.iteration;
 
-    // Get current issue state (if beads is available)
-    let beads_available = beads::is_beads_available_in(runner, config.base_dir());
-    let (open_ids, in_progress_ids) = if beads_available {
-        beads::get_current_issues(runner)?
-    } else {
-        (HashSet::new(), HashSet::new())
-    };
-
-    let current_snapshot: HashSet<String> = open_ids.union(&in_progress_ids).cloned().collect();
-    let previous_snapshot = session.issue_snapshot_set();
-    let total_outstanding = current_snapshot.len();
-
-    // Check for changes - use beads issues if available, otherwise use git state hash
-    if beads_available {
-        // Track issue changes
-        if current_snapshot != previous_snapshot {
-            session.last_issue_change_iteration = iteration;
-        }
-        session.issue_snapshot = current_snapshot.into_iter().collect();
-    } else {
-        // Fallback: track git working state changes
-        let current_git_hash = git::working_state_hash(runner)?;
-        if session.git_diff_hash.as_ref() != Some(&current_git_hash) {
-            session.last_issue_change_iteration = iteration;
-            session.git_diff_hash = Some(current_git_hash);
-        }
+    // Track git working state changes
+    let current_git_hash = git::working_state_hash(runner)?;
+    if session.git_diff_hash.as_ref() != Some(&current_git_hash) {
+        session.last_issue_change_iteration = iteration;
+        session.git_diff_hash = Some(current_git_hash);
     }
 
     // Update session state file
@@ -893,13 +839,10 @@ fn handle_jkw_mode(
     // Check staleness - allow stop but don't cleanup session files so JKW can resume
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
-        let change_type = if beads_available { "issue" } else { "git" };
         return Ok(StopHookResult::allow()
             .with_message("# Staleness Detected")
             .with_message("")
-            .with_message(format!(
-                "No {change_type} changes for {iterations_since_change} iterations."
-            ))
+            .with_message(format!("No git changes for {iterations_since_change} iterations."))
             .with_message("Just-keep-working mode paused due to lack of progress.")
             .with_message("")
             .with_message("Session preserved - JKW mode will resume on next message.")
@@ -911,91 +854,29 @@ fn handle_jkw_mode(
             ));
     }
 
-    // Check if all work is done (only when beads is available to track issues)
-    if beads_available && total_outstanding == 0 {
-        let mut result = StopHookResult::block()
-            .with_message("# Checking Completion")
-            .with_message("")
-            .with_message("No outstanding issues. Running quality gates...");
-
-        // Run quality checks if enabled
-        if config.quality_check_enabled {
-            if let Some(ref cmd) = config.quality_check_command {
-                let output = runner.run("sh", &["-c", cmd], None)?;
-                if output.success() {
-                    result.messages.push(String::new());
-                    result.messages.push("All quality gates passed!".to_string());
-                    result.messages.push("No open issues remain.".to_string());
-                    result.messages.push(String::new());
-                    result.messages.push("## Options".to_string());
-                    result.messages.push(String::new());
-                    result.messages.push("1. Run `/ideate` to generate new work items".to_string());
-                    result.messages.push("2. Say an exit phrase to end the session".to_string());
-                    result.messages.push(String::new());
-                    result.messages.push("To exit when work is complete:".to_string());
-                    result.messages.push(String::new());
-                    result.messages.push(format!("  \"{HUMAN_INPUT_REQUIRED}\""));
-                    return Ok(result);
-                }
-                result.messages.push(String::new());
-                result.messages.push("## Quality Gates Failed".to_string());
-                result.messages.push(truncate_output(&output.combined_output(), 50));
-                result.messages.push(String::new());
-                result.messages.push("Fix issues before completing.".to_string());
-                return Ok(result);
-            }
-        }
-    }
-
     // Work remains
     let mut result =
         StopHookResult::block().with_message("# Just-Keep-Working Mode Active").with_message("");
 
-    if beads_available {
-        result
-            .messages
-            .push(format!("**Iteration {iteration}** | Outstanding issues: {total_outstanding}"));
-        result
-            .messages
-            .push(format!("Iterations since last issue change: {iterations_since_change}"));
-        result.messages.push(String::new());
-        result.messages.push("## Current State".to_string());
-        result.messages.push(format!("- Open issues: {}", open_ids.len()));
-        result.messages.push(format!("- In progress: {}", in_progress_ids.len()));
-        result.messages.push(String::new());
-        result.messages.push("## Action Required".to_string());
-        result.messages.push(String::new());
-        result.messages.push("Continue working on outstanding issues:".to_string());
-        result.messages.push(String::new());
-        result.messages.push("1. Run `bd ready` to see available work".to_string());
-        result.messages.push("2. Pick an issue and work on it".to_string());
-        result.messages.push("3. Run quality checks after completing work".to_string());
-        result.messages.push("4. Close completed issues with `bd close <id>`".to_string());
-    } else {
-        result.messages.push(format!("**Iteration {iteration}**"));
-        result
-            .messages
-            .push(format!("Iterations since last git change: {iterations_since_change}"));
-        result.messages.push(String::new());
-        result.messages.push("## Progress Tracking".to_string());
-        result.messages.push("- Tracking progress via git working state".to_string());
-        result.messages.push("- Install `bd` (beads) for issue-based tracking".to_string());
-        result.messages.push(String::new());
-        result.messages.push("## Action Required".to_string());
-        result.messages.push(String::new());
-        result.messages.push("Continue working:".to_string());
-        result.messages.push(String::new());
-        result.messages.push("1. Make progress on your current task".to_string());
-        result.messages.push("2. Stage changes to indicate progress".to_string());
-        result.messages.push("3. Run quality checks after completing work".to_string());
-    }
+    result.messages.push(format!("**Iteration {iteration}**"));
+    result.messages.push(format!("Iterations since last git change: {iterations_since_change}"));
+    result.messages.push(String::new());
+    result.messages.push("## Progress Tracking".to_string());
+    result.messages.push("- Tracking progress via git working state".to_string());
+    result.messages.push(String::new());
+    result.messages.push("## Action Required".to_string());
+    result.messages.push(String::new());
+    result.messages.push("Continue working:".to_string());
+    result.messages.push(String::new());
+    result.messages.push("1. Make progress on your current task".to_string());
+    result.messages.push("2. Stage changes to indicate progress".to_string());
+    result.messages.push("3. Run quality checks after completing work".to_string());
 
     if iterations_since_change > 2 {
         result.messages.push(String::new());
-        let change_type = if beads_available { "issue" } else { "git" };
-        result.messages.push(format!(
-            "**Warning**: No {change_type} changes for {iterations_since_change} loops."
-        ));
+        result
+            .messages
+            .push(format!("**Warning**: No git changes for {iterations_since_change} loops."));
         result.messages.push(format!("Staleness threshold: {STALENESS_THRESHOLD}"));
     }
 
@@ -1197,9 +1078,6 @@ mod tests {
             empty_success.clone(),
         );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // beads availability check uses runner.is_available(), not a command
-        // Since we don't call runner.set_available("bd"), beads is not available
 
         // combined_diff for analysis (staged_diff first, then unstaged_diff)
         runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
@@ -1895,69 +1773,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bypass_human_input_blocked_with_open_issues() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create .beads directory
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let has_changes = CommandOutput {
-            exit_code: 0,
-            stdout: " file.rs | 10 ++++++++++\n".to_string(),
-            stderr: String::new(),
-        };
-        let file_list =
-            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path) - returns changes so we continue
-        runner.expect("git", &["diff", "--stat"], has_changes);
-        runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // beads availability check happens in bypass check
-        // get_ready_issues_count - returns 2 ready issues
-        runner.expect(
-            "bd",
-            &["ready"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "1 [P1] Ready issue one\n2 [P2] Ready issue two\n".to_string(),
-                stderr: String::new(),
-            },
-        );
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
-        assert!(result.messages.iter().any(|m| m.contains("2 item(s) ready to work on")));
-    }
-
-    #[test]
     fn test_bypass_human_input_blocked_with_open_tasks_shows_suggestion() {
         use crate::paths;
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
@@ -1975,7 +1790,6 @@ mod tests {
         let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
 
         let mut runner = MockCommandRunner::new();
-        // No beads available
 
         let has_changes = CommandOutput {
             exit_code: 0,
@@ -2010,7 +1824,7 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
-        assert!(result.messages.iter().any(|m| m.contains("1 item(s) ready to work on")));
+        assert!(result.messages.iter().any(|m| m.contains("1 task(s) ready to work on")));
         // Check for task suggestion
         assert!(
             result.messages.iter().any(|m| m.contains("Suggestion: Work on task")),
@@ -2022,79 +1836,6 @@ mod tests {
             "Expected task title in suggestion: {:?}",
             result.messages
         );
-    }
-
-    #[test]
-    fn test_beads_warning_on_uncommitted_changes() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let has_changes = CommandOutput {
-            exit_code: 0,
-            stdout: " file.rs | 10 ++++++++++\n".to_string(),
-            stderr: String::new(),
-        };
-        let file_list =
-            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // First check_uncommitted_changes (fast path)
-        runner.expect("git", &["diff", "--stat"], has_changes.clone());
-        runner.expect("git", &["diff", "--name-only"], file_list.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // Second check_uncommitted_changes (main check)
-        runner.expect("git", &["diff", "--stat"], has_changes);
-        runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // check_beads_interaction - no interaction
-        runner.expect(
-            "git",
-            &["diff", "--name-only", "--", ".beads/"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "--cached", "--name-only", "--", ".beads/"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["log", "--oneline", "-10", "--name-only", "--", ".beads/"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Beads Interaction Required")));
     }
 
     #[test]
@@ -2188,28 +1929,22 @@ mod tests {
 
     // Helper to create a session file for just-keep-working mode tests
     fn create_session_state(base: &std::path::Path, iteration: u32, last_change: u32) {
-        create_session_state_with_issues(base, iteration, last_change, &[]);
+        create_session_state_with_git_hash(base, iteration, last_change, None);
     }
 
-    fn create_session_state_with_issues(
+    fn create_session_state_with_git_hash(
         base: &std::path::Path,
         iteration: u32,
         last_change: u32,
-        issues: &[&str],
+        git_hash: Option<&str>,
     ) {
         let session_dir = base.join(".claude");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let issues_yaml = if issues.is_empty() {
-            "[]".to_string()
-        } else {
-            format!(
-                "\n{}",
-                issues.iter().map(|i| format!("  - {i}")).collect::<Vec<_>>().join("\n")
-            )
-        };
         // Write plain YAML (no frontmatter) to the state file
+        let git_diff_line =
+            git_hash.map_or_else(String::new, |hash| format!("git_diff_hash: {hash}\n"));
         let content = format!(
-            "iteration: {iteration}\nlast_issue_change_iteration: {last_change}\nissue_snapshot: {issues_yaml}\n"
+            "iteration: {iteration}\nlast_issue_change_iteration: {last_change}\n{git_diff_line}"
         );
         std::fs::write(session_dir.join("jkw-state.local.yaml"), content).unwrap();
     }
@@ -2225,7 +1960,6 @@ mod tests {
         create_session_state(base, 3, 2);
 
         let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
@@ -2244,7 +1978,7 @@ mod tests {
         );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // working_state_hash (beads not available since no .beads dir)
+        // working_state_hash for git-based staleness tracking
         runner.expect("git", &["rev-parse", "HEAD"], sha);
         runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
         runner.expect("git", &["diff", "--name-only"], empty_success.clone());
@@ -2273,18 +2007,17 @@ mod tests {
 
         // Create session file with high staleness (iteration 10, last change at 3)
         // This means iterations_since_change = 10-3 = 7, and after increment = 11-3 = 8 >= 5
-        create_session_state(base, 10, 3);
-
-        // Create .beads directory so beads is "available" - this allows testing issue-based staleness
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
+        // Set git_diff_hash to match what working_state_hash will compute for the mock values
+        create_session_state_with_git_hash(base, 10, 3, Some("142ea91925d6c755"));
 
         let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let sha =
+            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
 
         // check_uncommitted_changes (fast path skipped)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
@@ -2296,9 +2029,11 @@ mod tests {
         );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // get_current_issues returns empty (same as issue_snapshot in session - no change)
-        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], empty_success);
+        // working_state_hash for git-based staleness tracking (returns same hash - no change)
+        runner.expect("git", &["rev-parse", "HEAD"], sha);
+        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
+        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -2314,154 +2049,42 @@ mod tests {
     }
 
     #[test]
-    fn test_jkw_mode_all_done_quality_passes() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file (iteration 1, last change at 1)
-        create_session_state(base, 1, 1);
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // get_current_issues (returns empty - all done)
-        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], empty_success.clone());
-
-        // Quality check passes
-        runner.expect("sh", &["-c", "just check"], empty_success);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Checking Completion")));
-        assert!(result.messages.iter().any(|m| m.contains("All quality gates passed")));
-    }
-
-    #[test]
-    fn test_jkw_mode_all_done_quality_fails() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file (iteration 1, last change at 1)
-        create_session_state(base, 1, 1);
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let quality_fail = CommandOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "Test failed\n".to_string(),
-        };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // get_current_issues (returns empty - all done)
-        runner.expect("bd", &["list", "--status=open"], empty_success.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], empty_success);
-
-        // Quality check fails
-        runner.expect("sh", &["-c", "just check"], quality_fail);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Quality Gates Failed")));
-    }
-
-    #[test]
     fn test_jkw_mode_with_staleness_warning() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create session file with matching issues so staleness counter continues
+        // Create session file with some staleness
         // (iteration 5, last change at 2 - gives 3 iterations since change)
         // After increment it becomes iteration 6, so iterations_since_change = 4 > 2
-        create_session_state_with_issues(base, 5, 2, &["issue-1"]);
-
-        // Create .beads directory so beads is "available"
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
+        // Set git_diff_hash to match what working_state_hash will compute
+        create_session_state_with_git_hash(base, 5, 2, Some("142ea91925d6c755"));
 
         let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let issues_output = CommandOutput {
-            exit_code: 0,
-            stdout: "issue-1\n".to_string(), // Same as snapshot so no change detected
-            stderr: String::new(),
-        };
+        let sha =
+            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
 
         // check_uncommitted_changes (fast path skipped)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // get_current_issues - returns same issues as snapshot so no change detected
-        runner.expect("bd", &["list", "--status=open"], issues_output.clone());
-        runner.expect("bd", &["list", "--status=in_progress"], issues_output);
+        // working_state_hash - returns same hash as stored (no change detected)
+        runner.expect("git", &["rev-parse", "HEAD"], sha);
+        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
+        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -2476,62 +2099,6 @@ mod tests {
         assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
         // Check for staleness warning (iterations > 2)
         assert!(result.messages.iter().any(|m| m.contains("Warning")));
-    }
-
-    #[test]
-    fn test_jkw_mode_with_beads_issues() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file and .beads directory
-        create_session_state(base, 1, 1);
-        std::fs::create_dir_all(base.join(".beads")).unwrap();
-
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // get_current_issues - returns some issues
-        runner.expect(
-            "bd",
-            &["list", "--status=open"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "proj-1 [P1] Test issue\n".to_string(),
-                stderr: String::new(),
-            },
-        );
-        runner.expect(
-            "bd",
-            &["list", "--status=in_progress"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
-        assert!(result.messages.iter().any(|m| m.contains("Outstanding issues: 1")));
-        assert!(result.messages.iter().any(|m| m.contains("Open issues: 1")));
     }
 
     #[test]
@@ -2554,7 +2121,6 @@ mod tests {
         .unwrap();
 
         let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
@@ -2573,7 +2139,7 @@ mod tests {
         );
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // working_state_hash (fallback when no .beads dir)
+        // working_state_hash for git-based staleness tracking
         runner.expect("git", &["rev-parse", "HEAD"], sha);
         runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
         runner.expect("git", &["diff", "--name-only"], empty_success.clone());
