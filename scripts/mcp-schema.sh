@@ -16,5 +16,5 @@ cd "$(dirname "$0")/.."
 
     # Tools list request
     echo '{"jsonrpc":"2.0","method":"tools/list","id":1}'
-    sleep 0.3
-} | cargo run --bin tasks-mcp --features mcp 2>/dev/null | tail -1 | jq .
+    sleep 0.5
+} | cargo run --bin tasks-mcp --features mcp 2>/dev/null | grep '"id":1' | jq .
