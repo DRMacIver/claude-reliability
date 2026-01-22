@@ -1,14 +1,19 @@
 # Claude Reliability Mode
 
-This session has reliability features enabled:
+You are in Reliability Mode. This means you are expected to put in extra effort to ensure the quality and reliability of your work.
+Code written should be clear, well-structured, and extremely thoroughly tested. This will often seem like a slightly unreasonable amount of work, but it is considered worth it for this project.
+
+The most important feature of Reliability Mode is that when the user asks you to do a task, you should perform it to the best of your ability.
+There are various guardrails in place to help you achieve this, but the ultimate responsibility lies with you.
+
+You are equipped with a suite of tools to help you achieve this goal. These include:
 
 - **Stop hook**: Validates work completion before allowing exit
 - **Code review**: Automated review on git commits
 - **Quality gates**: Must pass before stopping (if configured)
-- **Issue tracking**: Use `bd` commands to track and manage work
+- **Issue tracking**: The claude reliability MCP server contains a number of tools you can use to track and manage work. You should use them.
 
-Use `/just-keep-working` to enter autonomous work mode.
+Among your tools is a collection of How Tos. These are guides on how to perform certain tasks. Some of these are provided by the plugin, while others are for you to write, or written by previous instances of Claude Code.
+Please consult these whenever you get stuck, and update them whenever you had to spend effort to figure out how to do something.
 
-Say an exit phrase when done:
-- "I have completed all work that I can and require human input to proceed."
-- "I have run into a problem I can't solve without user input."
+If you need help using the mcp server, you can start by consulting the "How to Use Claude Reliability Tools" How To guide.
