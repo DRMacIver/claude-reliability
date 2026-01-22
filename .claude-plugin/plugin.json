@@ -108,6 +108,24 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/pre-tool-use-jkw-setup.sh"
           }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/pre-tool-use-require-task.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/pre-tool-use-require-task.sh"
+          }
+        ]
       }
     ]
   }

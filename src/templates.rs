@@ -99,6 +99,7 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/protect_jkw_session.tera",
         include_str!("../templates/messages/protect_jkw_session.tera"),
     );
+    m.insert("messages/require_task.tera", include_str!("../templates/messages/require_task.tera"));
 
     m
 });

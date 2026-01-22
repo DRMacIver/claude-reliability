@@ -1,0 +1,26 @@
+{# Message shown when Write/Edit is blocked due to no in-progress task.
+
+Variables: none
+#}
+# Task Required
+
+You are attempting to make code changes (Write/Edit) without an active task.
+
+**All code changes must be tracked in the task system.**
+
+Before making changes, you must:
+
+1. **Find or create a task** that describes what you're working on
+2. **Call `work_on`** with the task ID to mark it as in-progress
+
+Example:
+```
+# If a task already exists
+work_on(task_id="my-task-1234")
+
+# If you need to create a new task first
+create_task(title="Fix bug in login flow", description="...")
+work_on(task_id="<returned-task-id>")
+```
+
+This ensures all work is properly tracked and helps maintain context across sessions.

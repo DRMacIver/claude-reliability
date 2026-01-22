@@ -6,8 +6,8 @@
 use crate::{
     command::RealCommandRunner,
     hooks::{
-        parse_hook_input, run_code_review_hook, run_no_verify_hook, run_stop_hook,
-        run_user_prompt_submit_hook, CodeReviewConfig, StopHookConfig,
+        parse_hook_input, run_code_review_hook, run_no_verify_hook, run_require_task_hook,
+        run_stop_hook, run_user_prompt_submit_hook, CodeReviewConfig, StopHookConfig,
     },
     subagent::RealSubAgent,
     traits::{CommandRunner, SubAgent},
@@ -43,6 +43,8 @@ pub enum Command {
     PreToolUseValidation,
     /// Run the protect-config pre-tool-use hook.
     PreToolUseProtectConfig,
+    /// Run the require-task pre-tool-use hook.
+    PreToolUseRequireTask,
 }
 
 impl Command {
@@ -62,7 +64,8 @@ impl Command {
             | Self::PreToolUseProblemMode
             | Self::PreToolUseJkwSetup
             | Self::PreToolUseValidation
-            | Self::PreToolUseProtectConfig => true,
+            | Self::PreToolUseProtectConfig
+            | Self::PreToolUseRequireTask => true,
         }
     }
 }
@@ -108,6 +111,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
                 "jkw-setup" => ParseResult::Command(Command::PreToolUseJkwSetup),
                 "validation" => ParseResult::Command(Command::PreToolUseValidation),
                 "protect-config" => ParseResult::Command(Command::PreToolUseProtectConfig),
+                "require-task" => ParseResult::Command(Command::PreToolUseRequireTask),
                 other => ParseResult::UnknownSubcommand(other.to_string()),
             }
         }
@@ -132,6 +136,7 @@ pub fn usage(program: &str) -> String {
          pre-tool-use problem-mode  Block tools when in problem mode\n  \
          pre-tool-use jkw-setup     Enforce JKW session file creation\n  \
          pre-tool-use protect-config Block writes to reliability config\n  \
+         pre-tool-use require-task  Block writes when no task is in progress\n  \
          version                    Show version information"
     )
 }
@@ -280,6 +285,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::PreToolUseJkwSetup => run_jkw_setup_cmd(stdin),
         Command::PreToolUseValidation => run_validation_cmd(stdin),
         Command::PreToolUseProtectConfig => run_protect_config_cmd(stdin),
+        Command::PreToolUseRequireTask => run_require_task_cmd(stdin),
     }
 }
 
@@ -495,6 +501,20 @@ fn run_protect_config_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     };
 
     let output = run_protect_config_hook(&input);
+    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
+
+    (ExitCode::SUCCESS, vec![json])
+}
+
+fn run_require_task_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use std::path::Path;
+
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    let output = run_require_task_hook(&input, Path::new("."));
     let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
 
     (ExitCode::SUCCESS, vec![json])
@@ -1353,6 +1373,48 @@ mod tests {
     #[test]
     fn test_run_protect_config_invalid_json() {
         let output = run(&args(&["prog", "pre-tool-use", "protect-config"]), "not json");
+
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    fn test_parse_args_require_task() {
+        assert_eq!(
+            parse_args(&args(&["prog", "pre-tool-use", "require-task"])),
+            ParseResult::Command(Command::PreToolUseRequireTask)
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_require_task_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Write should be blocked (no in-progress task)
+        let output = run(
+            &args(&["prog", "pre-tool-use", "require-task"]),
+            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        // Should block
+        assert!(output.stderr[0].contains("block"));
+    }
+
+    #[test]
+    fn test_run_require_task_invalid_json() {
+        let output = run(&args(&["prog", "pre-tool-use", "require-task"]), "not json");
 
         assert_eq!(output.exit_code, ExitCode::from(1));
         assert!(!output.stderr.is_empty());

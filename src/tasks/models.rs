@@ -138,6 +138,8 @@ pub struct Task {
     pub priority: Priority,
     /// Current status.
     pub status: Status,
+    /// Whether this task is currently being worked on.
+    pub in_progress: bool,
     /// ISO 8601 timestamp when the task was created.
     pub created_at: String,
     /// ISO 8601 timestamp when the task was last updated.
@@ -312,6 +314,7 @@ mod tests {
             description: String::new(),
             priority: Priority::Medium,
             status: Status::Open,
+            in_progress: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
         };
@@ -339,6 +342,7 @@ mod tests {
             description: "A test description".to_string(),
             priority: Priority::High,
             status: Status::Open,
+            in_progress: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
         };

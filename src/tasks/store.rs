@@ -133,6 +133,12 @@ pub trait TaskStore {
 
     /// Get all tasks blocked by unanswered questions (and not blocked by dependencies).
     fn get_question_blocked_tasks(&self) -> Result<Vec<Task>>;
+
+    /// Check if any task is currently in progress.
+    fn has_in_progress_task(&self) -> Result<bool>;
+
+    /// Get all tasks that are currently in progress.
+    fn get_in_progress_tasks(&self) -> Result<Vec<Task>>;
 }
 
 /// Fields that can be updated on a task.
@@ -146,6 +152,8 @@ pub struct TaskUpdate {
     pub priority: Option<Priority>,
     /// New status (if Some).
     pub status: Option<Status>,
+    /// New `in_progress` flag (if Some).
+    pub in_progress: Option<bool>,
 }
 
 impl TaskUpdate {
@@ -156,6 +164,7 @@ impl TaskUpdate {
             && self.description.is_none()
             && self.priority.is_none()
             && self.status.is_none()
+            && self.in_progress.is_none()
     }
 }
 
@@ -309,6 +318,7 @@ impl SqliteTaskStore {
                 priority INTEGER NOT NULL DEFAULT 2 CHECK (priority >= 0 AND priority <= 4),
                 status TEXT NOT NULL DEFAULT 'open'
                     CHECK (status IN ('open', 'complete', 'abandoned', 'stuck', 'blocked')),
+                in_progress INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -485,6 +495,19 @@ impl SqliteTaskStore {
             ",
         )?;
 
+        // Migration: add in_progress column if it doesn't exist (for existing databases)
+        let has_in_progress: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('tasks') WHERE name = 'in_progress'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_in_progress {
+            conn.execute(
+                "ALTER TABLE tasks ADD COLUMN in_progress INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
         // Sync built-in how-tos
         crate::tasks::builtin_howtos::sync_builtin_howtos(&conn)?;
 
@@ -534,6 +557,7 @@ impl SqliteTaskStore {
     fn parse_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         let priority_val: u8 = row.get(3)?;
         let status_str: String = row.get(4)?;
+        let in_progress_val: i64 = row.get(5)?;
 
         Ok(Task {
             id: row.get(0)?,
@@ -541,8 +565,9 @@ impl SqliteTaskStore {
             description: row.get(2)?,
             priority: Priority::from_u8(priority_val).unwrap_or(Priority::Medium),
             status: Status::from_str(&status_str).unwrap_or(Status::Open),
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            in_progress: in_progress_val != 0,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     }
 
@@ -625,7 +650,7 @@ impl TaskStore for SqliteTaskStore {
         )?;
 
         let task = conn.query_row(
-            "SELECT id, title, description, priority, status, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
              FROM tasks WHERE id = ?1",
             params![&id],
             Self::parse_task,
@@ -641,7 +666,7 @@ impl TaskStore for SqliteTaskStore {
         let conn = self.open()?;
         let task = conn
             .query_row(
-                "SELECT id, title, description, priority, status, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -660,7 +685,7 @@ impl TaskStore for SqliteTaskStore {
         // Get current task for audit log
         let old_task: Option<Task> = conn
             .query_row(
-                "SELECT id, title, description, priority, status, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -690,6 +715,14 @@ impl TaskStore for SqliteTaskStore {
         if let Some(status) = update.status {
             updates.push("status = ?");
             values.push(Box::new(status.as_str().to_string()));
+            // Auto-clear in_progress when status becomes complete, blocked, or abandoned
+            if matches!(status, Status::Complete | Status::Blocked | Status::Abandoned) {
+                updates.push("in_progress = 0");
+            }
+        }
+        if let Some(in_progress) = update.in_progress {
+            updates.push("in_progress = ?");
+            values.push(Box::new(i32::from(in_progress)));
         }
 
         values.push(Box::new(id.to_string()));
@@ -701,7 +734,7 @@ impl TaskStore for SqliteTaskStore {
 
         // Get updated task
         let new_task = conn.query_row(
-            "SELECT id, title, description, priority, status, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
              FROM tasks WHERE id = ?1",
             params![id],
             Self::parse_task,
@@ -726,7 +759,7 @@ impl TaskStore for SqliteTaskStore {
         // Get task for audit log
         let task: Option<Task> = conn
             .query_row(
-                "SELECT id, title, description, priority, status, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -806,7 +839,7 @@ impl TaskStore for SqliteTaskStore {
         };
 
         let sql = format!(
-            "SELECT id, title, description, priority, status, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
              FROM tasks {where_clause}
              ORDER BY priority ASC, created_at ASC"
         );
@@ -1558,7 +1591,7 @@ impl TaskStore for SqliteTaskStore {
         // 3. Are NOT blocked by incomplete dependencies
         let mut stmt = conn.prepare(
             "SELECT DISTINCT t.id, t.title, t.description, t.priority, t.status,
-                    t.created_at, t.updated_at
+                    t.in_progress, t.created_at, t.updated_at
              FROM tasks t
              JOIN task_questions tq ON t.id = tq.task_id
              JOIN questions q ON tq.question_id = q.id
@@ -1572,20 +1605,28 @@ impl TaskStore for SqliteTaskStore {
                )
              ORDER BY t.priority, t.created_at",
         )?;
-        let tasks: Vec<Task> = stmt
-            .query_map([], |row| {
-                Ok(Task {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    description: row.get(2)?,
-                    priority: Priority::from_u8(row.get::<_, u8>(3)?).unwrap_or_default(),
-                    status: Status::from_str(row.get::<_, String>(4)?.as_str()).unwrap_or_default(),
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
-                })
-            })?
-            .flatten()
-            .collect();
+        let tasks: Vec<Task> = stmt.query_map([], Self::parse_task)?.flatten().collect();
+        Ok(tasks)
+    }
+
+    fn has_in_progress_task(&self) -> Result<bool> {
+        let conn = self.open()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tasks WHERE in_progress = 1", [], |row| {
+                row.get(0)
+            })?;
+        Ok(count > 0)
+    }
+
+    fn get_in_progress_tasks(&self) -> Result<Vec<Task>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+             FROM tasks
+             WHERE in_progress = 1
+             ORDER BY priority, created_at",
+        )?;
+        let tasks: Vec<Task> = stmt.query_map([], Self::parse_task)?.flatten().collect();
         Ok(tasks)
     }
 }
@@ -2207,6 +2248,92 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.status, Status::Stuck);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_migration_adds_in_progress_column() {
+        use rusqlite::Connection;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create a database with old schema (without in_progress column)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r"
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO tasks (id, title) VALUES ('test-1234', 'Old Task');
+                ",
+            )
+            .unwrap();
+        }
+
+        // Open with new code - should migrate
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+
+        // Verify the column was added and task still exists
+        let task = store.get_task("test-1234").unwrap().unwrap();
+        assert_eq!(task.title, "Old Task");
+        assert!(!task.in_progress); // Default value
+    }
+
+    #[test]
+    fn test_in_progress_flag() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        // Create two tasks
+        let task1 = store.create_task("Task 1", "", Priority::Medium).unwrap();
+        let task2 = store.create_task("Task 2", "", Priority::High).unwrap();
+
+        // Initially no tasks in progress
+        assert!(!store.has_in_progress_task().unwrap());
+        assert!(store.get_in_progress_tasks().unwrap().is_empty());
+
+        // Mark task1 as in progress
+        store
+            .update_task(&task1.id, TaskUpdate { in_progress: Some(true), ..Default::default() })
+            .unwrap();
+
+        assert!(store.has_in_progress_task().unwrap());
+        let in_progress = store.get_in_progress_tasks().unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].id, task1.id);
+        assert!(in_progress[0].in_progress);
+
+        // Mark task2 as in progress too
+        store
+            .update_task(&task2.id, TaskUpdate { in_progress: Some(true), ..Default::default() })
+            .unwrap();
+
+        let in_progress = store.get_in_progress_tasks().unwrap();
+        assert_eq!(in_progress.len(), 2);
+
+        // Complete task1 - should auto-clear in_progress
+        let updated = store
+            .update_task(
+                &task1.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!updated.in_progress);
+
+        // Only task2 should be in progress now
+        let in_progress = store.get_in_progress_tasks().unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].id, task2.id);
 
         disable_deterministic_ids();
     }

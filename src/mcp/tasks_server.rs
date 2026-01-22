@@ -292,6 +292,13 @@ pub struct GetBlockingQuestionsInput {
     pub task_id: String,
 }
 
+/// Input for starting work on a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WorkOnInput {
+    /// Task ID to start working on.
+    pub task_id: String,
+}
+
 // Output types - defined at module level to avoid items_after_statements
 
 /// Task output representation.
@@ -303,6 +310,7 @@ struct TaskOutput {
     priority: u8,
     priority_label: &'static str,
     status: String,
+    in_progress: bool,
     created_at: String,
     updated_at: String,
     dependencies: Vec<String>,
@@ -318,6 +326,7 @@ impl TaskOutput {
             priority: task.priority.as_u8(),
             priority_label: priority_label(task.priority),
             status: task.status.as_str().to_string(),
+            in_progress: task.in_progress,
             created_at: task.created_at.clone(),
             updated_at: task.updated_at.clone(),
             dependencies: deps,
@@ -502,8 +511,13 @@ impl TasksServer {
             .transpose()
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        let update =
-            TaskUpdate { title: input.title, description: input.description, priority, status };
+        let update = TaskUpdate {
+            title: input.title,
+            description: input.description,
+            priority,
+            status,
+            in_progress: None,
+        };
 
         let task = self
             .store
@@ -1129,6 +1143,35 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Start working on a task (sets `in_progress` to true).
+    #[tool(
+        description = "Mark a task as in-progress. Use this before making any code changes to track what you're working on."
+    )]
+    fn work_on(&self, #[tool(aggr)] input: WorkOnInput) -> Result<CallToolResult, McpError> {
+        let update = TaskUpdate { in_progress: Some(true), ..Default::default() };
+
+        let task = self
+            .store
+            .update_task(&input.task_id, update)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match task {
+            Some(task) => {
+                let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
+                let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
+                let output = TaskOutput::from_task(&task, deps, guidance);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Task not found: {}",
+                input.task_id
+            ))])),
+        }
     }
 }
 
