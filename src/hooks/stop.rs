@@ -209,13 +209,25 @@ pub fn run_stop_hook(
         ));
     }
 
-    // Fast path: simple questions with no modifications
-    // If the user's first message is just a single-line question (ends with ?)
-    // and no modifying tools were used, allow immediate stop
-    if let Some(ref first_msg) = transcript_info.first_user_message {
-        if is_simple_question(first_msg) && !transcript_info.has_modifying_tool_use {
-            return Ok(StopHookResult::allow()
-                .with_explanation(config.explain_stops, "simple question with no modifications"));
+    // Fast path: simple Q&A exchange
+    // If the last user message is a simple question and no modifications were made
+    // since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
+    if !transcript_info.has_modifying_tool_use_since_user {
+        if let Some(ref last_user_msg) = transcript_info.last_user_message {
+            if is_simple_question(last_user_msg) {
+                if let Some(ref last_output) = transcript_info.last_assistant_output {
+                    // Check if the output looks like a simple answer (not asking a question,
+                    // and short enough that it's not a work summary)
+                    let is_simple_answer =
+                        !last_output.trim().ends_with('?') && last_output.lines().count() < 10;
+                    if is_simple_answer {
+                        return Ok(StopHookResult::allow().with_explanation(
+                            config.explain_stops,
+                            "simple Q&A with no modifications since question",
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -1656,6 +1668,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1677,6 +1690,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1697,6 +1711,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
 
@@ -1723,6 +1738,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::AllowStop(Some(
@@ -1754,6 +1770,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
@@ -1780,6 +1797,7 @@ mod tests {
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Continue);
@@ -3788,5 +3806,102 @@ mod tests {
         let question_count =
             result.messages.iter().filter(|m| m.contains("Shared question?")).count();
         assert_eq!(question_count, 1, "Question should only appear once: {:?}", result.messages);
+    }
+
+    #[test]
+    fn test_followup_question_fast_path_allows_stop() {
+        // When the user asks a follow-up question after a work session,
+        // if no modifications were made since the last user message, allow stop
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+
+        // Transcript: work session with edits, then a simple follow-up question
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Create a new file"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Created the file."}]}}
+{"type": "user", "timestamp": "2024-01-01T12:05:00Z", "message": {"role": "user", "content": "What's the filename?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "The filename is test.txt"}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: false, // Skip git checks
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Follow-up question with no modifications since should allow stop
+        assert!(
+            result.allow_stop,
+            "Follow-up question with no modifications since should allow stop"
+        );
+    }
+
+    #[test]
+    fn test_followup_question_with_modifications_no_fast_path() {
+        // If modifications were made after the last user message, don't use fast path
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        // Will need git status checks since fast path doesn't apply
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        // Transcript: user asks question, then agent makes modifications while answering
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "What's in the config?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "2"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I fixed the config for you."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should still allow (git is clean) but via normal path
+        assert!(result.allow_stop);
     }
 }

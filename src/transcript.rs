@@ -89,6 +89,8 @@ pub struct TranscriptInfo {
     pub has_modifying_tool_use_since_user: bool,
     /// The first user message in the transcript.
     pub first_user_message: Option<String>,
+    /// The last user message in the transcript.
+    pub last_user_message: Option<String>,
 }
 
 /// Parse a transcript file and extract relevant information.
@@ -165,12 +167,15 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                 // Reset modifying tool use tracking when we see a user message
                 info.has_modifying_tool_use_since_user = false;
 
-                // Capture first user message
-                if info.first_user_message.is_none() {
-                    if let Some(message) = &entry.message {
-                        if let MessageContent::Text(text) = &message.content {
+                // Capture user message content
+                if let Some(message) = &entry.message {
+                    if let MessageContent::Text(text) = &message.content {
+                        // Capture first user message
+                        if info.first_user_message.is_none() {
                             info.first_user_message = Some(text.clone());
                         }
+                        // Always update last user message
+                        info.last_user_message = Some(text.clone());
                     }
                 }
                 // Parse timestamp
@@ -339,6 +344,7 @@ also not json
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         assert!(is_user_recently_active(&info, 5));
     }
@@ -353,6 +359,7 @@ also not json
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
+            last_user_message: None,
         };
         assert!(!is_user_recently_active(&info, 5));
     }
