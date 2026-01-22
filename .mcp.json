@@ -1,7 +1,8 @@
 {
-  "tasks": {
-    "type": "stdio",
-    "command": "${CLAUDE_PLUGIN_ROOT}/.claude/bin/tasks-mcp",
-    "args": []
+  "mcpServers": {
+    "tasks": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/.claude/bin/tasks-mcp",
+      "args": []
+    }
   }
 }
