@@ -1630,4 +1630,72 @@ mod tests {
         let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
         assert!(!config.explain_stops);
     }
+
+    #[test]
+    fn test_ensure_config_preserves_all_fields() {
+        // Test that ensure_config doesn't corrupt an existing fully-populated config
+        // This is a regression test for bug claude-g2q7
+        use crate::testing::MockCommandRunner;
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create .git directory so git_repo matches
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+
+        // Create a fully populated config file
+        let original_content = "git_repo: true
+beads_installed: true
+check_command: just check
+code_review_section: '## Code Review'
+require_push: true
+explain_stops: true
+";
+        std::fs::write(&config_path, original_content).unwrap();
+
+        // No git remote check needed because git_repo already matches
+        let runner = MockCommandRunner::new();
+
+        // Call ensure_config - this should NOT modify the file
+        let config = ensure_config_in(&runner, dir.path()).unwrap();
+
+        // Verify all fields are preserved
+        assert!(config.git_repo);
+        assert!(config.beads_installed);
+        assert_eq!(config.check_command, Some("just check".to_string()));
+        assert_eq!(config.code_review_section, Some("## Code Review".to_string()));
+        assert!(config.require_push);
+        assert!(config.explain_stops, "explain_stops should be preserved as true");
+
+        // Verify the file wasn't modified
+        let final_content = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(original_content, final_content, "Config file should not have been modified");
+    }
+
+    #[test]
+    fn test_save_preserves_explain_stops_true() {
+        // Test that saving a config with explain_stops=true preserves it
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig {
+            git_repo: true,
+            beads_installed: true,
+            check_command: Some("just check".to_string()),
+            code_review_section: Some("## Code Review".to_string()),
+            require_push: true,
+            explain_stops: true,
+        };
+
+        config.save_to(dir.path()).unwrap();
+
+        // Load it back and verify
+        let loaded = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(loaded.explain_stops, "explain_stops should be preserved as true after save/load");
+        assert_eq!(
+            loaded.check_command,
+            Some("just check".to_string()),
+            "Expected check_command to be preserved after save/load"
+        );
+    }
 }
