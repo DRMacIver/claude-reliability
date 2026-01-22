@@ -138,7 +138,7 @@ develop *ARGS:
 	# Determine command to run
 	if [ -z "{{ARGS}}" ]; then
 		SETTINGS="{\"theme\":\"$THEME\"}"
-		DOCKER_CMD="claude --dangerously-skip-permissions --settings '$SETTINGS'"
+		DOCKER_CMD="claude --dangerously-skip-permissions --settings '$SETTINGS' --plugin-dir ."
 	else
 		DOCKER_CMD="{{ARGS}}"
 	fi
