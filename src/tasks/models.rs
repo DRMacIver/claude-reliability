@@ -180,6 +180,29 @@ pub struct HowTo {
     pub updated_at: String,
 }
 
+/// A question requiring user input that may block tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    /// Unique identifier (slug from text + 4 random hex chars).
+    pub id: String,
+    /// The question text.
+    pub text: String,
+    /// The answer, if provided. None means the question is unanswered.
+    pub answer: Option<String>,
+    /// ISO 8601 timestamp when the question was created.
+    pub created_at: String,
+    /// ISO 8601 timestamp when the question was answered, if applicable.
+    pub answered_at: Option<String>,
+}
+
+impl Question {
+    /// Check if the question has been answered.
+    #[must_use]
+    pub const fn is_answered(&self) -> bool {
+        self.answer.is_some()
+    }
+}
+
 /// An entry in the audit log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -369,5 +392,37 @@ mod tests {
         let json = serde_json::to_string(&howto).unwrap();
         let parsed: HowTo = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, howto);
+    }
+
+    #[test]
+    fn test_question_is_answered() {
+        let mut question = Question {
+            id: "question-1234".to_string(),
+            text: "What is the API key?".to_string(),
+            answer: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            answered_at: None,
+        };
+
+        assert!(!question.is_answered());
+
+        question.answer = Some("secret123".to_string());
+        question.answered_at = Some("2024-01-02T00:00:00Z".to_string());
+        assert!(question.is_answered());
+    }
+
+    #[test]
+    fn test_question_serialization() {
+        let question = Question {
+            id: "question-1234".to_string(),
+            text: "What is the deployment target?".to_string(),
+            answer: Some("production".to_string()),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            answered_at: Some("2024-01-02T00:00:00Z".to_string()),
+        };
+
+        let json = serde_json::to_string(&question).unwrap();
+        let parsed: Question = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, question);
     }
 }

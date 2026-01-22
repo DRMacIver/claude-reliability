@@ -320,6 +320,79 @@ pub fn run_stop_hook(
 
                 return Ok(result);
             }
+
+            // Check for tasks blocked by unanswered questions
+            let question_blocked = tasks::get_question_blocked_tasks(config.base_dir());
+            if !question_blocked.is_empty() {
+                // There are tasks blocked by questions
+                let has_shown_questions = session::has_questions_shown_marker(config.base_dir());
+
+                if !has_shown_questions {
+                    // First time: show questions and ask agent to reflect
+                    session::set_questions_shown_marker(config.base_dir())?;
+
+                    let mut result = StopHookResult::block()
+                        .with_message("# Questions Require Reflection")
+                        .with_message("")
+                        .with_message("The following tasks are blocked by unanswered questions:")
+                        .with_message("");
+
+                    for (task_id, task_title, questions) in &question_blocked {
+                        result = result.with_message(format!("## Task: {task_id} - {task_title}"));
+                        for q in questions {
+                            result = result.with_message(format!("  - [{}] {}", q.id, q.text));
+                        }
+                        result = result.with_message("");
+                    }
+
+                    result = result
+                        .with_message("Before asking the user, please reflect on these questions:")
+                        .with_message("- Can you now answer any of these questions yourself based on your work so far?")
+                        .with_message("- Have you gained context that makes the answer clear?")
+                        .with_message("")
+                        .with_message("If you can answer a question, use the `answer_question` tool to record your answer.")
+                        .with_message("If you truly cannot answer, you may try to exit again.");
+
+                    return Ok(result);
+                }
+
+                // Second time: allow stop and present questions to user
+                session::clear_questions_shown_marker(config.base_dir())?;
+
+                // Collect unique questions across all blocked tasks
+                let mut seen_questions = HashSet::new();
+                let mut unique_questions = Vec::new();
+                for (_, _, questions) in &question_blocked {
+                    for q in questions {
+                        if seen_questions.insert(q.id.clone()) {
+                            unique_questions.push(q);
+                        }
+                    }
+                }
+
+                let mut result = StopHookResult::allow()
+                    .with_explanation(
+                        config.explain_stops,
+                        "all unblocked work complete, questions for user",
+                    )
+                    .with_message("# Questions for User")
+                    .with_message("")
+                    .with_message(
+                        "The following questions need user input to unblock remaining tasks:",
+                    )
+                    .with_message("");
+
+                for q in unique_questions {
+                    result = result.with_message(format!("- [{}] {}", q.id, q.text));
+                }
+
+                result = result
+                    .with_message("")
+                    .with_message("Please answer these questions to unblock the remaining work.");
+
+                return Ok(result);
+            }
+
             // Bypass allowed - but don't cleanup session files so JKW can resume
             return Ok(StopHookResult::allow()
                 .with_explanation(config.explain_stops, "human input required phrase used"));
@@ -3480,5 +3553,162 @@ mod tests {
 
         // Should still allow (git is clean) but via normal path
         assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_bypass_human_input_blocked_with_question_blocked_tasks_first_time() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .claude directory and task database
+        let claude_dir = base.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+
+        // Create a task blocked by a question
+        let task = store.create_task("Implement feature", "Description", Priority::High).unwrap();
+        let question = store.create_question("What should the API return?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+
+        let runner = MockCommandRunner::new();
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // First attempt - should block and ask for reflection
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(
+            result.messages.iter().any(|m| m.contains("Questions Require Reflection")),
+            "Expected reflection message in: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("What should the API return?")),
+            "Expected question text in messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("reflect on these questions")),
+            "Expected reflection instruction in messages: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_bypass_human_input_allowed_with_question_blocked_tasks_second_time() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .claude directory and task database
+        let claude_dir = base.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+
+        // Create a task blocked by a question
+        let task = store.create_task("Implement feature", "Description", Priority::High).unwrap();
+        let question = store.create_question("What should the API return?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+
+        // Set the marker to simulate second attempt
+        session::set_questions_shown_marker(base).unwrap();
+
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+
+        let runner = MockCommandRunner::new();
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // Second attempt - should allow and present questions
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(
+            result.messages.iter().any(|m| m.contains("Questions for User")),
+            "Expected user questions in messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("What should the API return?")),
+            "Expected question text in messages: {:?}",
+            result.messages
+        );
+
+        // Marker should be cleared
+        assert!(!session::has_questions_shown_marker(base));
+    }
+
+    #[test]
+    fn test_question_blocked_tasks_deduplicates_questions() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create .claude directory and task database
+        let claude_dir = base.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+
+        // Create multiple tasks blocked by the same question
+        let task1 = store.create_task("Task 1", "", Priority::High).unwrap();
+        let task2 = store.create_task("Task 2", "", Priority::High).unwrap();
+        let question = store.create_question("Shared question?").unwrap();
+        store.link_task_to_question(&task1.id, &question.id).unwrap();
+        store.link_task_to_question(&task2.id, &question.id).unwrap();
+
+        // Set the marker to simulate second attempt
+        session::set_questions_shown_marker(base).unwrap();
+
+        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
+
+        let runner = MockCommandRunner::new();
+
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+
+        // The question should only appear once (deduplicated)
+        let question_count =
+            result.messages.iter().filter(|m| m.contains("Shared question?")).count();
+        assert_eq!(question_count, 1, "Question should only appear once: {:?}", result.messages);
     }
 }

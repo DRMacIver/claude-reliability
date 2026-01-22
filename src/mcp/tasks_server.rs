@@ -3,6 +3,10 @@
 //! This module provides an MCP server that exposes task management
 //! functionality through the Model Context Protocol.
 
+// The rmcp `#[tool(aggr)]` macro requires ownership of input structs,
+// making pass-by-value necessary for all tool handler functions.
+#![allow(clippy::needless_pass_by_value)]
+
 use crate::tasks::{
     HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
 };
@@ -216,6 +220,76 @@ pub struct UnlinkTaskFromHowToInput {
     pub howto_id: String,
 }
 
+/// Input for creating a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateQuestionInput {
+    /// The question text (required).
+    pub text: String,
+}
+
+/// Input for getting a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetQuestionInput {
+    /// Question ID.
+    pub id: String,
+}
+
+/// Input for answering a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnswerQuestionInput {
+    /// Question ID.
+    pub id: String,
+    /// The answer to the question.
+    pub answer: String,
+}
+
+/// Input for deleting a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteQuestionInput {
+    /// Question ID.
+    pub id: String,
+}
+
+/// Input for listing questions.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListQuestionsInput {
+    /// If true, only return unanswered questions.
+    #[serde(default)]
+    pub unanswered_only: bool,
+}
+
+/// Input for searching questions.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchQuestionsInput {
+    /// Search query.
+    pub query: String,
+}
+
+/// Input for linking a task to a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LinkTaskToQuestionInput {
+    /// Task ID.
+    pub task_id: String,
+    /// Question ID.
+    pub question_id: String,
+}
+
+/// Input for unlinking a task from a question.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnlinkTaskFromQuestionInput {
+    /// Task ID.
+    pub task_id: String,
+    /// Question ID.
+    pub question_id: String,
+}
+
+/// Input for getting blocking questions for a task.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetBlockingQuestionsInput {
+    /// Task ID.
+    pub task_id: String,
+}
+
 // Output types - defined at module level to avoid items_after_statements
 
 /// Task output representation.
@@ -306,6 +380,30 @@ impl HowToOutput {
     }
 }
 
+/// Question output representation.
+#[derive(Debug, Serialize)]
+struct QuestionOutput {
+    id: String,
+    text: String,
+    answer: Option<String>,
+    is_answered: bool,
+    created_at: String,
+    answered_at: Option<String>,
+}
+
+impl QuestionOutput {
+    fn from_question(q: &crate::tasks::Question) -> Self {
+        Self {
+            id: q.id.clone(),
+            text: q.text.clone(),
+            answer: q.answer.clone(),
+            is_answered: q.is_answered(),
+            created_at: q.created_at.clone(),
+            answered_at: q.answered_at.clone(),
+        }
+    }
+}
+
 /// Get the string label for a priority level.
 const fn priority_label(priority: Priority) -> &'static str {
     match priority {
@@ -323,7 +421,6 @@ const fn priority_label(priority: Priority) -> &'static str {
 #[tool(tool_box)]
 impl TasksServer {
     /// Create a new task.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Create a new task with title, description, and priority")]
     fn create_task(
         &self,
@@ -347,7 +444,6 @@ impl TasksServer {
     }
 
     /// Get a task by ID.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Get a task by its ID, including dependencies, notes, and guidance")]
     fn get_task(&self, #[tool(aggr)] input: GetTaskInput) -> Result<CallToolResult, McpError> {
         let task = self
@@ -386,7 +482,6 @@ impl TasksServer {
     }
 
     /// Update a task's fields.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Update a task's title, description, priority, or status")]
     fn update_task(
         &self,
@@ -431,7 +526,6 @@ impl TasksServer {
     }
 
     /// Delete a task.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Delete a task by its ID")]
     fn delete_task(
         &self,
@@ -453,7 +547,6 @@ impl TasksServer {
     }
 
     /// List tasks with optional filters.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "List tasks, optionally filtered by status, priority, or ready state")]
     fn list_tasks(&self, #[tool(aggr)] input: ListTasksInput) -> Result<CallToolResult, McpError> {
         let status = input
@@ -498,7 +591,6 @@ impl TasksServer {
     }
 
     /// Add a dependency between tasks.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Add a dependency (task_id depends on depends_on task)")]
     fn add_dependency(
         &self,
@@ -515,7 +607,6 @@ impl TasksServer {
     }
 
     /// Remove a dependency between tasks.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Remove a dependency between tasks")]
     fn remove_dependency(
         &self,
@@ -537,7 +628,6 @@ impl TasksServer {
     }
 
     /// Add a note to a task.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Add a note to a task")]
     fn add_note(&self, #[tool(aggr)] input: AddNoteInput) -> Result<CallToolResult, McpError> {
         let note = self
@@ -559,7 +649,6 @@ impl TasksServer {
     }
 
     /// Get all notes for a task.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Get all notes attached to a task")]
     fn get_notes(&self, #[tool(aggr)] input: GetNotesInput) -> Result<CallToolResult, McpError> {
         let notes = self
@@ -579,7 +668,6 @@ impl TasksServer {
     }
 
     /// Search tasks by text.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Full-text search across task titles, descriptions, and notes")]
     fn search_tasks(
         &self,
@@ -606,7 +694,6 @@ impl TasksServer {
     }
 
     /// Get audit log entries.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Get the audit log, optionally filtered by task ID")]
     fn get_audit_log(
         &self,
@@ -662,7 +749,6 @@ impl TasksServer {
     // How-to tools
 
     /// Create a new how-to guide.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Create a new how-to guide with title and instructions")]
     fn create_howto(
         &self,
@@ -681,7 +767,6 @@ impl TasksServer {
     }
 
     /// Get a how-to by ID.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Get a how-to guide by its ID")]
     fn get_howto(&self, #[tool(aggr)] input: GetHowToInput) -> Result<CallToolResult, McpError> {
         let howto = self
@@ -705,7 +790,6 @@ impl TasksServer {
     }
 
     /// Update a how-to.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Update a how-to guide's title or instructions")]
     fn update_howto(
         &self,
@@ -734,7 +818,6 @@ impl TasksServer {
     }
 
     /// Delete a how-to.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Delete a how-to guide by its ID")]
     fn delete_howto(
         &self,
@@ -773,7 +856,6 @@ impl TasksServer {
     }
 
     /// Search how-tos.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Full-text search across how-to guides")]
     fn search_howtos(
         &self,
@@ -793,7 +875,6 @@ impl TasksServer {
     }
 
     /// Link a task to a how-to guide.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Link a task to a how-to guide for guidance")]
     fn link_task_to_howto(
         &self,
@@ -810,7 +891,6 @@ impl TasksServer {
     }
 
     /// Unlink a task from a how-to guide.
-    #[allow(clippy::needless_pass_by_value)]
     #[tool(description = "Remove a guidance link between a task and how-to")]
     fn unlink_task_from_howto(
         &self,
@@ -833,6 +913,221 @@ impl TasksServer {
             ))]))
         }
     }
+
+    /// Create a new question that may block tasks.
+    #[tool(description = "Create a question requiring user input that can block tasks")]
+    fn create_question(
+        &self,
+        #[tool(aggr)] input: CreateQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        let question = self
+            .store
+            .create_question(&input.text)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output = QuestionOutput::from_question(&question);
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get a question by ID.
+    #[tool(description = "Get a question by its ID")]
+    fn get_question(
+        &self,
+        #[tool(aggr)] input: GetQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        let question = self
+            .store
+            .get_question(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match question {
+            Some(q) => {
+                let output = QuestionOutput::from_question(&q);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Question not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Answer a question.
+    #[tool(description = "Provide an answer to a question")]
+    fn answer_question(
+        &self,
+        #[tool(aggr)] input: AnswerQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        let question = self
+            .store
+            .answer_question(&input.id, &input.answer)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match question {
+            Some(q) => {
+                let output = QuestionOutput::from_question(&q);
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Question not found: {}",
+                input.id
+            ))])),
+        }
+    }
+
+    /// Delete a question.
+    #[tool(description = "Delete a question by its ID")]
+    fn delete_question(
+        &self,
+        #[tool(aggr)] input: DeleteQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        let deleted = self
+            .store
+            .delete_question(&input.id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if deleted {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Deleted question: {}",
+                input.id
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Question not found: {}",
+                input.id
+            ))]))
+        }
+    }
+
+    /// List questions.
+    #[tool(description = "List all questions, optionally filtering to only unanswered ones")]
+    fn list_questions(
+        &self,
+        #[tool(aggr)] input: ListQuestionsInput,
+    ) -> Result<CallToolResult, McpError> {
+        let questions = self
+            .store
+            .list_questions(input.unanswered_only)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output: Vec<QuestionOutput> =
+            questions.iter().map(QuestionOutput::from_question).collect();
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Search questions.
+    #[tool(description = "Full-text search across questions")]
+    fn search_questions(
+        &self,
+        #[tool(aggr)] input: SearchQuestionsInput,
+    ) -> Result<CallToolResult, McpError> {
+        let questions = self
+            .store
+            .search_questions(&input.query)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output: Vec<QuestionOutput> =
+            questions.iter().map(QuestionOutput::from_question).collect();
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Link a task to a question (task blocked until question is answered).
+    #[tool(
+        description = "Link a task to a question - task will be blocked until the question is answered"
+    )]
+    fn link_task_to_question(
+        &self,
+        #[tool(aggr)] input: LinkTaskToQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        self.store
+            .link_task_to_question(&input.task_id, &input.question_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Linked task {} to question {} - task is blocked until question is answered",
+            input.task_id, input.question_id
+        ))]))
+    }
+
+    /// Unlink a task from a question.
+    #[tool(description = "Remove a blocking link between a task and a question")]
+    fn unlink_task_from_question(
+        &self,
+        #[tool(aggr)] input: UnlinkTaskFromQuestionInput,
+    ) -> Result<CallToolResult, McpError> {
+        let removed = self
+            .store
+            .unlink_task_from_question(&input.task_id, &input.question_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if removed {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Unlinked task {} from question {}",
+                input.task_id, input.question_id
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "No link found between task {} and question {}",
+                input.task_id, input.question_id
+            ))]))
+        }
+    }
+
+    /// Get blocking questions for a task.
+    #[tool(description = "Get all unanswered questions that are blocking a specific task")]
+    fn get_blocking_questions(
+        &self,
+        #[tool(aggr)] input: GetBlockingQuestionsInput,
+    ) -> Result<CallToolResult, McpError> {
+        let questions = self
+            .store
+            .get_blocking_questions(&input.task_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output: Vec<QuestionOutput> =
+            questions.iter().map(QuestionOutput::from_question).collect();
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get all tasks blocked by unanswered questions.
+    #[tool(
+        description = "Get all tasks that are blocked by unanswered questions (and not blocked by dependencies)"
+    )]
+    fn get_question_blocked_tasks(&self) -> Result<CallToolResult, McpError> {
+        let tasks = self
+            .store
+            .get_question_blocked_tasks()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let output: Vec<TaskOutput> = tasks
+            .iter()
+            .map(|t| {
+                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
+                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps, guidance)
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[rmcp::tool(tool_box)]
@@ -843,7 +1138,7 @@ impl rmcp::ServerHandler for TasksServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation { name: "tasks-mcp".to_string(), version: env!("CARGO_PKG_VERSION").to_string() },
             instructions: Some(
-                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, and how-to guides for guidance.".to_string(),
+                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, how-to guides, and questions requiring user input.".to_string(),
             ),
         }
     }

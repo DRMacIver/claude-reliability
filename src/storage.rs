@@ -30,6 +30,8 @@ pub mod markers {
     pub const MUST_REFLECT: &str = "must_reflect";
     /// Beads warning has been given this session.
     pub const BEADS_WARNING: &str = "beads_warning";
+    /// Questions have been shown for reflection.
+    pub const QUESTIONS_SHOWN: &str = "questions_shown";
 }
 
 /// SQLite-based state store.

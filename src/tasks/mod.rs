@@ -29,10 +29,12 @@ pub mod id;
 pub mod models;
 pub mod store;
 
-pub use models::{AuditEntry, HowTo, InvalidPriority, InvalidStatus, Note, Priority, Status, Task};
+pub use models::{
+    AuditEntry, HowTo, InvalidPriority, InvalidStatus, Note, Priority, Question, Status, Task,
+};
 pub use store::{
-    CircularDependency, HowToNotFound, HowToUpdate, SqliteTaskStore, TaskFilter, TaskNotFound,
-    TaskStore, TaskUpdate,
+    CircularDependency, HowToNotFound, HowToUpdate, QuestionNotFound, SqliteTaskStore, TaskFilter,
+    TaskNotFound, TaskStore, TaskUpdate,
 };
 
 use std::path::Path;
@@ -70,6 +72,52 @@ pub fn count_ready_tasks(base_dir: &Path) -> u32 {
     };
 
     store.get_ready_tasks().map(|tasks| u32::try_from(tasks.len()).unwrap_or(u32::MAX)).unwrap_or(0)
+}
+
+/// Get tasks that are blocked only by unanswered questions (not by dependencies).
+///
+/// Returns a list of `(task_id, task_title, blocking_questions)` tuples.
+/// Returns empty vec if database doesn't exist or on any error.
+#[must_use]
+pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Question>)> {
+    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+
+    let Ok(store) = SqliteTaskStore::new(&db_path) else {
+        return Vec::new();
+    };
+
+    // coverage:ignore - Query failure after successful open is unreachable in practice
+    let Ok(tasks) = store.get_question_blocked_tasks() else {
+        return Vec::new(); // coverage:ignore
+    };
+
+    tasks
+        .into_iter()
+        .filter_map(|task| {
+            let questions = store.get_blocking_questions(&task.id).ok()?;
+            Some((task.id, task.title, questions))
+        })
+        .collect()
+}
+
+/// List all unanswered questions.
+///
+/// Returns empty vec if database doesn't exist or on any error.
+#[must_use]
+pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
+    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+
+    let Ok(store) = SqliteTaskStore::new(&db_path) else {
+        return Vec::new();
+    };
+
+    store.list_questions(true).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -164,5 +212,128 @@ mod tests {
         // Should return 0 when database fails to open
         let count = count_ready_tasks(dir.path());
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_get_question_blocked_tasks_no_database() {
+        let dir = TempDir::new().unwrap();
+        let result = get_question_blocked_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_question_blocked_tasks_empty() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        let _store = SqliteTaskStore::new(&db_path).unwrap();
+
+        let result = get_question_blocked_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_question_blocked_tasks_with_blocked_task() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        let task = store.create_task("Blocked task", "", Priority::High).unwrap();
+        let question = store.create_question("What should the API return?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+
+        let result = get_question_blocked_tasks(dir.path());
+        assert_eq!(result.len(), 1);
+        let (id, title, questions) = &result[0];
+        assert_eq!(id, &task.id);
+        assert_eq!(title, "Blocked task");
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].text, "What should the API return?");
+    }
+
+    #[test]
+    fn test_get_question_blocked_tasks_answered_question_not_blocked() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        let task = store.create_task("Task with answered question", "", Priority::High).unwrap();
+        let question = store.create_question("What format?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+        store.answer_question(&question.id, "JSON format").unwrap();
+
+        // Task should not be blocked since question is answered
+        let result = get_question_blocked_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_question_blocked_tasks_corrupted_database() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        std::fs::write(&db_path, "invalid database").unwrap();
+
+        let result = get_question_blocked_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_list_unanswered_questions_no_database() {
+        let dir = TempDir::new().unwrap();
+        let result = list_unanswered_questions(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_list_unanswered_questions_empty() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        let _store = SqliteTaskStore::new(&db_path).unwrap();
+
+        let result = list_unanswered_questions(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_list_unanswered_questions_with_questions() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        let q1 = store.create_question("Question 1?").unwrap();
+        let _q2 = store.create_question("Question 2?").unwrap();
+        store.answer_question(&q1.id, "Answer 1").unwrap();
+
+        // Only q2 should be returned (unanswered)
+        let result = list_unanswered_questions(dir.path());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "Question 2?");
+    }
+
+    #[test]
+    fn test_list_unanswered_questions_corrupted_database() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+
+        std::fs::write(&db_path, "invalid database").unwrap();
+
+        let result = list_unanswered_questions(dir.path());
+        assert!(result.is_empty());
     }
 }

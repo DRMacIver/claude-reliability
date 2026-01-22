@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::tasks::id::generate_task_id;
-use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Status, Task};
+use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Question, Status, Task};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::hash_map::RandomState;
 use std::collections::HashSet;
@@ -97,6 +97,41 @@ pub trait TaskStore {
 
     /// Get all how-to IDs linked to a task (guidance).
     fn get_task_guidance(&self, task_id: &str) -> Result<Vec<String>>;
+
+    // Questions (for user input)
+    /// Create a new question.
+    fn create_question(&self, text: &str) -> Result<Question>;
+
+    /// Get a question by ID.
+    fn get_question(&self, id: &str) -> Result<Option<Question>>;
+
+    /// Answer a question.
+    fn answer_question(&self, id: &str, answer: &str) -> Result<Option<Question>>;
+
+    /// Delete a question by ID.
+    fn delete_question(&self, id: &str) -> Result<bool>;
+
+    /// List questions, optionally filtering to only unanswered ones.
+    fn list_questions(&self, unanswered_only: bool) -> Result<Vec<Question>>;
+
+    /// Full-text search across questions.
+    fn search_questions(&self, query: &str) -> Result<Vec<Question>>;
+
+    // Task-Question relationships (blocking)
+    /// Link a task to a question (task is blocked until question is answered).
+    fn link_task_to_question(&self, task_id: &str, question_id: &str) -> Result<()>;
+
+    /// Unlink a task from a question.
+    fn unlink_task_from_question(&self, task_id: &str, question_id: &str) -> Result<bool>;
+
+    /// Get all question IDs linked to a task.
+    fn get_task_questions(&self, task_id: &str) -> Result<Vec<String>>;
+
+    /// Get all unanswered questions that are blocking a task.
+    fn get_blocking_questions(&self, task_id: &str) -> Result<Vec<Question>>;
+
+    /// Get all tasks blocked by unanswered questions (and not blocked by dependencies).
+    fn get_question_blocked_tasks(&self) -> Result<Vec<Task>>;
 }
 
 /// Fields that can be updated on a task.
@@ -177,6 +212,18 @@ impl std::fmt::Display for HowToNotFound {
 
 impl std::error::Error for HowToNotFound {}
 
+/// Error when a referenced question is not found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionNotFound(pub String);
+
+impl std::fmt::Display for QuestionNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "question not found: {}", self.0)
+    }
+}
+
+impl std::error::Error for QuestionNotFound {}
+
 /// Fields that can be updated on a how-to.
 #[derive(Debug, Default, Clone)]
 pub struct HowToUpdate {
@@ -193,6 +240,10 @@ impl HowToUpdate {
         self.title.is_none() && self.instructions.is_none()
     }
 }
+
+#[rustfmt::skip]  // coverage:ignore - function unreachable in practice
+fn create_question_fetch_error() -> crate::error::Error { crate::error::Error::Task(Box::new( // coverage:ignore
+    std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to fetch created question"))) } // coverage:ignore
 
 /// SQLite-based task store.
 #[derive(Debug, Clone)]
@@ -375,6 +426,50 @@ impl SqliteTaskStore {
                 VALUES ('delete', OLD.rowid, OLD.id, OLD.title, OLD.instructions);
                 INSERT INTO howtos_fts(rowid, id, title, instructions)
                 VALUES (NEW.rowid, NEW.id, NEW.title, NEW.instructions);
+            END;
+
+            -- Questions (for user input that blocks tasks)
+            CREATE TABLE IF NOT EXISTS questions (
+                id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                answer TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                answered_at TEXT
+            );
+
+            -- Task-Question relationships (task is blocked by question)
+            CREATE TABLE IF NOT EXISTS task_questions (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (task_id, question_id)
+            );
+
+            -- Index for looking up tasks by question
+            CREATE INDEX IF NOT EXISTS idx_task_questions_question_id ON task_questions(question_id);
+
+            -- FTS5 for full-text search on questions
+            CREATE VIRTUAL TABLE IF NOT EXISTS questions_fts USING fts5(
+                id, text,
+                content='questions', content_rowid='rowid'
+            );
+
+            -- Triggers to keep question FTS in sync
+            CREATE TRIGGER IF NOT EXISTS questions_ai AFTER INSERT ON questions BEGIN
+                INSERT INTO questions_fts(rowid, id, text)
+                VALUES (NEW.rowid, NEW.id, NEW.text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS questions_ad AFTER DELETE ON questions BEGIN
+                INSERT INTO questions_fts(questions_fts, rowid, id, text)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS questions_au AFTER UPDATE ON questions BEGIN
+                INSERT INTO questions_fts(questions_fts, rowid, id, text)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.text);
+                INSERT INTO questions_fts(rowid, id, text)
+                VALUES (NEW.rowid, NEW.id, NEW.text);
             END;
             ",
         )?;
@@ -678,6 +773,14 @@ impl TaskStore for SqliteTaskStore {
                 SELECT 1 FROM task_dependencies d
                 JOIN tasks dep ON d.depends_on = dep.id
                 WHERE d.task_id = tasks.id AND dep.status NOT IN ('complete', 'abandoned')
+            )",
+            );
+            // Also exclude tasks blocked by unanswered questions
+            conditions.push(
+                "NOT EXISTS (
+                SELECT 1 FROM task_questions tq
+                JOIN questions q ON tq.question_id = q.id
+                WHERE tq.task_id = tasks.id AND q.answer IS NULL
             )",
             );
         }
@@ -1247,6 +1350,229 @@ impl TaskStore for SqliteTaskStore {
         let ids: Vec<String> =
             stmt.query_map(params![task_id], |row| row.get(0))?.flatten().collect();
         Ok(ids)
+    }
+
+    fn create_question(&self, text: &str) -> Result<Question> {
+        let conn = self.open()?;
+        let id = generate_task_id(text);
+
+        conn.execute("INSERT INTO questions (id, text) VALUES (?1, ?2)", params![id, text])?;
+
+        Self::log_audit(&conn, "create_question", Some(&id), None, None, Some(text))?;
+
+        // This error path is unreachable in practice: the INSERT succeeded,
+        // so the subsequent SELECT can only fail if the database is corrupted between operations.
+        self.get_question(&id)?.ok_or_else(create_question_fetch_error)
+    }
+
+    fn get_question(&self, id: &str) -> Result<Option<Question>> {
+        let conn = self.open()?;
+        let question = conn
+            .query_row(
+                "SELECT id, text, answer, created_at, answered_at FROM questions WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Question {
+                        id: row.get(0)?,
+                        text: row.get(1)?,
+                        answer: row.get(2)?,
+                        created_at: row.get(3)?,
+                        answered_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(question)
+    }
+
+    fn answer_question(&self, id: &str, answer: &str) -> Result<Option<Question>> {
+        let conn = self.open()?;
+
+        let rows_affected = conn.execute(
+            "UPDATE questions SET answer = ?2, answered_at = datetime('now') WHERE id = ?1",
+            params![id, answer],
+        )?;
+
+        if rows_affected == 0 {
+            return Ok(None);
+        }
+
+        Self::log_audit(&conn, "answer_question", Some(id), None, Some(answer), None)?;
+
+        self.get_question(id)
+    }
+
+    fn delete_question(&self, id: &str) -> Result<bool> {
+        let conn = self.open()?;
+        let rows_affected = conn.execute("DELETE FROM questions WHERE id = ?1", params![id])?;
+        let deleted = rows_affected > 0;
+
+        if deleted {
+            Self::log_audit(&conn, "delete_question", Some(id), None, None, None)?;
+        }
+
+        Ok(deleted)
+    }
+
+    fn list_questions(&self, unanswered_only: bool) -> Result<Vec<Question>> {
+        let conn = self.open()?;
+        let sql = if unanswered_only {
+            "SELECT id, text, answer, created_at, answered_at FROM questions WHERE answer IS NULL ORDER BY created_at"
+        } else {
+            "SELECT id, text, answer, created_at, answered_at FROM questions ORDER BY created_at"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let questions: Vec<Question> = stmt
+            .query_map([], |row| {
+                Ok(Question {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    answer: row.get(2)?,
+                    created_at: row.get(3)?,
+                    answered_at: row.get(4)?,
+                })
+            })?
+            .flatten()
+            .collect();
+        Ok(questions)
+    }
+
+    fn search_questions(&self, query: &str) -> Result<Vec<Question>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT q.id, q.text, q.answer, q.created_at, q.answered_at
+             FROM questions q
+             JOIN questions_fts fts ON q.id = fts.id
+             WHERE questions_fts MATCH ?1
+             ORDER BY rank",
+        )?;
+        let questions: Vec<Question> = stmt
+            .query_map(params![query], |row| {
+                Ok(Question {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    answer: row.get(2)?,
+                    created_at: row.get(3)?,
+                    answered_at: row.get(4)?,
+                })
+            })?
+            .flatten()
+            .collect();
+        Ok(questions)
+    }
+
+    fn link_task_to_question(&self, task_id: &str, question_id: &str) -> Result<()> {
+        let conn = self.open()?;
+
+        // Verify task exists
+        let task_exists: bool = conn
+            .query_row("SELECT 1 FROM tasks WHERE id = ?1", params![task_id], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        if !task_exists {
+            return Err(crate::error::Error::Task(Box::new(TaskNotFound(task_id.to_string()))));
+        }
+
+        // Verify question exists
+        let question_exists: bool = conn
+            .query_row("SELECT 1 FROM questions WHERE id = ?1", params![question_id], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        if !question_exists {
+            return Err(crate::error::Error::Task(Box::new(QuestionNotFound(
+                question_id.to_string(),
+            ))));
+        }
+
+        conn.execute(
+            "INSERT OR IGNORE INTO task_questions (task_id, question_id) VALUES (?1, ?2)",
+            params![task_id, question_id],
+        )?;
+
+        Ok(())
+    }
+
+    fn unlink_task_from_question(&self, task_id: &str, question_id: &str) -> Result<bool> {
+        let conn = self.open()?;
+        let rows_affected = conn.execute(
+            "DELETE FROM task_questions WHERE task_id = ?1 AND question_id = ?2",
+            params![task_id, question_id],
+        )?;
+        let deleted = rows_affected > 0;
+        Ok(deleted)
+    }
+
+    fn get_task_questions(&self, task_id: &str) -> Result<Vec<String>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT question_id FROM task_questions WHERE task_id = ?1 ORDER BY question_id",
+        )?;
+        let ids: Vec<String> =
+            stmt.query_map(params![task_id], |row| row.get(0))?.flatten().collect();
+        Ok(ids)
+    }
+
+    fn get_blocking_questions(&self, task_id: &str) -> Result<Vec<Question>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT q.id, q.text, q.answer, q.created_at, q.answered_at
+             FROM questions q
+             JOIN task_questions tq ON q.id = tq.question_id
+             WHERE tq.task_id = ?1 AND q.answer IS NULL
+             ORDER BY q.created_at",
+        )?;
+        let questions: Vec<Question> = stmt
+            .query_map(params![task_id], |row| {
+                Ok(Question {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    answer: row.get(2)?,
+                    created_at: row.get(3)?,
+                    answered_at: row.get(4)?,
+                })
+            })?
+            .flatten()
+            .collect();
+        Ok(questions)
+    }
+
+    fn get_question_blocked_tasks(&self) -> Result<Vec<Task>> {
+        let conn = self.open()?;
+        // Get tasks that:
+        // 1. Are open (not complete, abandoned, etc.)
+        // 2. Have at least one unanswered question linked
+        // 3. Are NOT blocked by incomplete dependencies
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT t.id, t.title, t.description, t.priority, t.status,
+                    t.created_at, t.updated_at
+             FROM tasks t
+             JOIN task_questions tq ON t.id = tq.task_id
+             JOIN questions q ON tq.question_id = q.id
+             WHERE t.status = 'open'
+               AND q.answer IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM task_dependencies td
+                   JOIN tasks dep ON td.depends_on = dep.id
+                   WHERE td.task_id = t.id
+                     AND dep.status NOT IN ('complete', 'abandoned')
+               )
+             ORDER BY t.priority, t.created_at",
+        )?;
+        let tasks: Vec<Task> = stmt
+            .query_map([], |row| {
+                Ok(Task {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    description: row.get(2)?,
+                    priority: Priority::from_u8(row.get::<_, u8>(3)?).unwrap_or_default(),
+                    status: Status::from_str(row.get::<_, String>(4)?.as_str()).unwrap_or_default(),
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })?
+            .flatten()
+            .collect();
+        Ok(tasks)
     }
 }
 
@@ -2170,5 +2496,146 @@ mod tests {
         assert!(store.get_howto(&howto.id).unwrap().is_some());
 
         disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_question_not_found_display() {
+        let err = QuestionNotFound("q123".to_string());
+        assert_eq!(format!("{err}"), "question not found: q123");
+    }
+
+    #[test]
+    fn test_delete_question() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let question = store.create_question("Test question?").unwrap();
+        assert!(store.get_question(&question.id).unwrap().is_some());
+
+        let deleted = store.delete_question(&question.id).unwrap();
+        assert!(deleted);
+        assert!(store.get_question(&question.id).unwrap().is_none());
+
+        // Deleting again should return false
+        let deleted_again = store.delete_question(&question.id).unwrap();
+        assert!(!deleted_again);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_list_questions_all() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let q1 = store.create_question("Question 1?").unwrap();
+        let q2 = store.create_question("Question 2?").unwrap();
+        store.answer_question(&q1.id, "Answer 1").unwrap();
+
+        // List all questions
+        let all = store.list_questions(false).unwrap();
+        assert_eq!(all.len(), 2);
+
+        // List only unanswered
+        let unanswered = store.list_questions(true).unwrap();
+        assert_eq!(unanswered.len(), 1);
+        assert_eq!(unanswered[0].id, q2.id);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_search_questions() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        store.create_question("What API format should we use?").unwrap();
+        store.create_question("How should authentication work?").unwrap();
+        store.create_question("What database should we use?").unwrap();
+
+        let results = store.search_questions("API").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].text.contains("API"));
+
+        let results = store.search_questions("should").unwrap();
+        assert_eq!(results.len(), 3);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_unlink_task_from_question() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let question = store.create_question("Question?").unwrap();
+
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+
+        // Should be able to unlink
+        let unlinked = store.unlink_task_from_question(&task.id, &question.id).unwrap();
+        assert!(unlinked);
+
+        // Unlinking again should return false
+        let unlinked_again = store.unlink_task_from_question(&task.id, &question.id).unwrap();
+        assert!(!unlinked_again);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_task_questions() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        let q1 = store.create_question("Question 1?").unwrap();
+        let q2 = store.create_question("Question 2?").unwrap();
+
+        store.link_task_to_question(&task.id, &q1.id).unwrap();
+        store.link_task_to_question(&task.id, &q2.id).unwrap();
+
+        let question_ids = store.get_task_questions(&task.id).unwrap();
+        assert_eq!(question_ids.len(), 2);
+        assert!(question_ids.contains(&q1.id));
+        assert!(question_ids.contains(&q2.id));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_link_task_to_question_task_not_found() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let question = store.create_question("Question?").unwrap();
+
+        let result = store.link_task_to_question("nonexistent-task-1234", &question.id);
+        assert!(result.is_err());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_link_task_to_question_question_not_found() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+
+        let result = store.link_task_to_question(&task.id, "nonexistent-question-1234");
+        assert!(result.is_err());
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_answer_question_not_found() {
+        let (_dir, store) = create_test_store();
+
+        // Answering a nonexistent question should return None
+        let result = store.answer_question("nonexistent-question-1234", "An answer").unwrap();
+        assert!(result.is_none());
     }
 }

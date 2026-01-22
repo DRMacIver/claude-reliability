@@ -194,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_generate_task_id_format() {
         enable_deterministic_ids();
 
@@ -205,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_generate_task_id_empty_title() {
         enable_deterministic_ids();
 
@@ -216,6 +218,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_generate_task_id_special_only() {
         enable_deterministic_ids();
 
@@ -226,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_deterministic_ids_increment() {
         enable_deterministic_ids();
 
@@ -242,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_random_suffix_unique() {
         disable_deterministic_ids();
 
