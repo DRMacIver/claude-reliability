@@ -54,6 +54,11 @@ pub struct ProjectConfig {
     /// Defaults to true for git repos.
     #[serde(default = "default_require_push")]
     pub require_push: bool,
+
+    /// Whether to explain why stops are permitted.
+    /// When true, the stop hook always includes a message explaining the reason.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explain_stops: bool,
 }
 
 /// Default value for `require_push` - true by default.
@@ -69,6 +74,7 @@ impl Default for ProjectConfig {
             check_command: None,
             code_review_section: None,
             require_push: true,
+            explain_stops: false,
         }
     }
 }
@@ -146,7 +152,14 @@ impl ProjectConfig {
         // Only require push if there's a remote configured
         let require_push = git_repo && has_git_remote(runner);
 
-        Self { git_repo, beads_installed, check_command, code_review_section, require_push }
+        Self {
+            git_repo,
+            beads_installed,
+            check_command,
+            code_review_section,
+            require_push,
+            explain_stops: false,
+        }
     }
 
     /// Get the config file path for a base directory.
@@ -519,6 +532,7 @@ mod tests {
             check_command: Some("just check".to_string()),
             code_review_section: None,
             require_push: true,
+            explain_stops: false,
         };
 
         config.save_to(dir.path()).unwrap();
@@ -537,6 +551,7 @@ mod tests {
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: true,
+            explain_stops: false,
         };
 
         config.save_to(dir.path()).unwrap();
@@ -745,6 +760,7 @@ mod tests {
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: false,
+            explain_stops: false,
         };
         existing.save_to(dir.path()).unwrap();
 
@@ -770,6 +786,7 @@ mod tests {
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: false,
+            explain_stops: false,
         };
         existing.save_to(dir.path()).unwrap();
 
@@ -1441,6 +1458,7 @@ mod tests {
             check_command: Some("just check".to_string()),
             code_review_section: None,
             require_push: true,
+            explain_stops: false,
         };
 
         // Change to temp dir to test save() wrapper
@@ -1555,5 +1573,61 @@ mod tests {
         let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_explain_stops_default_false() {
+        let config = ProjectConfig::default();
+        assert!(!config.explain_stops);
+    }
+
+    #[test]
+    fn test_explain_stops_not_serialized_when_false() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { explain_stops: false, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // explain_stops should not appear in YAML when false
+        assert!(!content.contains("explain_stops"));
+    }
+
+    #[test]
+    fn test_explain_stops_serialized_when_true() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { explain_stops: true, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // explain_stops should appear in YAML when true
+        assert!(content.contains("explain_stops: true"));
+    }
+
+    #[test]
+    fn test_explain_stops_loaded_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create config with explain_stops: true
+        std::fs::write(&config_path, "git_repo: false\nexplain_stops: true\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(config.explain_stops);
+    }
+
+    #[test]
+    fn test_explain_stops_defaults_to_false_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create config without explain_stops
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(!config.explain_stops);
     }
 }

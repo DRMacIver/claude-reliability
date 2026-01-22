@@ -330,6 +330,7 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         quality_check_command: project_config.check_command,
         require_push: project_config.require_push,
         base_dir: None,
+        explain_stops: project_config.explain_stops,
     };
 
     match run_stop(stdin, &config, &runner, &sub_agent) {

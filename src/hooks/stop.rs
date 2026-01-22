@@ -32,6 +32,7 @@ pub const USER_RECENCY_MINUTES: u32 = 5;
 
 /// Configuration for the stop hook.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // Config structs legitimately have many boolean flags
 pub struct StopHookConfig {
     /// Whether we're in a git repository.
     pub git_repo: bool,
@@ -44,6 +45,9 @@ pub struct StopHookConfig {
     /// Base directory for beads checks (defaults to current directory).
     /// Used by tests to avoid changing global CWD.
     pub base_dir: Option<PathBuf>,
+    /// Whether to explain why stops are permitted.
+    /// When true, always includes a message to the user explaining the reason.
+    pub explain_stops: bool,
 }
 
 impl StopHookConfig {
@@ -102,6 +106,17 @@ impl StopHookResult {
         self.inject_response = Some(response.into());
         self
     }
+
+    /// Add an explanation for why the stop was permitted (user-facing message).
+    /// Only adds the message if `explain` is true.
+    #[must_use]
+    pub fn with_explanation(self, explain: bool, reason: impl Into<String>) -> Self {
+        if explain {
+            self.with_message(format!("[Stop permitted: {}]", reason.into()))
+        } else {
+            self
+        }
+    }
 }
 
 /// Threshold for consecutive API errors before allowing stop.
@@ -152,7 +167,9 @@ pub fn run_stop_hook(
         session::cleanup_session_files(config.base_dir())?;
         let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
             .expect("problem_mode_exit.tera template should always render");
-        return Ok(StopHookResult::allow().with_message(message));
+        return Ok(StopHookResult::allow()
+            .with_message(message)
+            .with_explanation(config.explain_stops, "problem mode was active"));
     }
 
     // Check for API error loop - if we've seen multiple consecutive API errors,
@@ -162,7 +179,10 @@ pub fn run_stop_hook(
         ctx.insert("error_count", &transcript_info.consecutive_api_errors);
         let message = templates::render("messages/stop/api_error_loop.tera", &ctx)
             .expect("api_error_loop.tera template should always render");
-        return Ok(StopHookResult::allow().with_message(message));
+        return Ok(StopHookResult::allow().with_message(message).with_explanation(
+            config.explain_stops,
+            format!("{} consecutive API errors detected", transcript_info.consecutive_api_errors),
+        ));
     }
 
     // Fast path: simple questions with no modifications
@@ -170,7 +190,8 @@ pub fn run_stop_hook(
     // and no modifying tools were used, allow immediate stop
     if let Some(ref first_msg) = transcript_info.first_user_message {
         if is_simple_question(first_msg) && !transcript_info.has_modifying_tool_use {
-            return Ok(StopHookResult::allow());
+            return Ok(StopHookResult::allow()
+                .with_explanation(config.explain_stops, "simple question with no modifications"));
         }
     }
 
@@ -236,7 +257,8 @@ pub fn run_stop_hook(
     if session_config.is_none() && config.git_repo {
         let git_status = git::check_uncommitted_changes(runner)?;
         if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
-            return Ok(StopHookResult::allow());
+            return Ok(StopHookResult::allow()
+                .with_explanation(config.explain_stops, "clean git repo, no JKW session"));
         }
     }
 
@@ -277,7 +299,8 @@ pub fn run_stop_hook(
                 }
             }
             // Bypass allowed - but don't cleanup session files so JKW can resume
-            return Ok(StopHookResult::allow());
+            return Ok(StopHookResult::allow()
+                .with_explanation(config.explain_stops, "human input required phrase used"));
         }
     }
 
@@ -306,7 +329,7 @@ pub fn run_stop_hook(
     }
 
     // Check if agent is asking a question and user is recently active
-    if let Some(result) = check_interactive_question(&transcript_info, sub_agent)? {
+    if let Some(result) = check_interactive_question(&transcript_info, sub_agent, config)? {
         return Ok(result);
     }
 
@@ -336,7 +359,8 @@ pub fn run_stop_hook(
     if session::has_reflect_marker(base_dir) {
         // Agent already got the reflection prompt and is stopping again - allow it
         session::clear_reflect_marker(base_dir)?;
-        return Ok(StopHookResult::allow());
+        return Ok(StopHookResult::allow()
+            .with_explanation(config.explain_stops, "reflection already prompted on first stop"));
     }
 
     // Skip reflection if agent is asking a question (waiting for user input)
@@ -344,7 +368,8 @@ pub fn run_stop_hook(
     // also checks user recency, but we want to skip reflection regardless of recency
     if let Some(ref output) = transcript_info.last_assistant_output {
         if looks_like_question(output) {
-            return Ok(StopHookResult::allow());
+            return Ok(StopHookResult::allow()
+                .with_explanation(config.explain_stops, "agent is asking a question"));
         }
     }
 
@@ -366,7 +391,7 @@ pub fn run_stop_hook(
             .with_message("  - Then stop again to exit"));
     }
 
-    Ok(StopHookResult::allow())
+    Ok(StopHookResult::allow().with_explanation(config.explain_stops, "no modifying tools used"))
 }
 
 /// Check if the assistant's last message is asking about committing or pushing.
@@ -617,6 +642,7 @@ fn add_analysis_messages(result: &mut StopHookResult, analysis: &AnalysisResults
 fn check_interactive_question(
     transcript_info: &TranscriptInfo,
     sub_agent: &dyn SubAgent,
+    config: &StopHookConfig,
 ) -> Result<Option<StopHookResult>> {
     let Some(ref output) = transcript_info.last_assistant_output else {
         return Ok(None);
@@ -653,9 +679,11 @@ fn check_interactive_question(
                 .with_message("# Allowing Stop for User Interaction")
                 .with_message("")
                 .with_message("Agent appears to be asking a question.");
-            if let Some(r) = reason {
+            if let Some(ref r) = reason {
                 result.messages.push(format!("Reason: {r}"));
             }
+            let explanation = reason.unwrap_or_else(|| "agent asking question".to_string());
+            result = result.with_explanation(config.explain_stops, explanation);
             Ok(Some(result))
         }
         SubAgentDecision::Answer(answer) => Ok(Some(
@@ -730,7 +758,13 @@ fn handle_jkw_mode(
             ))
             .with_message("Just-keep-working mode paused due to lack of progress.")
             .with_message("")
-            .with_message("Session preserved - JKW mode will resume on next message."));
+            .with_message("Session preserved - JKW mode will resume on next message.")
+            .with_explanation(
+                config.explain_stops,
+                format!(
+                    "staleness detected ({iterations_since_change} iterations without progress)"
+                ),
+            ));
     }
 
     // Check if all work is done (only when beads is available to track issues)
@@ -901,6 +935,44 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
         assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_explain_stops_adds_explanation_message() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            explain_stops: true,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        // Should include an explanation message
+        let has_explanation = result.messages.iter().any(|m| m.starts_with("[Stop permitted:"));
+        assert!(has_explanation, "Expected explanation message, got: {:?}", result.messages);
+    }
+
+    #[test]
+    fn test_explain_stops_disabled_no_message() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            explain_stops: false,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        // Should NOT include an explanation message
+        let has_explanation = result.messages.iter().any(|m| m.starts_with("[Stop permitted:"));
+        assert!(!has_explanation, "Unexpected explanation message: {:?}", result.messages);
     }
 
     fn mock_uncommitted_changes() -> MockCommandRunner {
@@ -1077,6 +1149,19 @@ mod tests {
     fn test_stop_hook_result_with_inject() {
         let result = StopHookResult::block().with_inject("Continue");
         assert_eq!(result.inject_response, Some("Continue".to_string()));
+    }
+
+    #[test]
+    fn test_stop_hook_result_with_explanation_enabled() {
+        let result = StopHookResult::allow().with_explanation(true, "test reason");
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0], "[Stop permitted: test reason]");
+    }
+
+    #[test]
+    fn test_stop_hook_result_with_explanation_disabled() {
+        let result = StopHookResult::allow().with_explanation(false, "test reason");
+        assert!(result.messages.is_empty());
     }
 
     #[test]
@@ -1383,7 +1468,9 @@ mod tests {
         let transcript_info = TranscriptInfo::default();
         let sub_agent = MockSubAgent::new();
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -1399,7 +1486,9 @@ mod tests {
         };
         let sub_agent = MockSubAgent::new();
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -1417,7 +1506,9 @@ mod tests {
         };
         let sub_agent = MockSubAgent::new();
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -1434,7 +1525,9 @@ mod tests {
         };
         let sub_agent = MockSubAgent::new();
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(!result.allow_stop);
@@ -1460,7 +1553,9 @@ mod tests {
             "User preference needed".to_string(),
         )));
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.allow_stop);
@@ -1486,7 +1581,9 @@ mod tests {
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(!result.allow_stop);
@@ -1509,7 +1606,9 @@ mod tests {
         let mut sub_agent = MockSubAgent::new();
         sub_agent.expect_question_decision(SubAgentDecision::Continue);
 
-        let result = check_interactive_question(&transcript_info, &sub_agent).unwrap();
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -1815,6 +1914,7 @@ mod tests {
             quality_check_command: Some("just check".to_string()),
             require_push: false, // Don't block on unpushed commits
             base_dir: Some(dir.path().to_path_buf()),
+            explain_stops: false,
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
