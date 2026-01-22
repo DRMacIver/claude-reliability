@@ -13,6 +13,9 @@ if [[ -n "$BINARY" && -x "$BINARY" ]]; then
     # Ensure config exists
     "$BINARY" ensure-config >/dev/null 2>&1 || true
 
+    # Sync beads issues to tasks database
+    "$BINARY" sync-beads 2>/dev/null || true
+
     # Print intro message
     "$BINARY" intro 2>/dev/null || true
 fi

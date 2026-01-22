@@ -25,6 +25,8 @@ pub enum Command {
     EnsureGitignore,
     /// Print session intro message.
     Intro,
+    /// Sync beads issues to tasks database.
+    SyncBeads,
     /// Run the stop hook.
     Stop,
     /// Run the user-prompt-submit hook.
@@ -52,6 +54,7 @@ impl Command {
             | Self::EnsureConfig
             | Self::EnsureGitignore
             | Self::Intro
+            | Self::SyncBeads
             | Self::UserPromptSubmit => false,
             Self::Stop
             | Self::PreToolUseNoVerify
@@ -91,6 +94,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "ensure-config" => ParseResult::Command(Command::EnsureConfig),
         "ensure-gitignore" => ParseResult::Command(Command::EnsureGitignore),
         "intro" => ParseResult::Command(Command::Intro),
+        "sync-beads" => ParseResult::Command(Command::SyncBeads),
         "stop" => ParseResult::Command(Command::Stop),
         "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
         "pre-tool-use" => {
@@ -120,6 +124,7 @@ pub fn usage(program: &str) -> String {
          ensure-config              Ensure config file exists\n  \
          ensure-gitignore           Ensure .gitignore has required entries\n  \
          intro                      Print session intro message\n  \
+         sync-beads                 Sync open beads issues to tasks database\n  \
          stop                       Run the stop hook\n  \
          user-prompt-submit         Run the user prompt submit hook\n  \
          pre-tool-use no-verify     Check for --no-verify usage\n  \
@@ -266,6 +271,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::EnsureConfig => run_ensure_config_cmd(),
         Command::EnsureGitignore => run_ensure_gitignore_cmd(),
         Command::Intro => run_intro_cmd(),
+        Command::SyncBeads => run_sync_beads_cmd(),
         Command::Stop => run_stop_cmd(stdin),
         Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
         Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
@@ -326,6 +332,36 @@ fn run_intro_cmd() -> (ExitCode, Vec<String>) {
     let message = templates::render("messages/session_intro.tera", &Context::new())
         .expect("session_intro.tera template should always render");
     (ExitCode::SUCCESS, vec![message])
+}
+
+fn run_sync_beads_cmd() -> (ExitCode, Vec<String>) {
+    use crate::beads_sync::sync_beads_to_tasks;
+    use std::path::Path;
+
+    let runner = RealCommandRunner::new();
+    let base_dir = Path::new(".");
+
+    match sync_beads_to_tasks(&runner, base_dir) {
+        Ok(result) => format_sync_result(&result),
+        Err(e) => (ExitCode::from(1), vec![format!("Sync failed: {e}")]), // coverage:ignore - I/O errors
+    }
+}
+
+fn format_sync_result(result: &crate::beads_sync::SyncResult) -> (ExitCode, Vec<String>) {
+    let mut messages = Vec::new();
+    if result.created > 0 {
+        messages.push(format!("Synced {} beads issues to tasks", result.created));
+    }
+    if result.skipped > 0 {
+        messages.push(format!("Skipped {} (already exist)", result.skipped));
+    }
+    if result.has_errors() {
+        for err in &result.errors {
+            messages.push(format!("Error: {err}"));
+        }
+        return (ExitCode::from(1), messages);
+    }
+    (ExitCode::SUCCESS, messages)
 }
 
 fn run_user_prompt_submit_cmd() -> (ExitCode, Vec<String>) {
@@ -1576,5 +1612,59 @@ mod tests {
         assert!(json.get("systemMessage").is_some(), "JSON should contain systemMessage field");
         let message = json["systemMessage"].as_str().unwrap();
         assert!(message.contains("[Stop permitted:"), "should contain stop explanation");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_sync_beads_no_beads() {
+        use tempfile::TempDir;
+
+        // Run in temp dir where beads is not available
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let output = run(&args(&["prog", "sync-beads"]), "");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed with no output (no beads = nothing to sync)
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn test_format_sync_result_created() {
+        use crate::beads_sync::SyncResult;
+
+        let result = SyncResult { created: 3, skipped: 0, errors: Vec::new() };
+        let (exit_code, messages) = format_sync_result(&result);
+
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("Synced 3 beads issues"));
+    }
+
+    #[test]
+    fn test_format_sync_result_skipped() {
+        use crate::beads_sync::SyncResult;
+
+        let result = SyncResult { created: 0, skipped: 2, errors: Vec::new() };
+        let (exit_code, messages) = format_sync_result(&result);
+
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("Skipped 2"));
+    }
+
+    #[test]
+    fn test_format_sync_result_with_errors() {
+        use crate::beads_sync::SyncResult;
+
+        let result =
+            SyncResult { created: 1, skipped: 0, errors: vec!["proj-1: db error".to_string()] };
+        let (exit_code, messages) = format_sync_result(&result);
+
+        assert_eq!(exit_code, ExitCode::from(1));
+        assert!(messages.iter().any(|m| m.contains("Error: proj-1")));
     }
 }
