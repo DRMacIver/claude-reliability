@@ -25,6 +25,7 @@
 //! let results = store.search_tasks("login").unwrap();
 //! ```
 
+pub mod builtin_howtos;
 pub mod id;
 pub mod models;
 pub mod store;

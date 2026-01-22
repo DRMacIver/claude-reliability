@@ -476,8 +476,17 @@ impl SqliteTaskStore {
                 INSERT INTO questions_fts(rowid, id, text)
                 VALUES (NEW.rowid, NEW.id, NEW.text);
             END;
+
+            -- Metadata table for tracking versions and settings
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
             ",
         )?;
+
+        // Sync built-in how-tos
+        crate::tasks::builtin_howtos::sync_builtin_howtos(&conn)?;
 
         Ok(())
     }
@@ -2330,14 +2339,20 @@ mod tests {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
+        // Store starts with 1 built-in how-to
+        let initial_count = store.list_howtos().unwrap().len();
+
         store.create_howto("B Guide", "B").unwrap();
         store.create_howto("A Guide", "A").unwrap();
 
         let howtos = store.list_howtos().unwrap();
-        assert_eq!(howtos.len(), 2);
-        // Ordered by title
-        assert_eq!(howtos[0].title, "A Guide");
-        assert_eq!(howtos[1].title, "B Guide");
+        assert_eq!(howtos.len(), initial_count + 2);
+        // Ordered by title - A Guide should be first of user-created
+        let user_howtos: Vec<_> =
+            howtos.into_iter().filter(|h| !h.id.starts_with("builtin-")).collect();
+        assert_eq!(user_howtos.len(), 2);
+        assert_eq!(user_howtos[0].title, "A Guide");
+        assert_eq!(user_howtos[1].title, "B Guide");
 
         disable_deterministic_ids();
     }
@@ -2347,12 +2362,13 @@ mod tests {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
-        store.create_howto("Deploy Guide", "Run deploy.sh").unwrap();
+        store.create_howto("Unique Widget Guide", "Run widget.sh").unwrap();
         store.create_howto("Testing Guide", "Run pytest").unwrap();
 
-        let results = store.search_howtos("deploy").unwrap();
+        // Search for something unique that won't match built-in how-tos
+        let results = store.search_howtos("widget").unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Deploy Guide");
+        assert_eq!(results[0].title, "Unique Widget Guide");
 
         disable_deterministic_ids();
     }
