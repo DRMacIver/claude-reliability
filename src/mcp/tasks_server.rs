@@ -37,13 +37,15 @@ impl TasksServer {
         Ok(Self { store: Arc::new(store) })
     }
 
-    /// Create a new tasks server using the default database location in `.claude/`.
+    /// Create a new tasks server for the given project directory.
+    ///
+    /// The database will be at `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
     ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be initialized.
-    pub fn in_claude_dir(base_dir: &Path) -> crate::error::Result<Self> {
-        let store = SqliteTaskStore::in_claude_dir(base_dir)?;
+    pub fn for_project(project_dir: &Path) -> crate::error::Result<Self> {
+        let store = SqliteTaskStore::for_project(project_dir)?;
         Ok(Self { store: Arc::new(store) })
     }
 }

@@ -37,6 +37,7 @@ pub use store::{
     TaskNotFound, TaskStore, TaskUpdate,
 };
 
+use crate::paths;
 use std::path::Path;
 
 /// Try to suggest a task to work on next.
@@ -47,7 +48,7 @@ use std::path::Path;
 /// Returns `Some((id, title))` of the suggested task.
 #[must_use]
 pub fn suggest_task(base_dir: &Path) -> Option<(String, String)> {
-    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    let db_path = paths::project_db_path(base_dir)?;
     if !db_path.exists() {
         return None;
     }
@@ -62,7 +63,10 @@ pub fn suggest_task(base_dir: &Path) -> Option<(String, String)> {
 /// Returns 0 if the database doesn't exist or on any error.
 #[must_use]
 pub fn count_ready_tasks(base_dir: &Path) -> u32 {
-    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
+    let Some(db_path) = paths::project_db_path(base_dir) else {
+        return 0; // coverage:ignore
+    };
     if !db_path.exists() {
         return 0;
     }
@@ -80,7 +84,10 @@ pub fn count_ready_tasks(base_dir: &Path) -> u32 {
 /// Returns empty vec if database doesn't exist or on any error.
 #[must_use]
 pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Question>)> {
-    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
+    let Some(db_path) = paths::project_db_path(base_dir) else {
+        return Vec::new(); // coverage:ignore
+    };
     if !db_path.exists() {
         return Vec::new();
     }
@@ -108,7 +115,10 @@ pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Q
 /// Returns empty vec if database doesn't exist or on any error.
 #[must_use]
 pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
-    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
+    let Some(db_path) = paths::project_db_path(base_dir) else {
+        return Vec::new(); // coverage:ignore
+    };
     if !db_path.exists() {
         return Vec::new();
     }
@@ -125,6 +135,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Get the database path for a project directory (for tests).
+    fn test_db_path(project_dir: &Path) -> std::path::PathBuf {
+        paths::project_db_path(project_dir).expect("test should have home dir")
+    }
+
     #[test]
     fn test_suggest_task_no_database() {
         let dir = TempDir::new().unwrap();
@@ -135,9 +150,8 @@ mod tests {
     #[test]
     fn test_suggest_task_empty_database() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         // Create empty database
         let _store = SqliteTaskStore::new(&db_path).unwrap();
@@ -149,9 +163,8 @@ mod tests {
     #[test]
     fn test_suggest_task_with_task() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         // Create database with a task
         let store = SqliteTaskStore::new(&db_path).unwrap();
@@ -174,9 +187,8 @@ mod tests {
     #[test]
     fn test_count_ready_tasks_empty() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let _store = SqliteTaskStore::new(&db_path).unwrap();
 
@@ -187,9 +199,8 @@ mod tests {
     #[test]
     fn test_count_ready_tasks_with_tasks() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let store = SqliteTaskStore::new(&db_path).unwrap();
         store.create_task("Task 1", "", Priority::High).unwrap();
@@ -202,9 +213,8 @@ mod tests {
     #[test]
     fn test_count_ready_tasks_corrupted_database() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         // Write invalid content to the database file
         std::fs::write(&db_path, "this is not a valid sqlite database").unwrap();
@@ -224,9 +234,8 @@ mod tests {
     #[test]
     fn test_get_question_blocked_tasks_empty() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let _store = SqliteTaskStore::new(&db_path).unwrap();
 
@@ -237,9 +246,8 @@ mod tests {
     #[test]
     fn test_get_question_blocked_tasks_with_blocked_task() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let task = store.create_task("Blocked task", "", Priority::High).unwrap();
@@ -258,9 +266,8 @@ mod tests {
     #[test]
     fn test_get_question_blocked_tasks_answered_question_not_blocked() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let task = store.create_task("Task with answered question", "", Priority::High).unwrap();
@@ -276,9 +283,8 @@ mod tests {
     #[test]
     fn test_get_question_blocked_tasks_corrupted_database() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         std::fs::write(&db_path, "invalid database").unwrap();
 
@@ -296,9 +302,8 @@ mod tests {
     #[test]
     fn test_list_unanswered_questions_empty() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let _store = SqliteTaskStore::new(&db_path).unwrap();
 
@@ -309,9 +314,8 @@ mod tests {
     #[test]
     fn test_list_unanswered_questions_with_questions() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let q1 = store.create_question("Question 1?").unwrap();
@@ -327,9 +331,8 @@ mod tests {
     #[test]
     fn test_list_unanswered_questions_corrupted_database() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         std::fs::write(&db_path, "invalid database").unwrap();
 

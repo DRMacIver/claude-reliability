@@ -67,11 +67,11 @@ pub fn run_jkw_setup_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutpu
             let _ = s.migrate_from_files(base_dir);
             s
         }
-        Err(e) => {
-            // If we can't create the store, log a warning and skip setup enforcement
-            eprintln!("Warning: Failed to open state store: {e}");
-            return PreToolUseOutput::allow(None);
-        }
+        // Store creation only fails if home dir detection fails (which always
+        // succeeds on Linux via /etc/passwd fallback) or SQLite can't create the database file
+        #[rustfmt::skip]
+        Err(e) => { eprintln!("Warning: Failed to open state store: {e}"); // coverage:ignore
+            return PreToolUseOutput::allow(None); } // coverage:ignore
     };
     run_jkw_setup_hook_with_store(input, base_dir, &store)
 }

@@ -12,6 +12,7 @@ pub mod error;
 pub mod git;
 pub mod hooks;
 pub mod mcp;
+pub mod paths;
 pub mod question;
 pub mod session;
 pub mod storage;

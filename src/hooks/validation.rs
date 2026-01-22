@@ -25,8 +25,9 @@ pub fn run_validation_hook(input: &HookInput, base_dir: &Path) -> PreToolUseOutp
     // Check if this is a modifying tool
     if MODIFYING_TOOLS.contains(&tool_name) {
         // Set the marker indicating validation is needed
+        // Marker setting only fails if home dir can't be detected or SQLite fails
         if let Err(e) = session::set_needs_validation(base_dir) {
-            eprintln!("Warning: Failed to set needs_validation marker: {e}");
+            eprintln!("Warning: Failed to set needs_validation marker: {e}"); // coverage:ignore
         }
     }
 

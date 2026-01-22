@@ -4,6 +4,7 @@
 //! functionality through stdio transport.
 
 use claude_reliability::mcp::TasksServer;
+use claude_reliability::paths;
 use rmcp::ServiceExt;
 use std::env;
 use std::path::PathBuf;
@@ -14,9 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = if let Ok(path) = env::var("TASKS_DB_PATH") {
         PathBuf::from(path)
     } else {
-        // Default to current directory's .claude folder
+        // Default to current directory's project-specific path in ~/.claude-reliability/
         let cwd = env::current_dir()?;
-        cwd.join(".claude").join("claude-reliability-working-memory.sqlite3")
+        paths::project_db_path(&cwd).ok_or("Cannot determine home directory for database path")?
     };
 
     // Create the server

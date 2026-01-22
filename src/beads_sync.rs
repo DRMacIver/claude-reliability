@@ -4,6 +4,7 @@
 //! It is called on session start to ensure Claude has visibility into open work.
 
 use crate::error::Result;
+use crate::paths;
 use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
 use crate::traits::CommandRunner;
 use serde::Deserialize;
@@ -78,7 +79,8 @@ pub fn sync_beads_to_tasks(runner: &dyn CommandRunner, base_dir: &Path) -> Resul
     }
 
     // Open the tasks database
-    let db_path = base_dir.join(".claude/claude-reliability-working-memory.sqlite3");
+    let db_path = paths::project_db_path(base_dir)
+        .ok_or_else(|| crate::error::Error::Config("Cannot determine home directory".into()))?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -162,6 +164,11 @@ mod tests {
     use crate::traits::CommandOutput;
     use tempfile::TempDir;
 
+    /// Get the database path for a project directory (for tests).
+    fn test_db_path(project_dir: &Path) -> std::path::PathBuf {
+        paths::project_db_path(project_dir).expect("test should have home dir")
+    }
+
     #[test]
     fn test_sync_no_beads() {
         let dir = TempDir::new().unwrap();
@@ -201,7 +208,6 @@ mod tests {
     fn test_sync_creates_tasks() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".beads")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
 
         let issues_json = r#"[
             {"id": "proj-1", "title": "Fix bug", "description": "A bug", "priority": 1, "type": "bug", "status": "open"},
@@ -225,8 +231,8 @@ mod tests {
         assert_eq!(result.created, 2);
         assert_eq!(result.skipped, 0);
 
-        // Verify tasks were created
-        let db_path = dir.path().join(".claude/claude-reliability-working-memory.sqlite3");
+        // Verify tasks were created using the correct path
+        let db_path = test_db_path(dir.path());
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let tasks = store.list_tasks(crate::tasks::TaskFilter::default()).unwrap();
         assert_eq!(tasks.len(), 2);
@@ -246,10 +252,10 @@ mod tests {
     fn test_sync_skips_existing() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".beads")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
 
-        // Pre-create a task with beads marker
-        let db_path = dir.path().join(".claude/claude-reliability-working-memory.sqlite3");
+        // Pre-create a task with beads marker using the correct path
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
         store.create_task("Existing task", "[beads:proj-1] Description", Priority::High).unwrap();
 
@@ -314,7 +320,6 @@ mod tests {
     fn test_sync_creates_task_without_type() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".beads")).unwrap();
-        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
 
         // Issue without a type - should use title directly without prefix
         let issues_json = r#"[{"id": "proj-1", "title": "Simple task", "description": "", "priority": 2, "type": "", "status": "open"}]"#;
@@ -336,7 +341,7 @@ mod tests {
         assert_eq!(result.created, 1);
 
         // Verify task was created with title only (no type prefix)
-        let db_path = dir.path().join(".claude/claude-reliability-working-memory.sqlite3");
+        let db_path = test_db_path(dir.path());
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let tasks = store.list_tasks(crate::tasks::TaskFilter::default()).unwrap();
         assert_eq!(tasks.len(), 1);

@@ -2,7 +2,7 @@
   "mcpServers": {
     "tasks": {
       "type": "stdio",
-      "command": "${CLAUDE_PROJECT_DIR}/.claude/bin/tasks-mcp",
+      "command": "./.claude/bin/tasks-mcp",
       "args": []
     }
   }

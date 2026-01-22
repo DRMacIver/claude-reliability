@@ -1,7 +1,7 @@
 //! Session file parsing for just-keep-working mode.
 //!
 //! Session state is now stored in a `SQLite` database at
-//! `.claude/claude-reliability-working-memory.sqlite3`.
+//! `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
 //!
 //! The session notes file `.claude/jkw-session.local.md` remains a markdown
 //! file for direct LLM editing.
@@ -645,9 +645,9 @@ mod tests {
     }
 
     #[test]
-    fn test_write_session_state_creates_parent_directory() {
+    fn test_write_session_state_creates_database() {
         let dir = TempDir::new().unwrap();
-        // Use a path under .claude which is where the database will be created
+        // Use a path under .claude (legacy path format for backward compatibility)
         let path = dir.path().join(SESSION_STATE_PATH);
 
         let config =
@@ -655,8 +655,10 @@ mod tests {
 
         write_session_state(&path, &config).unwrap();
 
-        // .claude directory should be created for the database
-        assert!(dir.path().join(".claude").exists());
+        // Verify state was written by reading it back
+        let read_config = parse_session_state(&path).unwrap();
+        assert!(read_config.is_some());
+        assert_eq!(read_config.unwrap().iteration, 1);
     }
 
     #[test]
@@ -720,13 +722,13 @@ mod tests {
     }
 
     #[test]
-    fn test_enter_problem_mode_creates_parent_directory() {
+    fn test_enter_problem_mode_creates_database() {
         let dir = TempDir::new().unwrap();
-        // Base dir is the temp dir, .claude subdirectory doesn't exist yet
+        // Base dir is the temp dir, database will be created in ~/.claude-reliability/
 
         enter_problem_mode(dir.path()).unwrap();
 
-        assert!(dir.path().join(".claude").exists());
+        // Verify problem mode is active (database was created)
         assert!(is_problem_mode_active(dir.path()));
     }
 
@@ -788,13 +790,13 @@ mod tests {
     }
 
     #[test]
-    fn test_set_jkw_setup_required_creates_parent_directory() {
+    fn test_set_jkw_setup_required_creates_database() {
         let dir = TempDir::new().unwrap();
-        // .claude subdirectory doesn't exist yet
+        // Database will be created in ~/.claude-reliability/
 
         set_jkw_setup_required(dir.path()).unwrap();
 
-        assert!(dir.path().join(".claude").exists());
+        // Verify marker is set (database was created)
         assert!(is_jkw_setup_required(dir.path()));
     }
 
@@ -932,14 +934,14 @@ mod tests {
     }
 
     #[test]
-    fn test_set_reflect_marker_creates_parent_directory() {
+    fn test_set_reflect_marker_creates_database() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
-        // .claude subdirectory doesn't exist yet
+        // Database will be created in ~/.claude-reliability/
 
         set_reflect_marker(base).unwrap();
 
-        assert!(base.join(".claude").exists());
+        // Verify marker is set (database was created)
         assert!(has_reflect_marker(base));
     }
 

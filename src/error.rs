@@ -65,6 +65,10 @@ pub enum Error {
     #[error("Template error: {0}")]
     Template(String),
 
+    /// A configuration or environment error occurred.
+    #[error("Config error: {0}")]
+    Config(String),
+
     /// A task-related error occurred.
     #[error("{0}")]
     Task(#[source] Box<dyn std::error::Error + Send + Sync>),

@@ -1862,16 +1862,16 @@ mod tests {
 
     #[test]
     fn test_bypass_human_input_blocked_with_open_tasks_shows_suggestion() {
+        use crate::paths;
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create .claude directory and task database with tasks
-        let claude_dir = base.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        // Create task database at the correct path
+        let db_path = paths::project_db_path(base).expect("should have home dir");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
         store.create_task("Fix important bug", "Description", Priority::High).unwrap();
 
@@ -3557,16 +3557,16 @@ mod tests {
 
     #[test]
     fn test_bypass_human_input_blocked_with_question_blocked_tasks_first_time() {
+        use crate::paths;
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create .claude directory and task database
-        let claude_dir = base.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        // Create task database at the correct path
+        let db_path = paths::project_db_path(base).expect("should have home dir");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 
         // Create a task blocked by a question
@@ -3611,16 +3611,16 @@ mod tests {
 
     #[test]
     fn test_bypass_human_input_allowed_with_question_blocked_tasks_second_time() {
+        use crate::paths;
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create .claude directory and task database
-        let claude_dir = base.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        // Create task database at the correct path
+        let db_path = paths::project_db_path(base).expect("should have home dir");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 
         // Create a task blocked by a question
@@ -3666,16 +3666,16 @@ mod tests {
 
     #[test]
     fn test_question_blocked_tasks_deduplicates_questions() {
+        use crate::paths;
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
-        // Create .claude directory and task database
-        let claude_dir = base.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        let db_path = claude_dir.join("claude-reliability-working-memory.sqlite3");
+        // Create task database at the correct path
+        let db_path = paths::project_db_path(base).expect("should have home dir");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 
         // Create multiple tasks blocked by the same question

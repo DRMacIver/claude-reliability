@@ -1,6 +1,7 @@
 //! Task store trait and `SQLite` implementation.
 
 use crate::error::Result;
+use crate::paths;
 use crate::tasks::id::generate_task_id;
 use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Question, Status, Task};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -263,13 +264,17 @@ impl SqliteTaskStore {
         Ok(store)
     }
 
-    /// Create a new `SQLite` task store in the `.claude` directory.
+    /// Create a new `SQLite` task store for the given project directory.
+    ///
+    /// The database will be at `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be initialized.
-    pub fn in_claude_dir(base_dir: &Path) -> Result<Self> {
-        let db_path = base_dir.join(".claude").join("claude-reliability-working-memory.sqlite3");
+    /// Returns an error if the home directory cannot be determined or
+    /// the database cannot be initialized.
+    pub fn for_project(project_dir: &Path) -> Result<Self> {
+        let db_path = paths::project_db_path(project_dir)
+            .ok_or_else(|| crate::error::Error::Config("Cannot determine home directory".into()))?;
         Self::new(db_path)
     }
 
@@ -2091,10 +2096,13 @@ mod tests {
     }
 
     #[test]
-    fn test_in_claude_dir() {
+    fn test_for_project() {
         let dir = TempDir::new().unwrap();
-        let store = SqliteTaskStore::in_claude_dir(dir.path()).unwrap();
-        assert!(store.db_path().to_string_lossy().contains(".claude"));
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        // Database should be in ~/.claude-reliability/projects/<sanitized-path>/
+        let path_str = store.db_path().to_string_lossy();
+        assert!(path_str.contains(".claude-reliability"));
+        assert!(path_str.contains("projects"));
     }
 
     #[test]

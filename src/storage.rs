@@ -6,17 +6,15 @@
 //! - Boolean markers (problem mode, validation needed, etc.)
 //!
 //! All state is stored in a single `SQLite` database at
-//! `.claude/claude-reliability-working-memory.sqlite3`.
+//! `~/.claude-reliability/projects/<sanitized-path>/working-memory.sqlite3`.
 
 use crate::error::Result;
+use crate::paths;
 use crate::session::SessionConfig;
 use crate::traits::StateStore;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-/// Database file name within the `.claude` directory.
-pub const DATABASE_FILENAME: &str = "claude-reliability-working-memory.sqlite3";
 
 /// Marker name constants for consistent usage across the codebase.
 pub mod markers {
@@ -46,15 +44,18 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    /// Create a new `SQLite` store at the given base directory.
+    /// Create a new `SQLite` store for the given project directory.
     ///
-    /// The database file will be created at `{base_dir}/.claude/{DATABASE_FILENAME}`.
+    /// The database file will be created at
+    /// `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the database cannot be initialized.
-    pub fn new(base_dir: &Path) -> Result<Self> {
-        let db_path = base_dir.join(".claude").join(DATABASE_FILENAME);
+    /// Returns an error if the home directory cannot be determined or
+    /// the database cannot be initialized.
+    pub fn new(project_dir: &Path) -> Result<Self> {
+        let db_path = paths::project_db_path(project_dir)
+            .ok_or_else(|| crate::error::Error::Config("Cannot determine home directory".into()))?;
         let store = Self { db_path };
         store.init_schema()?;
         Ok(store)
@@ -280,9 +281,13 @@ mod tests {
 
     #[test]
     fn test_new_store_creates_database() {
-        let (dir, store) = create_test_store();
+        let (_dir, store) = create_test_store();
         assert!(store.db_path().exists());
-        assert!(dir.path().join(".claude").join(DATABASE_FILENAME).exists());
+        // Database should be in ~/.claude-reliability/projects/<sanitized-path>/
+        let path_str = store.db_path().to_string_lossy();
+        assert!(path_str.contains(".claude-reliability"));
+        assert!(path_str.contains("projects"));
+        assert!(path_str.ends_with(paths::DATABASE_FILENAME));
     }
 
     #[test]
