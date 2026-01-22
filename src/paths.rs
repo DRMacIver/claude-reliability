@@ -66,21 +66,14 @@ pub fn project_db_path(project_dir: &Path) -> Option<PathBuf> {
 /// Format: `<project-name>-<hash>` e.g., `my-project-a1b2c3d4`
 fn create_project_dir_name(project_dir: &Path) -> String {
     // Use canonical path if available for consistency
-    let path_to_hash = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let path_to_hash = project_dir.canonicalize().unwrap_or_else(|_| project_dir.to_path_buf());
 
     // Get the last component as a readable prefix
-    let prefix = path_to_hash
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("project");
+    let prefix = path_to_hash.file_name().and_then(|n| n.to_str()).unwrap_or("project");
 
     // Sanitize the prefix (replace non-alphanumeric with dash, collapse multiple dashes)
-    let prefix: String = prefix
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
+    let prefix: String =
+        prefix.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
     let prefix = prefix.trim_matches('-');
 
     // Hash the full canonical path for uniqueness
