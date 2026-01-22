@@ -152,10 +152,17 @@ install_binary() {
     log_info "Downloading claude-reliability ${version} for ${artifact_name}..."
     download "$download_url" "${tmp_dir}/release.tar.gz"
 
-    log_info "Extracting binary..."
+    log_info "Extracting binaries..."
     tar -xzf "${tmp_dir}/release.tar.gz" -C "$tmp_dir"
     mv "${tmp_dir}/claude-reliability" "${bin_dir}/claude-reliability"
     chmod +x "${bin_dir}/claude-reliability"
+
+    # Install tasks-mcp if present in the archive
+    if [[ -f "${tmp_dir}/tasks-mcp" ]]; then
+        mv "${tmp_dir}/tasks-mcp" "${bin_dir}/tasks-mcp"
+        chmod +x "${bin_dir}/tasks-mcp"
+        log_info "MCP server installed to ${bin_dir}/tasks-mcp"
+    fi
 
     # Verify the binary works
     if ! "${bin_dir}/claude-reliability" version >/dev/null 2>&1; then
@@ -240,6 +247,23 @@ install_settings() {
     log_info "Settings installed to ${settings_file}"
 }
 
+# Install MCP server configuration
+install_mcp_config() {
+    local target_dir="$1"
+    local mcp_file="${target_dir}/.mcp.json"
+
+    if [[ -f "$mcp_file" ]]; then
+        log_warn ".mcp.json already exists at ${mcp_file}"
+        log_warn "Please manually add the tasks server from:"
+        log_warn "  ${RAW_URL}/.claude/mcp.json"
+        return
+    fi
+
+    log_info "Installing MCP server configuration..."
+    copy_or_download ".claude/mcp.json" "$mcp_file"
+    log_info "MCP configuration installed to ${mcp_file}"
+}
+
 # Main installation
 main() {
     local target_dir="."
@@ -297,14 +321,16 @@ main() {
 
     install_scripts "$target_dir"
     install_settings "$target_dir"
+    install_mcp_config "$target_dir"
 
     echo ""
     log_info "Installation complete!"
     echo ""
     echo "Next steps:"
     echo "  1. Review .claude/settings.json to ensure hooks are configured correctly"
-    echo "  2. Add .claude/bin/ to .gitignore (binaries should not be committed)"
-    echo "  3. Commit the .claude/ directory (excluding binaries)"
+    echo "  2. Review .mcp.json for MCP server configuration"
+    echo "  3. Add .claude/bin/ to .gitignore (binaries should not be committed)"
+    echo "  4. Commit the .claude/ directory (excluding binaries)"
     if [[ -n "$LOCAL_CHECKOUT" ]]; then
         echo ""
         echo "Local checkout mode:"
@@ -318,6 +344,7 @@ main() {
     echo "  - No-verify flag detection"
     echo "  - Stop hook with quality checks"
     echo "  - Autonomous mode commands"
+    echo "  - Task management MCP server (tasks-mcp)"
     echo ""
 }
 

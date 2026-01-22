@@ -120,16 +120,20 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
-      - name: Build release binary
-        run: cargo build --release --features cli
+      - name: Build release binaries
+        run: |
+          cargo build --release --features cli
+          cargo build --release --features mcp
 
-      - name: Strip binary
-        run: strip target/release/claude-reliability
+      - name: Strip binaries
+        run: |
+          strip target/release/claude-reliability
+          strip target/release/tasks-mcp
 
       - name: Package
         run: |
           cd target/release
-          tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability
+          tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability tasks-mcp
           mv *.tar.gz ../../
 
       - name: Upload artifact
