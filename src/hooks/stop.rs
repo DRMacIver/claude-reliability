@@ -3,10 +3,9 @@
 //! This hook runs when Claude attempts to stop/exit. It implements:
 //! - Just-keep-working mode management with staleness detection
 //! - Uncommitted changes detection and blocking
-//! - Code quality checks on the diff
+//! - Quality checks via configured command
 //! - Interactive question handling with sub-agent
 
-use crate::analysis::{self, AnalysisResults};
 use crate::error::Result;
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
@@ -566,11 +565,6 @@ fn handle_uncommitted_changes(
 ) -> Result<StopHookResult> {
     let mut result = StopHookResult::block();
 
-    // Analyze the diff for code quality issues
-    let combined_diff = git::combined_diff(runner)?;
-    let added_lines = git::parse_diff(&combined_diff);
-    let analysis = analysis::analyze_diff(&added_lines);
-
     // Run quality checks if enabled
     let mut quality_output = String::new();
     let mut quality_passed = true;
@@ -608,9 +602,6 @@ fn handle_uncommitted_changes(
             result.messages.push(truncate_output(&quality_output, 50));
         }
     }
-
-    // Show analysis results
-    add_analysis_messages(&mut result, &analysis);
 
     // Show unstaged changes
     if !git_status.unstaged_files.is_empty() {
@@ -677,68 +668,6 @@ fn handle_uncommitted_changes(
     result.messages.push(format!("  \"{PROBLEM_NEEDS_USER}\""));
 
     Ok(result)
-}
-
-/// Add analysis messages to the result.
-fn add_analysis_messages(result: &mut StopHookResult, analysis: &AnalysisResults) {
-    if !analysis.suppression_violations.is_empty() {
-        result.messages.push("## Error Suppression Detected".to_string());
-        result.messages.push(String::new());
-        result.messages.push("The following error suppressions were added:".to_string());
-        result.messages.push(String::new());
-        for v in &analysis.suppression_violations {
-            result.messages.push(v.format());
-        }
-        result.messages.push(String::new());
-        result
-            .messages
-            .push("Fix the underlying issues instead of suppressing errors.".to_string());
-        result.messages.push(String::new());
-    }
-
-    if !analysis.empty_except_violations.is_empty() {
-        result.messages.push("## Empty Exception Handlers Detected".to_string());
-        result.messages.push(String::new());
-        result.messages.push("The following empty except blocks were added:".to_string());
-        result.messages.push(String::new());
-        for v in &analysis.empty_except_violations {
-            result.messages.push(v.format());
-        }
-        result.messages.push(String::new());
-        result.messages.push("Handle exceptions properly or re-raise them.".to_string());
-        result.messages.push(String::new());
-    }
-
-    if !analysis.secret_violations.is_empty() {
-        result.messages.push("## SECURITY: Hardcoded Secrets Detected".to_string());
-        result.messages.push(String::new());
-        result
-            .messages
-            .push("The following secrets/tokens were found in staged changes:".to_string());
-        result.messages.push(String::new());
-        for v in &analysis.secret_violations {
-            result.messages.push(v.format());
-        }
-        result.messages.push(String::new());
-        result
-            .messages
-            .push("NEVER commit secrets. Use environment variables instead.".to_string());
-        result
-            .messages
-            .push("If this was accidental, the secret may need to be rotated.".to_string());
-        result.messages.push(String::new());
-    }
-
-    if !analysis.todo_warnings.is_empty() {
-        result.messages.push("## Untracked Work Items".to_string());
-        result.messages.push(String::new());
-        result.messages.push("Consider creating tasks for these items:".to_string());
-        result.messages.push(String::new());
-        for w in &analysis.todo_warnings {
-            result.messages.push(w.format());
-        }
-        result.messages.push(String::new());
-    }
 }
 
 /// Check for interactive question handling.
@@ -1072,16 +1001,8 @@ mod tests {
         runner.expect("git", &["diff", "--name-only"], file_list); // Only when has_unstaged
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         // No --cached --name-only when no staged changes
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis (staged_diff first, then unstaged_diff)
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         runner
     }
@@ -1118,16 +1039,8 @@ mod tests {
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], has_staged);
         runner.expect("git", &["diff", "--cached", "--name-only"], staged_file_list);
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         runner
     }
@@ -1262,63 +1175,6 @@ mod tests {
         assert_eq!(result.messages[1], "B");
     }
 
-    #[test]
-    fn test_add_analysis_messages_suppression() {
-        let mut result = StopHookResult::block();
-        let analysis = AnalysisResults {
-            suppression_violations: vec![crate::analysis::Violation::new(
-                "test.py",
-                1,
-                "noqa violation",
-            )],
-            ..Default::default()
-        };
-        add_analysis_messages(&mut result, &analysis);
-        assert!(result.messages.iter().any(|m| m.contains("Error Suppression")));
-    }
-
-    #[test]
-    fn test_add_analysis_messages_empty_except() {
-        let mut result = StopHookResult::block();
-        let analysis = AnalysisResults {
-            empty_except_violations: vec![crate::analysis::Violation::new(
-                "test.py",
-                1,
-                "empty except",
-            )],
-            ..Default::default()
-        };
-        add_analysis_messages(&mut result, &analysis);
-        assert!(result.messages.iter().any(|m| m.contains("Empty Exception")));
-    }
-
-    #[test]
-    fn test_add_analysis_messages_secrets() {
-        let mut result = StopHookResult::block();
-        let analysis = AnalysisResults {
-            secret_violations: vec![crate::analysis::Violation::new(
-                "test.py",
-                1,
-                "hardcoded secret",
-            )],
-            ..Default::default()
-        };
-        add_analysis_messages(&mut result, &analysis);
-        assert!(result.messages.iter().any(|m| m.contains("SECURITY")));
-        assert!(result.messages.iter().any(|m| m.contains("Hardcoded Secrets")));
-    }
-
-    #[test]
-    fn test_add_analysis_messages_todos() {
-        let mut result = StopHookResult::block();
-        let analysis = AnalysisResults {
-            todo_warnings: vec![crate::analysis::Violation::new("test.py", 1, "TODO found")],
-            ..Default::default()
-        };
-        add_analysis_messages(&mut result, &analysis);
-        assert!(result.messages.iter().any(|m| m.contains("Untracked Work")));
-    }
-
     fn mock_clean_with_ahead() -> MockCommandRunner {
         let mut runner = MockCommandRunner::new();
         let empty_success =
@@ -1422,13 +1278,9 @@ mod tests {
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success);
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], untracked_files);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         runner
     }
@@ -1480,16 +1332,8 @@ mod tests {
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         // Quality check command
         runner.expect(
@@ -2202,13 +2046,9 @@ mod tests {
         // Second check_uncommitted_changes (main check)
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success);
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], many_untracked);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
@@ -2349,16 +2189,8 @@ mod tests {
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         let dir = TempDir::new().unwrap();
         let sub_agent = MockSubAgent::new();
@@ -2494,16 +2326,8 @@ mod tests {
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
 
         // Quality check passes
         runner.expect("sh", &["-c", "just check"], quality_pass);

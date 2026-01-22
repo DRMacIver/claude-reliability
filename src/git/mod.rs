@@ -1,9 +1,7 @@
 //! Git operations module.
 
-mod diff;
 mod status;
 
-pub use diff::{parse_diff, AddedLine, DiffHunk};
 pub use status::{check_uncommitted_changes, GitStatus, UncommittedChanges};
 
 use crate::error::Result;
@@ -74,33 +72,6 @@ pub fn staged_files(runner: &dyn CommandRunner) -> Result<Vec<String>> {
 pub fn staged_diff(runner: &dyn CommandRunner) -> Result<String> {
     let output = runner.run("git", &["diff", "--cached", "-U0"], None)?;
     Ok(output.stdout)
-}
-
-/// Get the unstaged diff.
-///
-/// # Errors
-///
-/// Returns an error if the git command fails.
-pub fn unstaged_diff(runner: &dyn CommandRunner) -> Result<String> {
-    let output = runner.run("git", &["diff", "-U0"], None)?;
-    Ok(output.stdout)
-}
-
-/// Get combined staged and unstaged diff.
-///
-/// # Errors
-///
-/// Returns an error if the git commands fail.
-pub fn combined_diff(runner: &dyn CommandRunner) -> Result<String> {
-    let staged = staged_diff(runner)?;
-    let unstaged = unstaged_diff(runner)?;
-    if staged.is_empty() {
-        Ok(unstaged)
-    } else if unstaged.is_empty() {
-        Ok(staged)
-    } else {
-        Ok(format!("{staged}\n{unstaged}"))
-    }
 }
 
 /// Compute a hash of the current git working state for staleness detection.
@@ -227,6 +198,22 @@ mod tests {
     }
 
     #[test]
+    fn test_staged_diff() {
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--cached", "-U0"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "+some change\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let diff = staged_diff(&runner).unwrap();
+        assert_eq!(diff, "+some change\n");
+    }
+
+    #[test]
     fn test_current_branch_failure() {
         let mut runner = MockCommandRunner::new();
         runner.expect(
@@ -283,89 +270,6 @@ mod tests {
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
         );
         assert_eq!(current_sha(&runner).unwrap(), None);
-    }
-
-    #[test]
-    fn test_staged_diff() {
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "+some change\n".to_string(),
-                stderr: String::new(),
-            },
-        );
-        let diff = staged_diff(&runner).unwrap();
-        assert_eq!(diff, "+some change\n");
-    }
-
-    #[test]
-    fn test_unstaged_diff() {
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput {
-                exit_code: 0,
-                stdout: "+unstaged change\n".to_string(),
-                stderr: String::new(),
-            },
-        );
-        let diff = unstaged_diff(&runner).unwrap();
-        assert_eq!(diff, "+unstaged change\n");
-    }
-
-    #[test]
-    fn test_combined_diff_both() {
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "staged\n".to_string(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "unstaged\n".to_string(), stderr: String::new() },
-        );
-        let diff = combined_diff(&runner).unwrap();
-        assert_eq!(diff, "staged\n\nunstaged\n");
-    }
-
-    #[test]
-    fn test_combined_diff_only_staged() {
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "staged\n".to_string(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        let diff = combined_diff(&runner).unwrap();
-        assert_eq!(diff, "staged\n");
-    }
-
-    #[test]
-    fn test_combined_diff_only_unstaged() {
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "git",
-            &["diff", "--cached", "-U0"],
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
-        );
-        runner.expect(
-            "git",
-            &["diff", "-U0"],
-            CommandOutput { exit_code: 0, stdout: "unstaged\n".to_string(), stderr: String::new() },
-        );
-        let diff = combined_diff(&runner).unwrap();
-        assert_eq!(diff, "unstaged\n");
     }
 
     #[test]

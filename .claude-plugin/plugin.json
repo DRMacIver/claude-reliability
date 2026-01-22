@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/stop.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh stop"
           }
         ]
       }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/user-prompt-submit.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh user-prompt-submit"
           }
         ]
       }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/pre-tool-use.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh pre-tool-use"
           }
         ]
       }
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/post-tool-use.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh post-tool-use"
           }
         ]
       }

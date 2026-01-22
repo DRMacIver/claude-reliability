@@ -1,8 +1,7 @@
 //! # `claude_reliability`
 //!
-//! Hooks and analysis tools for improving Claude Code reliability and safety.
+//! Hooks for improving Claude Code reliability and safety.
 
-pub mod analysis;
 pub mod beads_sync;
 pub mod cli;
 pub mod command;
