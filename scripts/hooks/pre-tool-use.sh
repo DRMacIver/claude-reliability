@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# pre-tool-use-code-review.sh - PreToolUse hook for code review
+# pre-tool-use.sh - Unified PreToolUse hook
 #
-# Ensures the binary is available and runs the code review hook.
+# Dispatches to the appropriate handler based on tool_name.
+# Handles all PreToolUse events: no-verify, code-review, validation, jkw-setup, etc.
 
 set -uo pipefail
 
@@ -14,5 +15,5 @@ BINARY=$("$ENSURE_BINARY" 2>/dev/null) || {
     exit 0
 }
 
-# Run the code review hook, passing stdin through
-exec "$BINARY" pre-tool-use code-review
+# Run the unified pre-tool-use hook, passing stdin through
+exec "$BINARY" pre-tool-use

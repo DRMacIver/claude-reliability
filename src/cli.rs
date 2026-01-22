@@ -6,12 +6,13 @@
 use crate::{
     command::RealCommandRunner,
     hooks::{
-        parse_hook_input, run_code_review_hook, run_no_verify_hook, run_require_task_hook,
-        run_stop_hook, run_user_prompt_submit_hook, CodeReviewConfig, StopHookConfig,
+        parse_hook_input, run_pre_tool_use, run_stop_hook, run_user_prompt_submit_hook,
+        StopHookConfig,
     },
     subagent::RealSubAgent,
     traits::{CommandRunner, SubAgent},
 };
+use std::path::Path;
 use std::process::ExitCode;
 
 /// CLI command to execute.
@@ -31,20 +32,8 @@ pub enum Command {
     Stop,
     /// Run the user-prompt-submit hook.
     UserPromptSubmit,
-    /// Run the no-verify pre-tool-use hook.
-    PreToolUseNoVerify,
-    /// Run the code-review pre-tool-use hook.
-    PreToolUseCodeReview,
-    /// Run the problem-mode pre-tool-use hook.
-    PreToolUseProblemMode,
-    /// Run the JKW setup enforcement pre-tool-use hook.
-    PreToolUseJkwSetup,
-    /// Run the validation tracking pre-tool-use hook.
-    PreToolUseValidation,
-    /// Run the protect-config pre-tool-use hook.
-    PreToolUseProtectConfig,
-    /// Run the require-task pre-tool-use hook.
-    PreToolUseRequireTask,
+    /// Run the unified pre-tool-use hook (handles all tools).
+    PreToolUse,
 }
 
 impl Command {
@@ -58,14 +47,7 @@ impl Command {
             | Self::Intro
             | Self::SyncBeads
             | Self::UserPromptSubmit => false,
-            Self::Stop
-            | Self::PreToolUseNoVerify
-            | Self::PreToolUseCodeReview
-            | Self::PreToolUseProblemMode
-            | Self::PreToolUseJkwSetup
-            | Self::PreToolUseValidation
-            | Self::PreToolUseProtectConfig
-            | Self::PreToolUseRequireTask => true,
+            Self::Stop | Self::PreToolUse => true,
         }
     }
 }
@@ -79,10 +61,6 @@ pub enum ParseResult {
     ShowUsage,
     /// Unknown command.
     UnknownCommand(String),
-    /// Missing subcommand for pre-tool-use.
-    MissingSubcommand,
-    /// Unknown pre-tool-use subcommand.
-    UnknownSubcommand(String),
 }
 
 /// Parse CLI arguments into a command.
@@ -100,21 +78,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "sync-beads" => ParseResult::Command(Command::SyncBeads),
         "stop" => ParseResult::Command(Command::Stop),
         "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
-        "pre-tool-use" => {
-            if args.len() < 3 {
-                return ParseResult::MissingSubcommand;
-            }
-            match args[2].as_str() {
-                "no-verify" => ParseResult::Command(Command::PreToolUseNoVerify),
-                "code-review" => ParseResult::Command(Command::PreToolUseCodeReview),
-                "problem-mode" => ParseResult::Command(Command::PreToolUseProblemMode),
-                "jkw-setup" => ParseResult::Command(Command::PreToolUseJkwSetup),
-                "validation" => ParseResult::Command(Command::PreToolUseValidation),
-                "protect-config" => ParseResult::Command(Command::PreToolUseProtectConfig),
-                "require-task" => ParseResult::Command(Command::PreToolUseRequireTask),
-                other => ParseResult::UnknownSubcommand(other.to_string()),
-            }
-        }
+        "pre-tool-use" => ParseResult::Command(Command::PreToolUse),
         other => ParseResult::UnknownCommand(other.to_string()),
     }
 }
@@ -123,21 +87,16 @@ pub fn parse_args(args: &[String]) -> ParseResult {
 #[must_use]
 pub fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} <command> [subcommand]\n\n\
+        "Usage: {program} <command>\n\n\
          Commands:\n  \
-         ensure-config              Ensure config file exists\n  \
-         ensure-gitignore           Ensure .gitignore has required entries\n  \
-         intro                      Print session intro message\n  \
-         sync-beads                 Sync open beads issues to tasks database\n  \
-         stop                       Run the stop hook\n  \
-         user-prompt-submit         Run the user prompt submit hook\n  \
-         pre-tool-use no-verify     Check for --no-verify usage\n  \
-         pre-tool-use code-review   Run code review on commits\n  \
-         pre-tool-use problem-mode  Block tools when in problem mode\n  \
-         pre-tool-use jkw-setup     Enforce JKW session file creation\n  \
-         pre-tool-use protect-config Block writes to reliability config\n  \
-         pre-tool-use require-task  Block writes when no task is in progress\n  \
-         version                    Show version information"
+         ensure-config        Ensure config file exists\n  \
+         ensure-gitignore     Ensure .gitignore has required entries\n  \
+         intro                Print session intro message\n  \
+         sync-beads           Sync open beads issues to tasks database\n  \
+         stop                 Run the stop hook\n  \
+         user-prompt-submit   Run the user prompt submit hook\n  \
+         pre-tool-use         Run the unified pre-tool-use hook\n  \
+         version              Show version information"
     )
 }
 
@@ -183,39 +142,6 @@ pub fn run_stop(
     Ok(HookResult { exit_code: exit_code_from_i32(result.exit_code), messages: result.messages })
 }
 
-/// Run the no-verify hook with the given input.
-///
-/// # Errors
-///
-/// Returns an error message if the hook fails.
-pub fn run_no_verify(stdin: &str) -> Result<HookResult, String> {
-    let input = parse_hook_input(stdin).map_err(|e| format!("Error parsing hook input: {e}"))?;
-
-    let exit_code =
-        run_no_verify_hook(&input).map_err(|e| format!("Error running no-verify hook: {e}"))?;
-
-    Ok(HookResult { exit_code: exit_code_from_i32(exit_code), messages: Vec::new() })
-}
-
-/// Run the code-review hook with the given input.
-///
-/// # Errors
-///
-/// Returns an error message if the hook fails.
-pub fn run_code_review(
-    stdin: &str,
-    config: &CodeReviewConfig,
-    runner: &dyn CommandRunner,
-    sub_agent: &dyn SubAgent,
-) -> Result<HookResult, String> {
-    let input = parse_hook_input(stdin).map_err(|e| format!("Error parsing hook input: {e}"))?;
-
-    let exit_code = run_code_review_hook(&input, config, runner, sub_agent)
-        .map_err(|e| format!("Error running code review hook: {e}"))?;
-
-    Ok(HookResult { exit_code: exit_code_from_i32(exit_code), messages: Vec::new() })
-}
-
 /// Output from running the CLI, with separate stdout and stderr messages.
 #[derive(Debug)]
 pub struct CliOutput {
@@ -239,14 +165,6 @@ pub fn run(args: &[String], stdin: &str) -> CliOutput {
         ParseResult::ShowUsage => (ExitCode::from(1), vec![usage(&args[0])], false),
         ParseResult::UnknownCommand(cmd) => {
             (ExitCode::from(1), vec![format!("Unknown command: {cmd}")], false)
-        }
-        ParseResult::MissingSubcommand => (
-            ExitCode::from(1),
-            vec![format!("Usage: {} pre-tool-use <no-verify|code-review>", args[0])],
-            false,
-        ),
-        ParseResult::UnknownSubcommand(sub) => {
-            (ExitCode::from(1), vec![format!("Unknown pre-tool-use subcommand: {sub}")], false)
         }
         ParseResult::Command(cmd) => {
             let is_stop = matches!(cmd, Command::Stop);
@@ -279,13 +197,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::SyncBeads => run_sync_beads_cmd(),
         Command::Stop => run_stop_cmd(stdin),
         Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
-        Command::PreToolUseNoVerify => run_no_verify_cmd(stdin),
-        Command::PreToolUseCodeReview => run_code_review_cmd(stdin),
-        Command::PreToolUseProblemMode => run_problem_mode_cmd(stdin),
-        Command::PreToolUseJkwSetup => run_jkw_setup_cmd(stdin),
-        Command::PreToolUseValidation => run_validation_cmd(stdin),
-        Command::PreToolUseProtectConfig => run_protect_config_cmd(stdin),
-        Command::PreToolUseRequireTask => run_require_task_cmd(stdin),
+        Command::PreToolUse => run_pre_tool_use_cmd(stdin),
     }
 }
 
@@ -410,111 +322,14 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     }
 }
 
-fn run_no_verify_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::config;
+fn run_pre_tool_use_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    let input = match parse_hook_input(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
 
     let runner = RealCommandRunner::new();
-
-    // Ensure config exists (creates with defaults if not)
-    if let Err(e) = config::ensure_config(&runner) {
-        eprintln!("Warning: Could not ensure config: {e}");
-    }
-
-    match run_no_verify(stdin) {
-        Ok(result) => (result.exit_code, result.messages),
-        Err(e) => (ExitCode::from(1), vec![e]),
-    }
-}
-
-fn run_code_review_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::config;
-
-    let runner = RealCommandRunner::new();
-    let sub_agent = RealSubAgent::new(&runner);
-
-    // Ensure config exists (creates with defaults if not)
-    if let Err(e) = config::ensure_config(&runner) {
-        eprintln!("Warning: Could not ensure config: {e}");
-    }
-
-    let config = CodeReviewConfig::default();
-
-    match run_code_review(stdin, &config, &runner, &sub_agent) {
-        Ok(result) => (result.exit_code, result.messages),
-        Err(e) => (ExitCode::from(1), vec![e]),
-    }
-}
-
-fn run_problem_mode_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::hooks::{parse_hook_input, run_problem_mode_hook};
-    use std::path::Path;
-
-    let input = match parse_hook_input(stdin) {
-        Ok(input) => input,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
-    };
-
-    let output = run_problem_mode_hook(&input, Path::new("."));
-    // Serialization cannot fail for PreToolUseOutput (only contains strings)
-    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
-
-    (ExitCode::SUCCESS, vec![json])
-}
-
-fn run_jkw_setup_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::hooks::{parse_hook_input, run_jkw_setup_hook};
-    use std::path::Path;
-
-    let input = match parse_hook_input(stdin) {
-        Ok(input) => input,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
-    };
-
-    let output = run_jkw_setup_hook(&input, Path::new("."));
-    // PreToolUseOutput is a simple struct that always serializes successfully
-    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
-
-    (ExitCode::SUCCESS, vec![json])
-}
-
-fn run_validation_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::hooks::{parse_hook_input, run_validation_hook};
-    use std::path::Path;
-
-    let input = match parse_hook_input(stdin) {
-        Ok(input) => input,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
-    };
-
-    let output = run_validation_hook(&input, Path::new("."));
-    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
-
-    (ExitCode::SUCCESS, vec![json])
-}
-
-fn run_protect_config_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use crate::hooks::{parse_hook_input, run_protect_config_hook};
-
-    let input = match parse_hook_input(stdin) {
-        Ok(input) => input,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
-    };
-
-    let output = run_protect_config_hook(&input);
-    let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
-
-    (ExitCode::SUCCESS, vec![json])
-}
-
-fn run_require_task_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
-    use std::path::Path;
-
-    let input = match parse_hook_input(stdin) {
-        Ok(input) => input,
-        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
-    };
-
-    let output = run_require_task_hook(&input, Path::new("."));
+    let output = run_pre_tool_use(&input, Path::new("."), &runner);
     let json = serde_json::to_string(&output).expect("PreToolUseOutput serialization cannot fail");
 
     (ExitCode::SUCCESS, vec![json])
@@ -572,33 +387,8 @@ mod tests {
     #[test]
     fn test_parse_args_pre_tool_use() {
         assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "no-verify"])),
-            ParseResult::Command(Command::PreToolUseNoVerify)
-        );
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "code-review"])),
-            ParseResult::Command(Command::PreToolUseCodeReview)
-        );
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "problem-mode"])),
-            ParseResult::Command(Command::PreToolUseProblemMode)
-        );
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "protect-config"])),
-            ParseResult::Command(Command::PreToolUseProtectConfig)
-        );
-    }
-
-    #[test]
-    fn test_parse_args_missing_subcommand() {
-        assert_eq!(parse_args(&args(&["prog", "pre-tool-use"])), ParseResult::MissingSubcommand);
-    }
-
-    #[test]
-    fn test_parse_args_unknown_subcommand() {
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "foo"])),
-            ParseResult::UnknownSubcommand("foo".to_string())
+            parse_args(&args(&["prog", "pre-tool-use"])),
+            ParseResult::Command(Command::PreToolUse)
         );
     }
 
@@ -641,11 +431,7 @@ mod tests {
 
         // Commands that need stdin (hooks that receive JSON input)
         assert!(Command::Stop.needs_stdin());
-        assert!(Command::PreToolUseNoVerify.needs_stdin());
-        assert!(Command::PreToolUseCodeReview.needs_stdin());
-        assert!(Command::PreToolUseProblemMode.needs_stdin());
-        assert!(Command::PreToolUseJkwSetup.needs_stdin());
-        assert!(Command::PreToolUseValidation.needs_stdin());
+        assert!(Command::PreToolUse.needs_stdin());
     }
 
     #[test]
@@ -678,23 +464,33 @@ mod tests {
     }
 
     #[test]
-    fn test_run_no_verify_empty_input() {
-        // Empty JSON object should work
-        let result = run_no_verify("{}");
-        assert!(result.is_ok());
+    #[serial_test::serial]
+    fn test_run_pre_tool_use_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Test that Read tool is allowed
+        let output = run(
+            &args(&["prog", "pre-tool-use"]),
+            r#"{"tool_name": "Read", "tool_input": {"file_path": "src/main.rs"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("allow"));
     }
 
     #[test]
-    fn test_run_no_verify_invalid_json() {
-        let result = run_no_verify("not json");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Error parsing"));
-    }
-
-    #[test]
-    fn test_run_no_verify_with_safe_command() {
-        let result = run_no_verify(r#"{"tool_input": {"command": "git status"}}"#);
-        assert!(result.is_ok());
+    fn test_run_pre_tool_use_invalid_json() {
+        let output = run(&args(&["prog", "pre-tool-use"]), "not json");
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
     }
 
     #[test]
@@ -712,41 +508,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_missing_subcommand() {
-        let output = run(&args(&["prog", "pre-tool-use"]), "");
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("pre-tool-use"));
-    }
-
-    #[test]
-    fn test_run_unknown_subcommand() {
-        let output = run(&args(&["prog", "pre-tool-use", "bad"]), "");
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Unknown pre-tool-use subcommand"));
-    }
-
-    #[test]
     fn test_run_version() {
         let output = run(&args(&["prog", "version"]), "");
         assert_eq!(output.exit_code, ExitCode::SUCCESS);
         assert!(!output.stderr.is_empty());
         assert!(output.stderr[0].contains("claude-reliability"));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_no_verify_cmd() {
-        use tempfile::TempDir;
-
-        // Run in temp dir to avoid modifying real project config
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let _output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "{}");
-
-        std::env::set_current_dir(original_dir).unwrap();
-        // Just verify it runs without panic
     }
 
     #[test]
@@ -792,41 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run_code_review_with_mocks() {
-        use crate::testing::{MockCommandRunner, MockSubAgent};
-
-        let runner = MockCommandRunner::new();
-        let sub_agent = MockSubAgent::new();
-        // Empty input {} means no tool_name, so hook returns early with success
-        let config = CodeReviewConfig::default();
-
-        let result = run_code_review("{}", &config, &runner, &sub_agent);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_code_review_invalid_json() {
-        use crate::testing::{MockCommandRunner, MockSubAgent};
-
-        let runner = MockCommandRunner::new();
-        let sub_agent = MockSubAgent::new();
-        let config = CodeReviewConfig::default();
-
-        let result = run_code_review("not json", &config, &runner, &sub_agent);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Error parsing"));
-    }
-
-    #[test]
-    fn test_run_no_verify_with_blocked_command() {
-        let result = run_no_verify(
-            r#"{"tool_name": "Bash", "tool_input": {"command": "git commit --no-verify -m test"}}"#,
-        );
-        assert!(result.is_ok());
-        // The exit code should be 2 (blocked)
-    }
-
-    #[test]
     fn test_hook_result_fields() {
         let result =
             HookResult { exit_code: ExitCode::SUCCESS, messages: vec!["test".to_string()] };
@@ -850,21 +581,6 @@ mod tests {
         assert!(result.unwrap_err().contains("Error running stop hook"));
     }
 
-    #[test]
-    fn test_run_code_review_hook_error() {
-        use crate::testing::{FailingCommandRunner, MockSubAgent};
-
-        let runner = FailingCommandRunner::new("simulated error");
-        let sub_agent = MockSubAgent::new();
-        let config = CodeReviewConfig::default();
-
-        // Input that looks like a git commit command to trigger actual hook logic
-        let input = r#"{"tool_name": "Bash", "tool_input": {"command": "git commit -m test"}}"#;
-        let result = run_code_review(input, &config, &runner, &sub_agent);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Error running code review hook"));
-    }
-
     // Integration tests that exercise the cli entry points with real dependencies.
     // These tests call the actual run_*_cmd functions through run().
 
@@ -886,58 +602,6 @@ mod tests {
 
         // It should fail to parse and return an error message
         assert!(!output.stderr.is_empty());
-    }
-
-    #[test]
-    fn test_run_no_verify_via_cli() {
-        // Call the no-verify hook through the CLI entry point
-        let output = run(
-            &args(&["prog", "pre-tool-use", "no-verify"]),
-            r#"{"tool_name": "Edit", "tool_input": {}}"#,
-        );
-        // Should succeed (not bash command, nothing to block)
-        assert!(output.exit_code == ExitCode::SUCCESS);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_code_review_via_cli() {
-        use tempfile::TempDir;
-
-        // Run in temp dir to avoid modifying real project config
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        // Call the code-review hook through the CLI entry point
-        // Use invalid JSON to trigger quick failure
-        let output = run(&args(&["prog", "pre-tool-use", "code-review"]), "not json");
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should fail to parse
-        assert!(!output.stderr.is_empty());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_no_verify_via_cli_invalid_json() {
-        use tempfile::TempDir;
-
-        // Run in temp dir to avoid modifying real project config
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        // Call the no-verify hook through CLI with invalid JSON to trigger error path
-        let output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "not json input");
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should fail to parse and return error code 1
-        assert!(output.exit_code == ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Error parsing"));
     }
 
     #[test]
@@ -992,37 +656,6 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should succeed (clean repo, allows stop)
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_code_review_via_cli_in_temp_repo() {
-        use std::process::Command;
-        use tempfile::TempDir;
-
-        // Create a temporary git repo
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        // Initialize git repo
-        Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
-
-        // Create .gitignore to ignore .claude/ (which ensure_config creates)
-        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
-
-        // Change to temp dir, run the code-review command, then change back
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        let output = run(
-            &args(&["prog", "pre-tool-use", "code-review"]),
-            r#"{"tool_name": "Bash", "tool_input": {"command": "git commit -m 'test'"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should succeed - no staged files means no review needed
         assert_eq!(output.exit_code, ExitCode::SUCCESS);
     }
 
@@ -1133,293 +766,8 @@ mod tests {
         assert!(output.stderr.is_empty());
     }
 
-    #[test]
-    #[serial_test::serial]
-    fn test_run_problem_mode_via_cli() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Valid JSON input for problem-mode
-        let output = run(
-            &args(&["prog", "pre-tool-use", "problem-mode"]),
-            r#"{"tool_name": "Bash", "tool_input": {"command": "echo test"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        // Should return JSON output
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].starts_with('{'));
-    }
-
-    #[test]
-    fn test_run_problem_mode_invalid_json() {
-        let output = run(&args(&["prog", "pre-tool-use", "problem-mode"]), "not json");
-
-        assert_eq!(output.exit_code, ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Failed to parse"));
-    }
-
-    #[test]
-    fn test_parse_args_jkw_setup() {
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "jkw-setup"])),
-            ParseResult::Command(Command::PreToolUseJkwSetup)
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_jkw_setup_via_cli() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Valid JSON input for jkw-setup
-        let output = run(
-            &args(&["prog", "pre-tool-use", "jkw-setup"]),
-            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        // Should return JSON output
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].starts_with('{'));
-        // Should allow since no JKW setup marker is set
-        assert!(output.stderr[0].contains("allow"));
-    }
-
-    #[test]
-    fn test_run_jkw_setup_invalid_json() {
-        let output = run(&args(&["prog", "pre-tool-use", "jkw-setup"]), "not json");
-
-        assert_eq!(output.exit_code, ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Failed to parse"));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_jkw_setup_blocks_when_marker_set() {
-        use crate::session::set_jkw_setup_required;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Set the JKW setup marker
-        set_jkw_setup_required(dir_path).unwrap();
-
-        // Try to write to a non-session file
-        let output = run(
-            &args(&["prog", "pre-tool-use", "jkw-setup"]),
-            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        // Should block
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("block"));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_validation_via_cli() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Valid JSON input for validation with Edit tool
-        let output = run(
-            &args(&["prog", "pre-tool-use", "validation"]),
-            r#"{"tool_name": "Edit", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        // Should return JSON output
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].starts_with('{'));
-        // Should allow (we're just tracking, not blocking)
-        assert!(output.stderr[0].contains("allow"));
-        // Should set the needs_validation marker
-        assert!(crate::session::needs_validation(dir_path));
-    }
-
-    #[test]
-    fn test_run_validation_invalid_json() {
-        let output = run(&args(&["prog", "pre-tool-use", "validation"]), "not json");
-
-        assert_eq!(output.exit_code, ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Failed to parse"));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_validation_read_tool_no_marker() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Read tool should not set the marker
-        let output = run(
-            &args(&["prog", "pre-tool-use", "validation"]),
-            r#"{"tool_name": "Read", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(output.stderr[0].contains("allow"));
-        // Should NOT set the needs_validation marker
-        assert!(!crate::session::needs_validation(dir_path));
-    }
-
-    #[test]
-    fn test_run_protect_config_via_cli() {
-        // Write to normal file should be allowed
-        let output = run(
-            &args(&["prog", "pre-tool-use", "protect-config"]),
-            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("allow"));
-    }
-
-    #[test]
-    fn test_run_protect_config_blocks_config_write() {
-        // Write to config file should be blocked
-        let output = run(
-            &args(&["prog", "pre-tool-use", "protect-config"]),
-            r#"{"tool_name": "Write", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
-        );
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("block"));
-        assert!(output.stderr[0].contains("Protected File"));
-    }
-
-    #[test]
-    fn test_run_protect_config_blocks_config_edit() {
-        // Edit to config file should be blocked
-        let output = run(
-            &args(&["prog", "pre-tool-use", "protect-config"]),
-            r#"{"tool_name": "Edit", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
-        );
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("block"));
-    }
-
-    #[test]
-    fn test_run_protect_config_blocks_config_delete() {
-        // rm command targeting config should be blocked
-        let output = run(
-            &args(&["prog", "pre-tool-use", "protect-config"]),
-            r#"{"tool_name": "Bash", "tool_input": {"command": "rm .claude/reliability-config.yaml"}}"#,
-        );
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("block"));
-        assert!(output.stderr[0].contains("Deletion Blocked"));
-    }
-
-    #[test]
-    fn test_run_protect_config_allows_read() {
-        // Read should be allowed
-        let output = run(
-            &args(&["prog", "pre-tool-use", "protect-config"]),
-            r#"{"tool_name": "Read", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
-        );
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("allow"));
-    }
-
-    #[test]
-    fn test_run_protect_config_invalid_json() {
-        let output = run(&args(&["prog", "pre-tool-use", "protect-config"]), "not json");
-
-        assert_eq!(output.exit_code, ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Failed to parse"));
-    }
-
-    #[test]
-    fn test_parse_args_require_task() {
-        assert_eq!(
-            parse_args(&args(&["prog", "pre-tool-use", "require-task"])),
-            ParseResult::Command(Command::PreToolUseRequireTask)
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_require_task_via_cli() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Write should be blocked (no in-progress task)
-        let output = run(
-            &args(&["prog", "pre-tool-use", "require-task"]),
-            r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-        assert!(!output.stderr.is_empty());
-        // Should block
-        assert!(output.stderr[0].contains("block"));
-    }
-
-    #[test]
-    fn test_run_require_task_invalid_json() {
-        let output = run(&args(&["prog", "pre-tool-use", "require-task"]), "not json");
-
-        assert_eq!(output.exit_code, ExitCode::from(1));
-        assert!(!output.stderr.is_empty());
-        assert!(output.stderr[0].contains("Failed to parse"));
-    }
+    // Note: The unified pre-tool-use command tests above cover the integrated behavior.
+    // Individual hook behaviors are tested in their respective modules (hooks/*.rs).
 
     #[test]
     #[serial_test::serial]
@@ -1525,64 +873,6 @@ mod tests {
         assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // At minimum it should process and not crash
         assert!(!output.stderr.is_empty() || output.exit_code == ExitCode::SUCCESS);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_no_verify_config_error_continues() {
-        use tempfile::TempDir;
-
-        // Test that no_verify continues even when config fails
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        // Create .claude as a file to prevent config creation
-        let claude_dir = dir_path.join(".claude");
-        std::fs::write(&claude_dir, "not a directory").unwrap();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Run no_verify - should work even if config fails
-        let output = run(
-            &args(&["prog", "pre-tool-use", "no-verify"]),
-            r#"{"tool_name": "Bash", "tool_input": {"command": "ls"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should succeed (warning logged but not affecting return)
-        // The hook processes successfully even if config can't be ensured
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_code_review_config_error_continues() {
-        use tempfile::TempDir;
-
-        // Test that code_review continues even when config fails
-        let dir = TempDir::new().unwrap();
-        let dir_path = dir.path();
-
-        // Create .claude as a file to prevent config creation
-        let claude_dir = dir_path.join(".claude");
-        std::fs::write(&claude_dir, "not a directory").unwrap();
-
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir_path).unwrap();
-
-        // Run code_review - should work even if config fails
-        let output = run(
-            &args(&["prog", "pre-tool-use", "code-review"]),
-            r#"{"tool_name": "Bash", "tool_input": {"command": "echo hello"}}"#,
-        );
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should succeed (warning logged but hook still works)
-        // The hook processes successfully even if config can't be ensured
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
     }
 
     #[test]

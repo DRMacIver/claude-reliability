@@ -3,6 +3,7 @@
 mod code_review;
 mod jkw_setup;
 mod no_verify;
+mod pre_tool_use;
 mod problem_mode;
 mod protect_config;
 mod require_task;
@@ -13,6 +14,7 @@ mod validation;
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
 pub use jkw_setup::run_jkw_setup_hook;
 pub use no_verify::run_no_verify_hook;
+pub use pre_tool_use::run_pre_tool_use;
 pub use problem_mode::run_problem_mode_hook;
 pub use protect_config::run_protect_config_hook;
 pub use require_task::run_require_task_hook;
@@ -94,6 +96,12 @@ impl PreToolUseOutput {
                 additional_context: context,
             },
         }
+    }
+
+    /// Check if this is a block decision.
+    #[must_use]
+    pub fn is_block(&self) -> bool {
+        self.hook_specific_output.permission_decision == "block"
     }
 }
 

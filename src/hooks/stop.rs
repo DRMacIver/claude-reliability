@@ -144,7 +144,8 @@ impl StopHookResult {
 }
 
 /// Threshold for consecutive API errors before allowing stop.
-const API_ERROR_THRESHOLD: u32 = 2;
+/// Set to 1 to allow immediate stop on any API error (helps with debugging).
+const API_ERROR_THRESHOLD: u32 = 1;
 
 /// Maximum number of files to show before truncating with "... and X more"
 const MAX_FILES_TO_SHOW: usize = 10;
@@ -2718,10 +2719,10 @@ mod tests {
     }
 
     #[test]
-    fn test_run_stop_hook_single_api_error_still_blocks() {
+    fn test_run_stop_hook_single_api_error_allows_stop() {
         use std::io::Write;
 
-        // Create a transcript with only one API error (below threshold)
+        // Create a transcript with a single API error (meets threshold of 1)
         let mut transcript_file = tempfile::NamedTempFile::new().unwrap();
         let error_entry = serde_json::json!({
             "type": "assistant",
@@ -2732,47 +2733,8 @@ mod tests {
         });
         writeln!(transcript_file, "{}", serde_json::to_string(&error_entry).unwrap()).unwrap();
 
-        // Use mock runner with uncommitted changes
-        let mut runner = MockCommandRunner::new();
-        let has_changes = CommandOutput {
-            exit_code: 0,
-            stdout: " file.rs | 10 ++++++++++\n".to_string(),
-            stderr: String::new(),
-        };
-        let file_list =
-            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // Fast path check
-        runner.expect("git", &["diff", "--stat"], has_changes.clone());
-        runner.expect("git", &["diff", "--name-only"], file_list.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // Main check
-        runner.expect("git", &["diff", "--stat"], has_changes);
-        runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // combined_diff for analysis
-        runner.expect("git", &["diff", "--cached", "-U0"], empty_success.clone());
-        runner.expect("git", &["diff", "-U0"], empty_success);
-
         let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput {
             transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
@@ -2785,9 +2747,9 @@ mod tests {
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        // Single API error should NOT trigger the escape hatch
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Uncommitted Changes")));
+        // Single API error SHOULD allow stop (threshold is 1)
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("API error")));
     }
 
     #[test]
