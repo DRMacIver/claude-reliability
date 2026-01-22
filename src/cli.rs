@@ -677,8 +677,18 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_no_verify_cmd() {
+        use tempfile::TempDir;
+
+        // Run in temp dir to avoid modifying real project config
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         let _output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "{}");
+
+        std::env::set_current_dir(original_dir).unwrap();
         // Just verify it runs without panic
     }
 
@@ -802,9 +812,21 @@ mod tests {
     // These tests call the actual run_*_cmd functions through run().
 
     #[test]
+    #[serial_test::serial]
     fn test_run_stop_via_cli() {
+        use tempfile::TempDir;
+
+        // Run in temp dir to avoid modifying real project config
+        // (run_stop_cmd calls ensure_config which may save if config mismatches)
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         // The stop command needs valid JSON input but will fail gracefully with invalid
         let output = run(&args(&["prog", "stop"]), "not json input");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
         // It should fail to parse and return an error message
         assert!(!output.stderr.is_empty());
     }
@@ -821,18 +843,40 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_code_review_via_cli() {
+        use tempfile::TempDir;
+
+        // Run in temp dir to avoid modifying real project config
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         // Call the code-review hook through the CLI entry point
         // Use invalid JSON to trigger quick failure
         let output = run(&args(&["prog", "pre-tool-use", "code-review"]), "not json");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
         // Should fail to parse
         assert!(!output.stderr.is_empty());
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_no_verify_via_cli_invalid_json() {
+        use tempfile::TempDir;
+
+        // Run in temp dir to avoid modifying real project config
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         // Call the no-verify hook through CLI with invalid JSON to trigger error path
         let output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "not json input");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
         // Should fail to parse and return error code 1
         assert!(output.exit_code == ExitCode::from(1));
         assert!(!output.stderr.is_empty());
