@@ -220,7 +220,9 @@ pub fn run_stop_hook(
                     .with_message("")
                     .with_message(format!("The quality check command `{check_cmd}` failed."))
                     .with_message("")
-                    .with_message("Please fix the issues before stopping.");
+                    .with_message("Please fix the issues before stopping.")
+                    .with_message("")
+                    .with_message("Note: Even if these are pre-existing issues, you must fix them before stopping. You will not be allowed to stop until all quality checks pass.");
 
                 if !output.stdout.is_empty() {
                     result = result.with_message("").with_message("**stdout:**");
@@ -518,6 +520,11 @@ fn handle_uncommitted_changes(
         result
             .messages
             .push("Quality gates did not pass. Fix issues before committing.".to_string());
+        result.messages.push(String::new());
+        result.messages.push(
+            "Note: Even if these are pre-existing issues, you must fix them before stopping."
+                .to_string(),
+        );
         result.messages.push(String::new());
         if !quality_output.is_empty() {
             result.messages.push("### Output:".to_string());
