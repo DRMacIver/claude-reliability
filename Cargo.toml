@@ -1,6 +1,6 @@
 [package]
 name = "claude-reliability"
-version = "26.122.7"
+version = "26.122.8"
 edition = "2021"
 rust-version = "1.75"
 description = "A plugin for Claude to improve its reliability through testing infrastructure"
