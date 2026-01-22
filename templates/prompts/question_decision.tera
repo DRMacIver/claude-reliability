@@ -38,26 +38,28 @@ CONTINUE: <reason why this doesn't seem like a real question for the user>
 ## Decision Guidelines
 
 ### Choose ALLOW_STOP if:
-- The question requires user preference or decision
+- The question requires user preference or decision (e.g., "Which approach do you prefer?")
 - The question asks for clarification about requirements
 - The question offers options the user should choose from
-- **IMPORTANT: The output indicates that no work was needed or possible** - for example:
+- The output indicates that no work was needed - for example:
   - "All issues are already closed"
   - "Nothing to convert/migrate/update"
   - "The file/feature already exists"
   - "No changes were necessary"
-  - Any response suggesting the requested task was already complete or unnecessary
   In these cases, the user should be informed so they can decide what to do next.
+- The agent is asking whether to continue with significantly more work than originally scoped
 
 ### Choose ANSWER if:
-- You can provide a reasonable default answer
-- The question is about process/approach and you can decide
-- **IMPORTANT: If the question is "Do you want me to continue?", "Should I
-  proceed?", "Do you want me to do the rest?", or any variation asking
-  whether to keep working, ALWAYS answer "Yes, please continue."**
+- You can provide a reasonable default answer that moves work forward
+- The question is about process/approach and there's a sensible default
+- The question is "Should I continue?" and there's clearly more work to do on the current task
+  (In this case, answer "Yes, please continue with the remaining work.")
 
 ### Choose CONTINUE if:
-- This doesn't look like a real question for the user
+- This doesn't look like a real question - just a summary or status update
 - It's a rhetorical question
-- The agent should keep working without user input
-- The agent is summarizing completed work (not asking a question)
+- The agent is summarizing completed work (not actually asking something)
+
+## Important
+
+The goal is to keep work flowing when the agent can make reasonable progress, while ensuring the user is consulted for genuine decisions. Don't force the agent to continue if it's genuinely asking for user input on something important.

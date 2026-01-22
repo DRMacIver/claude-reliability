@@ -4,13 +4,10 @@ Variables:
   - open_count: Number of open issues
   - problem_phrase: The phrase to use when hitting a problem
 #}
-# Exit Phrase Rejected
+# Tasks Remaining
 
-There are {{ open_count }} open issue(s) remaining.
+There are {{ open_count }} task(s) still open. Run `list_tasks` to see what's left.
 
-Please work on the remaining issues before exiting.
-Run `bd ready` to see available work.
+If you can continue, please work on the remaining tasks.
 
-If you've hit a blocker you can't resolve, use this phrase instead:
-
-  "{{ problem_phrase }}"
+If you've genuinely hit a blocker that needs user input, say: "{{ problem_phrase }}"

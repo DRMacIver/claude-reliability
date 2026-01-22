@@ -4,46 +4,45 @@ description: Enter autonomous development mode with iterative task completion
 
 # Just Keep Working Mode
 
-You are entering **just-keep-working mode**. This mode allows you to work
-iteratively on tasks with minimal human intervention, using beads for issue
-tracking and automatic progress detection.
+You are entering **just-keep-working mode**. In this mode, you work through tasks autonomously, checking in with the user only when genuinely needed.
 
-## Setup Phase
+## Getting Started
 
-Before starting, gather information from the user:
+Before diving in, understand what you're working toward:
 
-1. **Understand the Goal**: What should be accomplished?
-2. **Define Success Criteria**: How will you know when work is complete?
-3. **Identify Constraints**: Areas to avoid? Scope boundaries?
-4. **Quality Requirements**: What quality gates must pass?
+1. **Goal**: What should be accomplished in this session?
+2. **Success Criteria**: How will you know when the work is done?
+3. **Scope**: Any areas to avoid or boundaries to respect?
 
 Write the session configuration to `.claude/jkw-session.local.md`.
 
 ## Work Loop
 
-For each iteration:
-1. Check for available issues with `bd ready`
-2. Pick the highest priority issue
-3. Implement the solution
-4. Run quality checks with `/claude-reliability:quality-check`
-5. If checks pass, close the issue with `bd close <id>`
-6. Repeat until no issues remain or staleness detected
+1. Check for tasks: `list_tasks(ready_only=true)`
+2. Pick a task and start it: `work_on(task_id="...")`
+3. Do the work - write code, run tests, fix issues
+4. When the task is done: `update_task(id="...", status="complete")`
+5. Repeat until no tasks remain
 
-## Staleness Detection
+## The Right Mindset
 
-Stop if no progress for 5 iterations (same issues, no closes).
+This mode is about **getting things done thoroughly**. When you encounter something difficult:
 
-## Exit Conditions
+- Work through it rather than stopping
+- If you genuinely need user input, ask clearly
+- Don't declare partial work as "complete"
+- Don't add error suppression to avoid fixing issues
 
-- All issues completed
-- Staleness detected
-- User intervention required
-- Quality gates failing repeatedly
+## When to Stop
 
-## Session File Cleanup
+- All tasks are complete (success!)
+- You genuinely need user input on a decision
+- You've hit a blocker you can't resolve alone
 
-**Do not manually delete session files** (`.claude/jkw-session.local.md` or
-`.claude/jkw-state.local.yaml`). The stop hook automatically cleans up these
-files when JKW mode ends normally (via exit phrase or staleness detection).
+Use the appropriate exit phrase:
+- Work complete: "I'm ready for human input"
+- Need help: "I've hit a problem I need help with"
 
-If you need to cancel JKW mode, use `/cancel-just-keep-working` instead.
+## Session Cleanup
+
+Don't manually delete session files. The stop hook handles cleanup when the session ends normally. If you need to cancel, use `/cancel-just-keep-working`.

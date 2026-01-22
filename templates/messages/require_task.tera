@@ -2,25 +2,19 @@
 
 Variables: none
 #}
-# Task Required
+# Quick Setup: Start a Task
 
-You are attempting to make code changes (Write/Edit) without an active task.
+Before making code changes, please set up a task to track what you're working on. This helps maintain context and keeps work organized.
 
-**All code changes must be tracked in the task system.**
+**Quick start:**
 
-Before making changes, you must:
-
-1. **Find or create a task** that describes what you're working on
-2. **Call `work_on`** with the task ID to mark it as in-progress
-
-Example:
 ```
-# If a task already exists
-work_on(task_id="my-task-1234")
+# If a relevant task already exists:
+work_on(task_id="<task-id>")
 
-# If you need to create a new task first
-create_task(title="Fix bug in login flow", description="...")
+# Or create a new one:
+create_task(title="Brief description of what you're doing", description="...")
 work_on(task_id="<returned-task-id>")
 ```
 
-This ensures all work is properly tracked and helps maintain context across sessions.
+This only takes a moment and helps you (and future sessions) stay oriented.

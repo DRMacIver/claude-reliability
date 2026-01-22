@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(output.exit_code, ExitCode::SUCCESS);
         assert!(!output.stderr.is_empty());
         // Should contain the intro message
-        assert!(output.stderr[0].contains("Claude Reliability Mode"));
+        assert!(output.stderr[0].contains("Reliability Mode"));
     }
 
     #[test]

@@ -4,9 +4,13 @@ Variables:
   - change_type: Type of changes being tracked ("issue" or "git")
   - iterations_since_change: Number of iterations since last change
 #}
-# Staleness Detected
+# Session Paused
 
-No {{ change_type }} changes for {{ iterations_since_change }} iterations.
-Just-keep-working mode stopped due to lack of progress.
+The just-keep-working session has been paused - no {{ change_type }} changes were detected for {{ iterations_since_change }} iterations.
 
-Run `/just-keep-working` to start a new session.
+This might mean:
+- The work is actually complete
+- You're stuck on something that needs user input
+- The current task is more complex than expected
+
+If there's more to do, run `/just-keep-working` to start a new session.

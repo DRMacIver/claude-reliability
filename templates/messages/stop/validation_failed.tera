@@ -5,18 +5,19 @@ Variables:
   - stdout: Standard output from the command (optional)
   - stderr: Standard error from the command (optional)
 #}
-# Validation Failed
+# Quality Check Issues
 
-The quality check command `{{ check_cmd }}` failed.
+The quality check (`{{ check_cmd }}`) found some issues.
 
-Please fix the issues before stopping.
 {% if stdout %}
-
-**stdout:**
+**Output:**
 {{ stdout }}
 {% endif %}
 {% if stderr %}
-
-**stderr:**
+**Errors:**
 {{ stderr }}
 {% endif %}
+
+Please fix these issues. Leaving the codebase in good shape - whether you introduced the issues or not - is part of doing excellent work.
+
+A clean quality check means your work is truly complete.

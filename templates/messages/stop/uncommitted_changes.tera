@@ -13,103 +13,49 @@ Variables:
   - require_push: Whether pushing is required (bool)
   - problem_phrase: The phrase to use when hitting a problem
 #}
-# Uncommitted Changes Detected
+# Uncommitted Changes
 
-Cannot exit with {{ changes_description }}.
+You have {{ changes_description }} that should be committed before stopping.
 
 {% if quality_failed %}
-## Quality Checks Failed
+## Quality Issues
 
-Quality gates did not pass. Fix issues before committing.
+Quality checks didn't pass. Please address these:
 
 {% if quality_output %}
-### Output:
-
 {{ quality_output }}
 {% endif %}
 {% endif %}
-{% if suppression_violations %}
-## Error Suppression Detected
-
-The following error suppressions were added:
-
-{% for v in suppression_violations %}
-{{ v }}
-{% endfor %}
-
-Fix the underlying issues instead of suppressing errors.
-
-{% endif %}
-{% if empty_except_violations %}
-## Empty Exception Handlers Detected
-
-The following empty except blocks were added:
-
-{% for v in empty_except_violations %}
-{{ v }}
-{% endfor %}
-
-Handle exceptions properly or re-raise them.
-
-{% endif %}
 {% if secret_violations %}
-## SECURITY: Hardcoded Secrets Detected
+## Security Alert: Secrets Detected
 
-The following secrets/tokens were found in staged changes:
+Found potential secrets in staged changes:
 
 {% for v in secret_violations %}
 {{ v }}
 {% endfor %}
 
-NEVER commit secrets. Use environment variables instead.
-If this was accidental, the secret may need to be rotated.
-
-{% endif %}
-{% if todo_warnings %}
-## Untracked Work Items
-
-Consider creating tasks for these items:
-
-{% for w in todo_warnings %}
-{{ w }}
-{% endfor %}
-
+Remove these before committing. Use environment variables instead of hardcoding credentials.
 {% endif %}
 {% if untracked_files %}
 ## Untracked Files
 
-The following files are not tracked by git:
+These files aren't tracked by git:
 
 {% for f in untracked_files %}
   {{ f }}
 {% endfor %}
 
-Either `git add` them or add them to .gitignore
-
-{% endif %}
-Before stopping, please:
-
-1. Run `git status` to check for files that should be gitignored
-{% if quality_check_enabled %}
-2. Run quality checks to verify they pass
-3. Stage your changes: `git add <files>`
-4. Commit with a descriptive message: `git commit -m '...'`
-{% else %}
-2. Stage your changes: `git add <files>`
-3. Commit with a descriptive message: `git commit -m '...'`
-{% endif %}
-{% if require_push %}
-{% if quality_check_enabled %}
-5. Push to remote: `git push`
-{% else %}
-4. Push to remote: `git push`
+Add them with `git add` or add to .gitignore if they shouldn't be committed.
 {% endif %}
 
-Work is incomplete until `git push` succeeds.
-{% endif %}
+## Next Steps
+
+1. Review your changes with `git status` and `git diff`
+2. {% if quality_check_enabled %}Fix any quality issues{% else %}Make sure the code is in good shape{% endif %}
+3. Commit: `git add <files> && git commit -m "..."`
+{% if require_push %}4. Push: `git push`{% endif %}
 
 ---
 
-If you've hit a problem you cannot solve without user input:
-
-  "{{ problem_phrase }}"
+If you've genuinely hit a blocker that requires user input, say: "{{ problem_phrase }}"

@@ -64,7 +64,7 @@ mod tests {
         let output = run_problem_mode_hook(&input, dir.path());
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("block"));
-        assert!(json.contains("Problem Mode Active"));
+        assert!(json.contains("Problem Mode"));
     }
 
     #[test]

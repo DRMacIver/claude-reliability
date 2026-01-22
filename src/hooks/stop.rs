@@ -252,11 +252,9 @@ pub fn run_stop_hook(
                 let mut result = StopHookResult::block()
                     .with_message("# Validation Failed")
                     .with_message("")
-                    .with_message(format!("The quality check command `{check_cmd}` failed."))
+                    .with_message(format!("The quality check command `{check_cmd}` found issues."))
                     .with_message("")
-                    .with_message("Please fix the issues before stopping.")
-                    .with_message("")
-                    .with_message("Note: Even if these are pre-existing issues, you must fix them before stopping. You will not be allowed to stop until all quality checks pass.");
+                    .with_message("Please fix these issues before continuing. Whether you introduced them or they were pre-existing, a clean quality check is part of completing your work well.");
 
                 if !output.stdout.is_empty() {
                     result = result.with_message("").with_message("**stdout:**");
@@ -463,9 +461,9 @@ pub fn run_stop_hook(
             let output = runner.run("sh", &["-c", cmd], None)?;
             if !output.success() {
                 return Ok(StopHookResult::block()
-                    .with_message("# Quality Gates Failed")
+                    .with_message("# Quality Check Issues")
                     .with_message("")
-                    .with_message("Quality checks must pass before exiting.")
+                    .with_message("Quality checks found issues that need your attention. Fixing these (whether you introduced them or not) helps maintain a healthy codebase.")
                     .with_message("")
                     .with_message(truncate_output(&output.combined_output(), 50)));
             }
@@ -578,23 +576,21 @@ fn handle_uncommitted_changes(
         }
     }
 
-    result.messages.push("# Uncommitted Changes Detected".to_string());
+    result.messages.push("# Uncommitted Changes".to_string());
     result.messages.push(String::new());
-    result.messages.push(format!("Cannot exit with {}.", git_status.uncommitted.description()));
+    result.messages.push(format!(
+        "You have {} that should be committed.",
+        git_status.uncommitted.description()
+    ));
     result.messages.push(String::new());
 
     // Show quality check results
     if !quality_passed {
-        result.messages.push("## Quality Checks Failed".to_string());
+        result.messages.push("## Quality Issues".to_string());
         result.messages.push(String::new());
         result
             .messages
-            .push("Quality gates did not pass. Fix issues before committing.".to_string());
-        result.messages.push(String::new());
-        result.messages.push(
-            "Note: Even if these are pre-existing issues, you must fix them before stopping."
-                .to_string(),
-        );
+            .push("Quality checks found issues. Please fix them - leaving the codebase in good shape is part of doing great work.".to_string());
         result.messages.push(String::new());
         if !quality_output.is_empty() {
             result.messages.push("### Output:".to_string());
@@ -769,10 +765,12 @@ fn handle_jkw_mode(
     let iterations_since_change = session.iterations_since_change();
     if iterations_since_change >= STALENESS_THRESHOLD {
         return Ok(StopHookResult::allow()
-            .with_message("# Staleness Detected")
+            .with_message("# Session Paused")
             .with_message("")
             .with_message(format!("No git changes for {iterations_since_change} iterations."))
-            .with_message("Just-keep-working mode paused due to lack of progress.")
+            .with_message(
+                "If you're working through something complex, that's fine - just checking in.",
+            )
             .with_message("")
             .with_message("Session preserved - JKW mode will resume on next message.")
             .with_explanation(
@@ -805,8 +803,10 @@ fn handle_jkw_mode(
         result.messages.push(String::new());
         result
             .messages
-            .push(format!("**Warning**: No git changes for {iterations_since_change} loops."));
-        result.messages.push(format!("Staleness threshold: {STALENESS_THRESHOLD}"));
+            .push(format!("**Note**: No git changes for {iterations_since_change} iterations - making sure you're not stuck."));
+        result
+            .messages
+            .push(format!("Session will pause for check-in at {STALENESS_THRESHOLD} iterations."));
     }
 
     result.messages.push(String::new());
@@ -1367,7 +1367,7 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Quality Checks Failed")));
+        assert!(result.messages.iter().any(|m| m.contains("Quality Issues")));
     }
 
     #[test]
@@ -1592,7 +1592,7 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         // Problem phrase now blocks and enters problem mode
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Problem Mode Activated")));
+        assert!(result.messages.iter().any(|m| m.contains("Problem Mode")));
         // Verify problem mode marker was created
         assert!(crate::session::is_problem_mode_active(dir.path()));
     }
@@ -1768,7 +1768,7 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Quality Gates Failed")));
+        assert!(result.messages.iter().any(|m| m.contains("Quality")));
     }
 
     // Helper to create a session file for just-keep-working mode tests
@@ -1889,7 +1889,7 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Staleness Detected")));
+        assert!(result.messages.iter().any(|m| m.contains("Session Paused")));
     }
 
     #[test]
@@ -1942,7 +1942,7 @@ mod tests {
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
         // Check for staleness warning (iterations > 2)
-        assert!(result.messages.iter().any(|m| m.contains("Warning")));
+        assert!(result.messages.iter().any(|m| m.contains("Note")));
     }
 
     #[test]

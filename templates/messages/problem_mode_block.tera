@@ -3,19 +3,19 @@
 Variables:
   - tool_name: The tool that was attempted
 #}
-# Tool Use Blocked - Problem Mode Active
+# Problem Mode - User Input Needed
 
-You indicated you've hit a problem you can't solve. **All tools are currently blocked.**
+You've indicated you've hit a problem that needs user input. Tools are paused until you've explained the situation.
 
 You attempted to use: `{{ tool_name }}`
 
-## What you must do:
+## What to do now:
 
-1. **Stop trying to use tools** - They will all be blocked until you explain your problem
-2. **Explain the problem clearly to the user:**
-   - What exactly went wrong?
-   - What did you try?
-   - What specific help do you need?
-3. **Then stop** - Your next stop will be allowed unconditionally
+1. **Explain clearly to the user:**
+   - What you were trying to do
+   - What went wrong or what's blocking you
+   - What specific help or decision you need from them
 
-Once you've explained and stopped, the user will be able to respond and help you.
+2. **Then stop** - Once you've explained, your next stop will go through and the user can respond.
+
+This pause is just to make sure you communicate the problem clearly before trying more things. It's not a punishment - it's a chance to get the help you need.

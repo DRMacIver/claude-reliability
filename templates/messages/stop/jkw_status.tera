@@ -7,33 +7,18 @@ Variables:
   - human_input_phrase: Phrase for when work is complete
   - problem_phrase: Phrase for when hitting a problem
 #}
-# Just-Keep-Working Mode Active
+# Just-Keep-Working Mode
 
-**Iteration {{ iteration }}**
-Iterations since last git change: {{ iterations_since_change }}
+**Iteration {{ iteration }}** | Last change: {{ iterations_since_change }} iterations ago
 
-## Progress Tracking
-- Tracking progress via git working state
+Keep working on your current task. Make progress, commit changes when meaningful, and run quality checks when you've completed something.
 
-## Action Required
-
-Continue working:
-
-1. Make progress on your current task
-2. Stage changes to indicate progress
-3. Run quality checks after completing work
 {% if iterations_since_change > 2 %}
-
-**Warning**: No git changes for {{ iterations_since_change }} loops.
-Staleness threshold: {{ staleness_threshold }}
+Note: It's been a few iterations without git changes. If you're working on something complex, that's fine - just make sure you're making progress. If you're stuck, consider asking for help.
 {% endif %}
 
 ---
 
-If you cannot proceed without human input, use one of these phrases:
-
-When all your work is done:
-  "{{ human_input_phrase }}"
-
-When you've hit a problem you can't solve:
-  "{{ problem_phrase }}"
+**Exit phrases:**
+- Work complete: "{{ human_input_phrase }}"
+- Need help: "{{ problem_phrase }}"
