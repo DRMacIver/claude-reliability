@@ -6,8 +6,8 @@
 use crate::{
     command::RealCommandRunner,
     hooks::{
-        parse_hook_input, run_pre_tool_use, run_stop_hook, run_user_prompt_submit_hook,
-        StopHookConfig,
+        parse_hook_input, run_post_tool_use, run_pre_tool_use, run_stop_hook,
+        run_user_prompt_submit_hook, PostToolUseInput, StopHookConfig,
     },
     subagent::RealSubAgent,
     traits::{CommandRunner, SubAgent},
@@ -34,6 +34,8 @@ pub enum Command {
     UserPromptSubmit,
     /// Run the unified pre-tool-use hook (handles all tools).
     PreToolUse,
+    /// Run the post-tool-use hook.
+    PostToolUse,
 }
 
 impl Command {
@@ -47,7 +49,7 @@ impl Command {
             | Self::Intro
             | Self::SyncBeads
             | Self::UserPromptSubmit => false,
-            Self::Stop | Self::PreToolUse => true,
+            Self::Stop | Self::PreToolUse | Self::PostToolUse => true,
         }
     }
 }
@@ -79,6 +81,7 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "stop" => ParseResult::Command(Command::Stop),
         "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
         "pre-tool-use" => ParseResult::Command(Command::PreToolUse),
+        "post-tool-use" => ParseResult::Command(Command::PostToolUse),
         other => ParseResult::UnknownCommand(other.to_string()),
     }
 }
@@ -96,6 +99,7 @@ pub fn usage(program: &str) -> String {
          stop                 Run the stop hook\n  \
          user-prompt-submit   Run the user prompt submit hook\n  \
          pre-tool-use         Run the unified pre-tool-use hook\n  \
+         post-tool-use        Run the post-tool-use hook\n  \
          version              Show version information"
     )
 }
@@ -198,6 +202,7 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::Stop => run_stop_cmd(stdin),
         Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
         Command::PreToolUse => run_pre_tool_use_cmd(stdin),
+        Command::PostToolUse => run_post_tool_use_cmd(stdin),
     }
 }
 
@@ -335,6 +340,18 @@ fn run_pre_tool_use_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
     (ExitCode::SUCCESS, vec![json])
 }
 
+fn run_post_tool_use_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    let input: PostToolUseInput = match serde_json::from_str(stdin) {
+        Ok(input) => input,
+        Err(e) => return (ExitCode::from(1), vec![format!("Failed to parse input: {e}")]),
+    };
+
+    match run_post_tool_use(&input, Path::new(".")) {
+        Ok(()) => (ExitCode::SUCCESS, vec![]),
+        Err(e) => (ExitCode::from(1), vec![e]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +410,14 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_post_tool_use() {
+        assert_eq!(
+            parse_args(&args(&["prog", "post-tool-use"])),
+            ParseResult::Command(Command::PostToolUse)
+        );
+    }
+
+    #[test]
     fn test_parse_args_unknown_command() {
         assert_eq!(
             parse_args(&args(&["prog", "unknown"])),
@@ -409,6 +434,7 @@ mod tests {
         assert!(u.contains("stop"));
         assert!(u.contains("user-prompt-submit"));
         assert!(u.contains("pre-tool-use"));
+        assert!(u.contains("post-tool-use"));
         assert!(u.contains("version"));
     }
 
@@ -432,6 +458,7 @@ mod tests {
         // Commands that need stdin (hooks that receive JSON input)
         assert!(Command::Stop.needs_stdin());
         assert!(Command::PreToolUse.needs_stdin());
+        assert!(Command::PostToolUse.needs_stdin());
     }
 
     #[test]
@@ -491,6 +518,77 @@ mod tests {
         assert_eq!(output.exit_code, ExitCode::from(1));
         assert!(!output.stderr.is_empty());
         assert!(output.stderr[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_post_tool_use_via_cli() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Test with ExitPlanMode tool response
+        let output = run(
+            &args(&["prog", "post-tool-use"]),
+            r#"{"toolName": "ExitPlanMode", "toolResponse": {"filePath": "~/.claude/plans/test-plan.md"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn test_run_post_tool_use_invalid_json() {
+        let output = run(&args(&["prog", "post-tool-use"]), "not json");
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_post_tool_use_unknown_tool() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Unknown tools should succeed (no hooks to run)
+        let output = run(
+            &args(&["prog", "post-tool-use"]),
+            r#"{"toolName": "UnknownTool", "toolResponse": {}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_post_tool_use_exit_plan_mode_no_file_path() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // ExitPlanMode with no file_path should fail
+        let output = run(
+            &args(&["prog", "post-tool-use"]),
+            r#"{"toolName": "ExitPlanMode", "toolResponse": {"plan": "content only"}}"#,
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("No plan file path"));
     }
 
     #[test]
