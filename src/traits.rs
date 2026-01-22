@@ -73,6 +73,19 @@ pub enum SubAgentDecision {
     Continue,
 }
 
+/// Context for question decision-making.
+#[derive(Debug, Clone)]
+pub struct QuestionContext {
+    /// The assistant's last output (truncated).
+    pub assistant_output: String,
+    /// How recently the user was active (in minutes).
+    pub user_recency_minutes: u32,
+    /// Human-readable timestamp of when the user was last active.
+    pub user_last_active: Option<String>,
+    /// Whether any modifying tool calls were made since the user last spoke.
+    pub has_modifications_since_user: bool,
+}
+
 /// Trait for sub-agent interactions.
 ///
 /// This trait abstracts the Claude sub-agent calls for testability.
@@ -81,8 +94,7 @@ pub trait SubAgent {
     ///
     /// # Arguments
     ///
-    /// * `assistant_output` - The assistant's last output (truncated to ~2000 chars).
-    /// * `user_recency_minutes` - How recently the user was active.
+    /// * `context` - The context for making the decision.
     ///
     /// # Returns
     ///
@@ -91,11 +103,7 @@ pub trait SubAgent {
     /// # Errors
     ///
     /// Returns an error if the sub-agent call fails.
-    fn decide_on_question(
-        &self,
-        assistant_output: &str,
-        user_recency_minutes: u32,
-    ) -> Result<SubAgentDecision>;
+    fn decide_on_question(&self, context: &QuestionContext) -> Result<SubAgentDecision>;
 
     /// Run a code review on the given diff.
     ///

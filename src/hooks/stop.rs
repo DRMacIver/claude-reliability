@@ -15,8 +15,9 @@ use crate::question::{is_continue_question, looks_like_question, truncate_for_co
 use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
 use crate::tasks;
 use crate::templates;
-use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
+use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
 use crate::transcript::{self, is_simple_question, TranscriptInfo};
+use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tera::Context;
@@ -30,6 +31,28 @@ pub const PROBLEM_NEEDS_USER: &str = "I have run into a problem I can't solve wi
 
 /// Time window for considering user as "recently active" (minutes).
 pub const USER_RECENCY_MINUTES: u32 = 5;
+
+/// Format a timestamp as a human-readable "time ago" string.
+fn format_time_ago(time: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(time);
+
+    let minutes = duration.num_minutes();
+    if minutes < 1 {
+        "just now".to_string()
+    } else if minutes == 1 {
+        "1 minute ago".to_string()
+    } else if minutes < 60 {
+        format!("{minutes} minutes ago")
+    } else {
+        let hours = duration.num_hours();
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{hours} hours ago")
+        }
+    }
+}
 
 /// Configuration for the stop hook.
 #[derive(Debug, Clone, Default)]
@@ -759,10 +782,10 @@ fn check_interactive_question(
     }
 
     // Truncate for context
-    let context = truncate_for_context(output, 2000);
+    let truncated_output = truncate_for_context(output, 2000);
 
     // Fast path: Auto-answer "should I continue?" questions
-    if is_continue_question(context) {
+    if is_continue_question(truncated_output) {
         return Ok(Some(
             StopHookResult::block()
                 .with_message("# Fast path: Auto-answering continue question")
@@ -770,8 +793,16 @@ fn check_interactive_question(
         ));
     }
 
+    // Build question context for sub-agent
+    let question_context = QuestionContext {
+        assistant_output: truncated_output.to_string(),
+        user_recency_minutes: USER_RECENCY_MINUTES,
+        user_last_active: transcript_info.last_user_message_time.map(format_time_ago),
+        has_modifications_since_user: transcript_info.has_modifying_tool_use_since_user,
+    };
+
     // Run sub-agent decision
-    let decision = sub_agent.decide_on_question(context, USER_RECENCY_MINUTES)?;
+    let decision = sub_agent.decide_on_question(&question_context)?;
 
     match decision {
         SubAgentDecision::AllowStop(reason) => {
@@ -992,7 +1023,48 @@ mod tests {
     use super::*;
     use crate::testing::{MockCommandRunner, MockSubAgent};
     use crate::traits::CommandOutput;
+    use chrono::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_format_time_ago_just_now() {
+        let now = Utc::now();
+        assert_eq!(format_time_ago(now), "just now");
+        assert_eq!(format_time_ago(now - Duration::seconds(30)), "just now");
+    }
+
+    #[test]
+    fn test_format_time_ago_one_minute() {
+        let one_min_ago = Utc::now() - Duration::minutes(1);
+        assert_eq!(format_time_ago(one_min_ago), "1 minute ago");
+    }
+
+    #[test]
+    fn test_format_time_ago_minutes() {
+        let five_min_ago = Utc::now() - Duration::minutes(5);
+        assert_eq!(format_time_ago(five_min_ago), "5 minutes ago");
+
+        let thirty_min_ago = Utc::now() - Duration::minutes(30);
+        assert_eq!(format_time_ago(thirty_min_ago), "30 minutes ago");
+
+        let fifty_nine_min_ago = Utc::now() - Duration::minutes(59);
+        assert_eq!(format_time_ago(fifty_nine_min_ago), "59 minutes ago");
+    }
+
+    #[test]
+    fn test_format_time_ago_one_hour() {
+        let one_hour_ago = Utc::now() - Duration::hours(1);
+        assert_eq!(format_time_ago(one_hour_ago), "1 hour ago");
+    }
+
+    #[test]
+    fn test_format_time_ago_hours() {
+        let two_hours_ago = Utc::now() - Duration::hours(2);
+        assert_eq!(format_time_ago(two_hours_ago), "2 hours ago");
+
+        let five_hours_ago = Utc::now() - Duration::hours(5);
+        assert_eq!(format_time_ago(five_hours_ago), "5 hours ago");
+    }
 
     fn mock_clean_git() -> MockCommandRunner {
         let mut runner = MockCommandRunner::new();
@@ -1582,6 +1654,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
@@ -1602,6 +1675,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
@@ -1621,6 +1695,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let sub_agent = MockSubAgent::new();
@@ -1646,6 +1721,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
@@ -1676,6 +1752,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();
@@ -1701,6 +1778,7 @@ mod tests {
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         let mut sub_agent = MockSubAgent::new();

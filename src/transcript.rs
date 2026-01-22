@@ -85,6 +85,8 @@ pub struct TranscriptInfo {
     pub consecutive_api_errors: u32,
     /// Whether the transcript contains any modifying (non-Read) tool uses.
     pub has_modifying_tool_use: bool,
+    /// Whether the transcript contains any modifying tool uses since the last user message.
+    pub has_modifying_tool_use_since_user: bool,
     /// The first user message in the transcript.
     pub first_user_message: Option<String>,
 }
@@ -150,6 +152,7 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                                     // Check if this is a modifying tool
                                     if !READ_ONLY_TOOLS.contains(&name.as_str()) {
                                         info.has_modifying_tool_use = true;
+                                        info.has_modifying_tool_use_since_user = true;
                                     }
                                 }
                                 ContentBlock::Other => {}
@@ -159,6 +162,9 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                 }
             }
             "user" => {
+                // Reset modifying tool use tracking when we see a user message
+                info.has_modifying_tool_use_since_user = false;
+
                 // Capture first user message
                 if info.first_user_message.is_none() {
                     if let Some(message) = &entry.message {
@@ -331,6 +337,7 @@ also not json
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         assert!(is_user_recently_active(&info, 5));
@@ -344,6 +351,7 @@ also not json
             has_api_error: false,
             consecutive_api_errors: 0,
             has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
             first_user_message: None,
         };
         assert!(!is_user_recently_active(&info, 5));
@@ -682,6 +690,64 @@ also not json
         let file = create_temp_transcript(content);
         let info = parse_transcript(file.path()).unwrap();
         assert!(!info.has_modifying_tool_use);
+    }
+
+    #[test]
+    fn test_modifying_tool_use_since_user_is_set() {
+        // User message followed by modifying tool use
+        let content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Do something"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+        assert!(info.has_modifying_tool_use_since_user);
+    }
+
+    #[test]
+    fn test_modifying_tool_use_since_user_resets_on_user_message() {
+        // Modifying tool, then user message, then read-only tool
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Check status"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "2"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Overall flag should still be true (Edit was used somewhere)
+        assert!(info.has_modifying_tool_use);
+        // But since_user should be false (only Read after the user message)
+        assert!(!info.has_modifying_tool_use_since_user);
+    }
+
+    #[test]
+    fn test_modifying_tool_use_since_user_with_multiple_user_messages() {
+        // Multiple user messages with tools in between
+        let content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "First request"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "user", "timestamp": "2024-01-01T12:01:00Z", "message": {"content": "Second request"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "2"}]}}
+{"type": "user", "timestamp": "2024-01-01T12:02:00Z", "message": {"content": "Third request"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "id": "3"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Overall flag should be true
+        assert!(info.has_modifying_tool_use);
+        // Since_user should be true (Write after the last user message)
+        assert!(info.has_modifying_tool_use_since_user);
+    }
+
+    #[test]
+    fn test_modifying_tool_use_since_user_no_tools_after_user() {
+        // User message with no subsequent tools
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Thanks"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "You're welcome!"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_modifying_tool_use);
+        assert!(!info.has_modifying_tool_use_since_user);
     }
 
     #[test]

@@ -8,7 +8,9 @@
 
 use crate::error::Result;
 use crate::session::SessionConfig;
-use crate::traits::{CommandOutput, CommandRunner, StateStore, SubAgent, SubAgentDecision};
+use crate::traits::{
+    CommandOutput, CommandRunner, QuestionContext, StateStore, SubAgent, SubAgentDecision,
+};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -124,11 +126,7 @@ impl MockSubAgent {
 }
 
 impl SubAgent for MockSubAgent {
-    fn decide_on_question(
-        &self,
-        _assistant_output: &str,
-        _user_recency_minutes: u32,
-    ) -> Result<SubAgentDecision> {
+    fn decide_on_question(&self, _context: &QuestionContext) -> Result<SubAgentDecision> {
         let mut index = self.question_index.borrow_mut();
         let decisions = self.question_decisions.borrow();
 
@@ -200,11 +198,7 @@ impl FailingSubAgent {
 }
 
 impl SubAgent for FailingSubAgent {
-    fn decide_on_question(
-        &self,
-        _assistant_output: &str,
-        _user_recency_minutes: u32,
-    ) -> Result<SubAgentDecision> {
+    fn decide_on_question(&self, _context: &QuestionContext) -> Result<SubAgentDecision> {
         Err(std::io::Error::other(self.error_message.clone()).into())
     }
 
@@ -469,12 +463,22 @@ mod tests {
         let _ = runner.run("echo", &["world"], None);
     }
 
+    /// Helper to create a test `QuestionContext`.
+    fn test_context(output: &str) -> QuestionContext {
+        QuestionContext {
+            assistant_output: output.to_string(),
+            user_recency_minutes: 5,
+            user_last_active: Some("2 minutes ago".to_string()),
+            has_modifications_since_user: false,
+        }
+    }
+
     #[test]
     fn test_mock_sub_agent() {
         let mut agent = MockSubAgent::new();
         agent.expect_question_decision(SubAgentDecision::Continue);
 
-        let decision = agent.decide_on_question("test", 5).unwrap();
+        let decision = agent.decide_on_question(&test_context("test")).unwrap();
         assert_eq!(decision, SubAgentDecision::Continue);
     }
 
@@ -508,7 +512,7 @@ mod tests {
         let agent = FailingSubAgent::new("test error");
 
         // All methods should return errors
-        assert!(agent.decide_on_question("test", 5).is_err());
+        assert!(agent.decide_on_question(&test_context("test")).is_err());
         assert!(agent.review_code("diff", &[], None).is_err());
     }
 

@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::templates;
-use crate::traits::{CommandRunner, SubAgent, SubAgentDecision};
+use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
 use std::time::Duration;
 use tera::Context;
 
@@ -40,14 +40,12 @@ impl<'a> RealSubAgent<'a> {
 }
 
 impl SubAgent for RealSubAgent<'_> {
-    fn decide_on_question(
-        &self,
-        assistant_output: &str,
-        user_recency_minutes: u32,
-    ) -> Result<SubAgentDecision> {
+    fn decide_on_question(&self, context: &QuestionContext) -> Result<SubAgentDecision> {
         let mut ctx = Context::new();
-        ctx.insert("assistant_output", assistant_output);
-        ctx.insert("user_recency_minutes", &user_recency_minutes);
+        ctx.insert("assistant_output", &context.assistant_output);
+        ctx.insert("user_recency_minutes", &context.user_recency_minutes);
+        ctx.insert("user_last_active", &context.user_last_active);
+        ctx.insert("has_modifications_since_user", &context.has_modifications_since_user);
 
         let prompt = templates::render("prompts/question_decision.tera", &ctx)
             .expect("question_decision.tera template should always render");
@@ -190,6 +188,16 @@ mod tests {
     use crate::testing::MockCommandRunner;
     use crate::traits::CommandOutput;
 
+    /// Helper to create a test `QuestionContext`.
+    fn test_context(output: &str) -> QuestionContext {
+        QuestionContext {
+            assistant_output: output.to_string(),
+            user_recency_minutes: 5,
+            user_last_active: Some("2 minutes ago".to_string()),
+            has_modifications_since_user: false,
+        }
+    }
+
     #[test]
     fn test_extract_json_object() {
         let text = r#"Here is my response: {"decision": "approve", "feedback": "LGTM"} end"#;
@@ -314,7 +322,7 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let result = agent.decide_on_question("test output", 5).unwrap();
+            let result = agent.decide_on_question(&test_context("test output")).unwrap();
 
             assert!(matches!(
                 result,
@@ -330,7 +338,7 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let result = agent.decide_on_question("Should I continue?", 5).unwrap();
+            let result = agent.decide_on_question(&test_context("Should I continue?")).unwrap();
 
             assert!(matches!(
                 result,
@@ -346,7 +354,7 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let result = agent.decide_on_question("test", 5).unwrap();
+            let result = agent.decide_on_question(&test_context("test")).unwrap();
 
             assert_eq!(result, SubAgentDecision::Continue);
         }
@@ -359,7 +367,7 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let result = agent.decide_on_question("test", 5).unwrap();
+            let result = agent.decide_on_question(&test_context("test")).unwrap();
 
             // Unrecognized format defaults to Continue
             assert_eq!(result, SubAgentDecision::Continue);
@@ -373,7 +381,7 @@ mod tests {
             let runner = RealCommandRunner::new();
             let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
 
-            let result = agent.decide_on_question("test", 5).unwrap();
+            let result = agent.decide_on_question(&test_context("test")).unwrap();
 
             // Command failure defaults to Continue
             assert_eq!(result, SubAgentDecision::Continue);
@@ -489,7 +497,7 @@ mod tests {
                 .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
 
             // The run() call returns Err, which propagates via ?
-            let result = agent.decide_on_question("test", 5);
+            let result = agent.decide_on_question(&test_context("test"));
             assert!(result.is_err());
         }
 
