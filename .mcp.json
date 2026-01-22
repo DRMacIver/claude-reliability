@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "command": "${CLAUDE_PLUGIN_ROOT}/.claude/bin/tasks-mcp",
+    "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
     "args": []
   }
 }

@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "tasks": {
-      "type": "stdio",
-      "command": "./.claude/bin/tasks-mcp",
-      "args": []
-    }
-  }
-}

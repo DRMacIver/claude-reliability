@@ -9,6 +9,12 @@
   "repository": "https://github.com/DRMacIver/claude-reliability",
   "license": "MIT",
   "keywords": ["reliability", "hooks", "quality", "code-review"],
+  "mcpServers": {
+    "tasks": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
+      "args": []
+    }
+  },
   "hooks": {
     "Stop": [
       {
