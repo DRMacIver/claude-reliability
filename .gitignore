@@ -25,3 +25,6 @@ __pycache__/
 docs/*.png
 .claude/*.sqlite3
 .claude/*.sqlite3-*
+
+# Added by capability regeneration
+.claude/jkw-state.local.yaml

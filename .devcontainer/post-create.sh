@@ -16,6 +16,20 @@ if [ -d /mnt/host-ssh ]; then
     chmod 644 ~/.ssh/*.pub 2>/dev/null || true
 fi
 
+# Install Claude Code plugins
+# claude-reliability: Quality hooks, stop detection, commands like /just-keep-working
+# Skip if this IS the claude-reliability repo (can't install a plugin into its own source)
+if command -v claude &> /dev/null; then
+    REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "")
+    if [ "$REPO_NAME" != "claude-reliability" ]; then
+        # Add marketplace (idempotent - won't duplicate if already added)
+        claude plugin marketplace add DRMacIver/claude-reliability 2>/dev/null || true
+
+        # Install plugin (idempotent - won't reinstall if already present)
+        claude plugin install claude-reliability@claude-reliability-marketplace 2>/dev/null || true
+    fi
+fi
+
 # Update beads to latest (Claude Code auto-updates via native installer)
 sudo npm install -g @beads/bd || true
 

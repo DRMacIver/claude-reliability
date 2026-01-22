@@ -27,12 +27,26 @@ export CLAUDE_CONFIG_DIR="$HOME/.claude"
 # Install Claude Code if not present
 # We install here (not in Dockerfile) because /home/dev is a volume mount
 # and would shadow any files installed during build
-CLAUDE_INSTALL_MARKER="$HOME/.claude-installed"
-if [ ! -f "$CLAUDE_INSTALL_MARKER" ] || [ ! -x "$HOME/.claude/bin/claude" ]; then
+# Use 'command -v' to check if claude is in PATH (works regardless of install location)
+if ! command -v claude &>/dev/null; then
     echo "Installing Claude Code..."
     curl -fsSL https://claude.ai/install.sh | bash
-    touch "$CLAUDE_INSTALL_MARKER"
     echo "Claude Code installed successfully"
+fi
+
+# Install Rust if not present
+# Same reason as Claude Code - /home/dev is a volume mount
+if ! command -v cargo &>/dev/null; then
+    echo "Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # Source cargo env for this session
+    source "$HOME/.cargo/env"
+    echo "Rust installed successfully"
+fi
+
+# Add cargo to PATH if it exists
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
 fi
 
 # Copy Claude credentials from host if not present in container

@@ -23,8 +23,5 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install just
-        uses: taiki-e/install-action@just
-
-      - name: Run coverage check
-        run: ./scripts/check-coverage.py
+      - name: Run tests with coverage (library only)
+        run: uv run scripts/check-coverage.py

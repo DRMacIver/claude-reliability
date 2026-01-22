@@ -30,7 +30,7 @@ build:
 build-release:
 	cargo build --release
 
-check: lint test-cov snapshot-tests
+check: lint test-cov
 
 check-bin-size:
 	#!/usr/bin/env bash
@@ -54,6 +54,9 @@ check-bin-size:
 
 clean:
 	cargo clean
+
+compile-transcript FILE:
+	cd snapshot-tests && uv run python -m snapshot_tests.compile_transcript {{FILE}}
 
 develop *ARGS:
 	#!/usr/bin/env bash
@@ -183,10 +186,8 @@ lint: check-bin-size
 release:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	# Update version in Cargo.toml
-	python3 scripts/release.py
-	# Get the version that was set
-	VERSION=$(python3 scripts/release.py --version-only)
+	# Update version in Cargo.toml and capture the version (prints to stdout)
+	VERSION=$(python3 scripts/release.py)
 	# Commit version update
 	git add Cargo.toml
 	git commit -m "Release $VERSION"
@@ -206,23 +207,6 @@ release-version:
 
 run *ARGS:
 	cargo run --features cli -- {{ARGS}}
-
-# Snapshot test commands
-# Run snapshot tests in replay mode (default)
-snapshot-tests *ARGS:
-	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots {{ARGS}}
-
-# Run snapshot tests with verbose output
-snapshot-tests-verbose *ARGS:
-	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --verbose {{ARGS}}
-
-# Record new snapshot transcripts (requires Claude Code)
-snapshot-tests-record *ARGS:
-	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --mode=record {{ARGS}}
-
-# Compile transcript.jsonl to human-readable markdown
-compile-transcript FILE:
-	cd snapshot-tests && uv run python -m snapshot_tests.compile_transcript {{FILE}}
 
 smoke-test:
 	#!/usr/bin/env bash
@@ -246,11 +230,20 @@ smoke-test-rust:
 	rustc --version
 	echo "Rust tools present"
 
+snapshot-tests *ARGS:
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots {{ARGS}}
+
+snapshot-tests-record *ARGS:
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --mode=record {{ARGS}}
+
+snapshot-tests-verbose *ARGS:
+	cd snapshot-tests && uv run python -m snapshot_tests.run_snapshots --verbose {{ARGS}}
+
 test *ARGS:
 	cargo test {{ARGS}}
 
 test-cov:
-	./scripts/check-coverage.py
+	uv run scripts/check-coverage.py
 
 update-my-hooks:
 	#!/usr/bin/env bash

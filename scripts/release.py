@@ -99,21 +99,19 @@ def get_calver() -> str:
 
 
 def update_version(new_version: str) -> None:
-    """Update version in all version files."""
-    project_root = Path(__file__).parent.parent
-
-    # Update Cargo.toml
-    cargo_path = project_root / "Cargo.toml"
+    """Update version in Cargo.toml."""
+    cargo_path = Path(__file__).parent.parent / "Cargo.toml"
     content = cargo_path.read_text()
 
     # Safety check: verify this is the right Cargo.toml
     name_pattern = r'^name = "([^"]+)"'
     name_match = re.search(name_pattern, content, flags=re.MULTILINE)
     if not name_match or name_match.group(1) != "claude-reliability":
-        print("Error: Cargo.toml does not belong to claude-reliability", file=sys.stderr)
+        print(f"Error: Cargo.toml does not belong to claude-reliability", file=sys.stderr)
         sys.exit(1)
 
     # Update version in [package] section
+    # Match version line that appears after [package]
     content = re.sub(
         r'^version = "[^"]+"',
         f'version = "{new_version}"',
@@ -122,33 +120,6 @@ def update_version(new_version: str) -> None:
         flags=re.MULTILINE,
     )
     cargo_path.write_text(content)
-    print(f"  Updated Cargo.toml")
-
-    # Update plugin.json
-    plugin_path = project_root / ".claude-plugin" / "plugin.json"
-    if plugin_path.exists():
-        content = plugin_path.read_text()
-        content = re.sub(
-            r'"version": "[^"]+"',
-            f'"version": "{new_version}"',
-            content,
-            count=1,
-        )
-        plugin_path.write_text(content)
-        print(f"  Updated plugin.json")
-
-    # Update marketplace.json (has two version fields)
-    marketplace_path = project_root / ".claude-plugin" / "marketplace.json"
-    if marketplace_path.exists():
-        content = marketplace_path.read_text()
-        # Update all version fields
-        content = re.sub(
-            r'"version": "[^"]+"',
-            f'"version": "{new_version}"',
-            content,
-        )
-        marketplace_path.write_text(content)
-        print(f"  Updated marketplace.json")
 
 
 def main() -> None:
@@ -169,7 +140,8 @@ def main() -> None:
 
     # Update version files
     update_version(new_version)
-    print(f"Updated to version {new_version}")
+    print(new_version)  # Print just version for script capture
+    print(f"Updated to version {new_version}", file=sys.stderr)
 
 
 if __name__ == "__main__":
