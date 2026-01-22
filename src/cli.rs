@@ -206,27 +206,55 @@ pub fn run_code_review(
     Ok(HookResult { exit_code: exit_code_from_i32(exit_code), messages: Vec::new() })
 }
 
+/// Output from running the CLI, with separate stdout and stderr messages.
+#[derive(Debug)]
+pub struct CliOutput {
+    /// Exit code for the process.
+    pub exit_code: ExitCode,
+    /// Messages to print to stdout.
+    pub stdout: Vec<String>,
+    /// Messages to print to stderr.
+    pub stderr: Vec<String>,
+}
+
 /// Run the CLI with parsed arguments and stdin input.
 ///
 /// This is the main entry point for the CLI logic. The binary just needs to:
 /// 1. Collect args
 /// 2. Read stdin
 /// 3. Call this function
-/// 4. Print messages and return exit code
-pub fn run(args: &[String], stdin: &str) -> (ExitCode, Vec<String>) {
-    match parse_args(args) {
-        ParseResult::ShowUsage => (ExitCode::from(1), vec![usage(&args[0])]),
+/// 4. Print stdout/stderr messages and return exit code
+pub fn run(args: &[String], stdin: &str) -> CliOutput {
+    let (exit_code, messages, is_stop_cmd) = match parse_args(args) {
+        ParseResult::ShowUsage => (ExitCode::from(1), vec![usage(&args[0])], false),
         ParseResult::UnknownCommand(cmd) => {
-            (ExitCode::from(1), vec![format!("Unknown command: {cmd}")])
+            (ExitCode::from(1), vec![format!("Unknown command: {cmd}")], false)
         }
         ParseResult::MissingSubcommand => (
             ExitCode::from(1),
             vec![format!("Usage: {} pre-tool-use <no-verify|code-review>", args[0])],
+            false,
         ),
         ParseResult::UnknownSubcommand(sub) => {
-            (ExitCode::from(1), vec![format!("Unknown pre-tool-use subcommand: {sub}")])
+            (ExitCode::from(1), vec![format!("Unknown pre-tool-use subcommand: {sub}")], false)
         }
-        ParseResult::Command(cmd) => run_command(cmd, stdin),
+        ParseResult::Command(cmd) => {
+            let is_stop = matches!(cmd, Command::Stop);
+            let (code, msgs) = run_command(cmd, stdin);
+            (code, msgs, is_stop)
+        }
+    };
+
+    // Format output based on command type and exit code
+    // For stop hooks with exit 0 and messages: output JSON with systemMessage to stdout
+    // For blocked stops (exit non-0): messages go to stderr for LLM feedback
+    // For other commands: messages go to stderr
+    if exit_code == ExitCode::SUCCESS && is_stop_cmd && !messages.is_empty() {
+        let system_message = messages.join("\n");
+        let json = serde_json::json!({"systemMessage": system_message});
+        CliOutput { exit_code, stdout: vec![json.to_string()], stderr: vec![] }
+    } else {
+        CliOutput { exit_code, stdout: vec![], stderr: messages }
     }
 }
 
@@ -614,43 +642,43 @@ mod tests {
 
     #[test]
     fn test_run_show_usage() {
-        let (_, messages) = run(&args(&["prog"]), "");
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Usage:"));
+        let output = run(&args(&["prog"]), "");
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Usage:"));
     }
 
     #[test]
     fn test_run_unknown_command() {
-        let (_, messages) = run(&args(&["prog", "unknown"]), "");
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Unknown command"));
+        let output = run(&args(&["prog", "unknown"]), "");
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Unknown command"));
     }
 
     #[test]
     fn test_run_missing_subcommand() {
-        let (_, messages) = run(&args(&["prog", "pre-tool-use"]), "");
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("pre-tool-use"));
+        let output = run(&args(&["prog", "pre-tool-use"]), "");
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("pre-tool-use"));
     }
 
     #[test]
     fn test_run_unknown_subcommand() {
-        let (_, messages) = run(&args(&["prog", "pre-tool-use", "bad"]), "");
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Unknown pre-tool-use subcommand"));
+        let output = run(&args(&["prog", "pre-tool-use", "bad"]), "");
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Unknown pre-tool-use subcommand"));
     }
 
     #[test]
     fn test_run_version() {
-        let (exit_code, messages) = run(&args(&["prog", "version"]), "");
-        assert_eq!(exit_code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("claude-reliability"));
+        let output = run(&args(&["prog", "version"]), "");
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("claude-reliability"));
     }
 
     #[test]
     fn test_run_no_verify_cmd() {
-        let (_, _) = run(&args(&["prog", "pre-tool-use", "no-verify"]), "{}");
+        let _output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "{}");
         // Just verify it runs without panic
     }
 
@@ -776,39 +804,39 @@ mod tests {
     #[test]
     fn test_run_stop_via_cli() {
         // The stop command needs valid JSON input but will fail gracefully with invalid
-        let (_code, messages) = run(&args(&["prog", "stop"]), "not json input");
+        let output = run(&args(&["prog", "stop"]), "not json input");
         // It should fail to parse and return an error message
-        assert!(!messages.is_empty());
+        assert!(!output.stderr.is_empty());
     }
 
     #[test]
     fn test_run_no_verify_via_cli() {
         // Call the no-verify hook through the CLI entry point
-        let (code, _messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "no-verify"]),
             r#"{"tool_name": "Edit", "tool_input": {}}"#,
         );
         // Should succeed (not bash command, nothing to block)
-        assert!(code == ExitCode::SUCCESS);
+        assert!(output.exit_code == ExitCode::SUCCESS);
     }
 
     #[test]
     fn test_run_code_review_via_cli() {
         // Call the code-review hook through the CLI entry point
         // Use invalid JSON to trigger quick failure
-        let (_code, messages) = run(&args(&["prog", "pre-tool-use", "code-review"]), "not json");
+        let output = run(&args(&["prog", "pre-tool-use", "code-review"]), "not json");
         // Should fail to parse
-        assert!(!messages.is_empty());
+        assert!(!output.stderr.is_empty());
     }
 
     #[test]
     fn test_run_no_verify_via_cli_invalid_json() {
         // Call the no-verify hook through CLI with invalid JSON to trigger error path
-        let (code, messages) = run(&args(&["prog", "pre-tool-use", "no-verify"]), "not json input");
+        let output = run(&args(&["prog", "pre-tool-use", "no-verify"]), "not json input");
         // Should fail to parse and return error code 1
-        assert!(code == ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Error parsing"));
+        assert!(output.exit_code == ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Error parsing"));
     }
 
     #[test]
@@ -858,12 +886,12 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, _messages) = run(&args(&["prog", "stop"]), "{}");
+        let output = run(&args(&["prog", "stop"]), "{}");
 
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should succeed (clean repo, allows stop)
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
     }
 
     #[test]
@@ -886,7 +914,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, _messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "code-review"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "git commit -m 'test'"}}"#,
         );
@@ -894,7 +922,7 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should succeed - no staged files means no review needed
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
     }
 
     #[test]
@@ -912,16 +940,16 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+        let output = run(&args(&["prog", "ensure-config"]), "");
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(messages.iter().any(|m| m.contains("Config ensured")));
-        assert!(messages.iter().any(|m| m.contains("git_repo")));
-        assert!(messages.iter().any(|m| m.contains("beads_installed")));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.iter().any(|m| m.contains("Config ensured")));
+        assert!(output.stderr.iter().any(|m| m.contains("git_repo")));
+        assert!(output.stderr.iter().any(|m| m.contains("beads_installed")));
         // Check for check_command message (either with value or "(none)")
-        assert!(messages.iter().any(|m| m.contains("check_command")));
+        assert!(output.stderr.iter().any(|m| m.contains("check_command")));
     }
 
     #[test]
@@ -942,13 +970,13 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+        let output = run(&args(&["prog", "ensure-config"]), "");
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // Should detect "just check" as the check command
-        assert!(messages.iter().any(|m| m.contains("just check")));
+        assert!(output.stderr.iter().any(|m| m.contains("just check")));
     }
 
     #[test]
@@ -963,25 +991,25 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // First call should create/update
-        let (code, messages) = run(&args(&["prog", "ensure-gitignore"]), "");
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(messages.iter().any(|m| m.contains(".gitignore")));
+        let output = run(&args(&["prog", "ensure-gitignore"]), "");
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.iter().any(|m| m.contains(".gitignore")));
 
         // Second call should report already has entries
-        let (code2, messages2) = run(&args(&["prog", "ensure-gitignore"]), "");
-        assert_eq!(code2, ExitCode::SUCCESS);
-        assert!(messages2.iter().any(|m| m.contains("already has")));
+        let output2 = run(&args(&["prog", "ensure-gitignore"]), "");
+        assert_eq!(output2.exit_code, ExitCode::SUCCESS);
+        assert!(output2.stderr.iter().any(|m| m.contains("already has")));
 
         std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
     fn test_run_intro_via_cli() {
-        let (code, messages) = run(&args(&["prog", "intro"]), "");
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
+        let output = run(&args(&["prog", "intro"]), "");
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
         // Should contain the intro message
-        assert!(messages[0].contains("Claude Reliability Mode"));
+        assert!(output.stderr[0].contains("Claude Reliability Mode"));
     }
 
     #[test]
@@ -996,12 +1024,12 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // user-prompt-submit should succeed (no setup file means nothing to do)
-        let (code, messages) = run(&args(&["prog", "user-prompt-submit"]), "");
+        let output = run(&args(&["prog", "user-prompt-submit"]), "");
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(messages.is_empty());
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr.is_empty());
     }
 
     #[test]
@@ -1016,26 +1044,26 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Valid JSON input for problem-mode
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "problem-mode"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "echo test"}}"#,
         );
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // Should return JSON output
-        assert!(!messages.is_empty());
-        assert!(messages[0].starts_with('{'));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].starts_with('{'));
     }
 
     #[test]
     fn test_run_problem_mode_invalid_json() {
-        let (code, messages) = run(&args(&["prog", "pre-tool-use", "problem-mode"]), "not json");
+        let output = run(&args(&["prog", "pre-tool-use", "problem-mode"]), "not json");
 
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Failed to parse"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
     }
 
     #[test]
@@ -1058,28 +1086,28 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Valid JSON input for jkw-setup
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "jkw-setup"]),
             r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
         );
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // Should return JSON output
-        assert!(!messages.is_empty());
-        assert!(messages[0].starts_with('{'));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].starts_with('{'));
         // Should allow since no JKW setup marker is set
-        assert!(messages[0].contains("allow"));
+        assert!(output.stderr[0].contains("allow"));
     }
 
     #[test]
     fn test_run_jkw_setup_invalid_json() {
-        let (code, messages) = run(&args(&["prog", "pre-tool-use", "jkw-setup"]), "not json");
+        let output = run(&args(&["prog", "pre-tool-use", "jkw-setup"]), "not json");
 
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Failed to parse"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
     }
 
     #[test]
@@ -1098,17 +1126,17 @@ mod tests {
         set_jkw_setup_required(dir_path).unwrap();
 
         // Try to write to a non-session file
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "jkw-setup"]),
             r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
         );
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // Should block
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("block"));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("block"));
     }
 
     #[test]
@@ -1123,30 +1151,30 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Valid JSON input for validation with Edit tool
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "validation"]),
             r#"{"tool_name": "Edit", "tool_input": {"file_path": "src/main.rs"}}"#,
         );
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // Should return JSON output
-        assert!(!messages.is_empty());
-        assert!(messages[0].starts_with('{'));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].starts_with('{'));
         // Should allow (we're just tracking, not blocking)
-        assert!(messages[0].contains("allow"));
+        assert!(output.stderr[0].contains("allow"));
         // Should set the needs_validation marker
         assert!(crate::session::needs_validation(dir_path));
     }
 
     #[test]
     fn test_run_validation_invalid_json() {
-        let (code, messages) = run(&args(&["prog", "pre-tool-use", "validation"]), "not json");
+        let output = run(&args(&["prog", "pre-tool-use", "validation"]), "not json");
 
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Failed to parse"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
     }
 
     #[test]
@@ -1161,15 +1189,15 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Read tool should not set the marker
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "validation"]),
             r#"{"tool_name": "Read", "tool_input": {"file_path": "src/main.rs"}}"#,
         );
 
         std::env::set_current_dir(original_dir).unwrap();
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(messages[0].contains("allow"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(output.stderr[0].contains("allow"));
         // Should NOT set the needs_validation marker
         assert!(!crate::session::needs_validation(dir_path));
     }
@@ -1177,77 +1205,77 @@ mod tests {
     #[test]
     fn test_run_protect_config_via_cli() {
         // Write to normal file should be allowed
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "protect-config"]),
             r#"{"tool_name": "Write", "tool_input": {"file_path": "src/main.rs"}}"#,
         );
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("allow"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("allow"));
     }
 
     #[test]
     fn test_run_protect_config_blocks_config_write() {
         // Write to config file should be blocked
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "protect-config"]),
             r#"{"tool_name": "Write", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
         );
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("block"));
-        assert!(messages[0].contains("Protected File"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("block"));
+        assert!(output.stderr[0].contains("Protected File"));
     }
 
     #[test]
     fn test_run_protect_config_blocks_config_edit() {
         // Edit to config file should be blocked
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "protect-config"]),
             r#"{"tool_name": "Edit", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
         );
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("block"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("block"));
     }
 
     #[test]
     fn test_run_protect_config_blocks_config_delete() {
         // rm command targeting config should be blocked
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "protect-config"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "rm .claude/reliability-config.yaml"}}"#,
         );
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("block"));
-        assert!(messages[0].contains("Deletion Blocked"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("block"));
+        assert!(output.stderr[0].contains("Deletion Blocked"));
     }
 
     #[test]
     fn test_run_protect_config_allows_read() {
         // Read should be allowed
-        let (code, messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "protect-config"]),
             r#"{"tool_name": "Read", "tool_input": {"file_path": ".claude/reliability-config.yaml"}}"#,
         );
 
-        assert_eq!(code, ExitCode::SUCCESS);
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("allow"));
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("allow"));
     }
 
     #[test]
     fn test_run_protect_config_invalid_json() {
-        let (code, messages) = run(&args(&["prog", "pre-tool-use", "protect-config"]), "not json");
+        let output = run(&args(&["prog", "pre-tool-use", "protect-config"]), "not json");
 
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Failed to parse"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Failed to parse"));
     }
 
     #[test]
@@ -1269,14 +1297,14 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, messages) = run(&args(&["prog", "ensure-config"]), "");
+        let output = run(&args(&["prog", "ensure-config"]), "");
 
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should return error because .claude can't be created as a directory
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Error ensuring config"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Error ensuring config"));
     }
 
     #[test]
@@ -1294,14 +1322,14 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, messages) = run(&args(&["prog", "ensure-gitignore"]), "");
+        let output = run(&args(&["prog", "ensure-gitignore"]), "");
 
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should return error because .gitignore can't be written
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Error updating .gitignore"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Error updating .gitignore"));
     }
 
     #[test]
@@ -1329,7 +1357,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir_path).unwrap();
 
-        let (code, messages) = run(&args(&["prog", "user-prompt-submit"]), "");
+        let output = run(&args(&["prog", "user-prompt-submit"]), "");
 
         // Restore permissions before cleanup
         let mut perms = std::fs::metadata(&claude_dir).unwrap().permissions();
@@ -1340,9 +1368,9 @@ mod tests {
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should return error because file operations fail
-        assert_eq!(code, ExitCode::from(1));
-        assert!(!messages.is_empty());
-        assert!(messages[0].contains("Error running user-prompt-submit hook"));
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("Error running user-prompt-submit hook"));
     }
 
     #[test]
@@ -1363,15 +1391,15 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Run stop command - it should fall back to defaults and continue
-        let (code, messages) = run(&args(&["prog", "stop"]), "{}");
+        let output = run(&args(&["prog", "stop"]), "{}");
 
         std::env::set_current_dir(original_dir).unwrap();
 
         // Should succeed (with warning about config, handled gracefully)
         // The stop command should still work with defaults
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
         // At minimum it should process and not crash
-        assert!(!messages.is_empty() || code == ExitCode::SUCCESS);
+        assert!(!output.stderr.is_empty() || output.exit_code == ExitCode::SUCCESS);
     }
 
     #[test]
@@ -1391,7 +1419,7 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Run no_verify - should work even if config fails
-        let (code, _messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "no-verify"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "ls"}}"#,
         );
@@ -1400,7 +1428,7 @@ mod tests {
 
         // Should succeed (warning logged but not affecting return)
         // The hook processes successfully even if config can't be ensured
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
     }
 
     #[test]
@@ -1420,7 +1448,7 @@ mod tests {
         std::env::set_current_dir(dir_path).unwrap();
 
         // Run code_review - should work even if config fails
-        let (code, _messages) = run(
+        let output = run(
             &args(&["prog", "pre-tool-use", "code-review"]),
             r#"{"tool_name": "Bash", "tool_input": {"command": "echo hello"}}"#,
         );
@@ -1429,6 +1457,80 @@ mod tests {
 
         // Should succeed (warning logged but hook still works)
         // The hook processes successfully even if config can't be ensured
-        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stop_with_explain_stops_outputs_json_system_message() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Create a temporary git repo
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Initialize git repo
+        Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
+
+        // Configure git user for commits
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir_path)
+            .output()
+            .unwrap();
+
+        // Create initial commit so we have a valid repo state
+        std::fs::write(dir_path.join("README.md"), "test").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(dir_path).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir_path)
+            .output()
+            .unwrap();
+
+        // Create .gitignore to ignore .claude/
+        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
+        Command::new("git").args(["add", ".gitignore"]).current_dir(dir_path).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add gitignore"])
+            .current_dir(dir_path)
+            .output()
+            .unwrap();
+
+        // Create config with explain_stops: true
+        let claude_dir = dir_path.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("reliability-config.yaml"),
+            "git_repo: true\nexplain_stops: true\n",
+        )
+        .unwrap();
+
+        // Change to temp dir, run the stop command, then change back
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Run stop command with empty transcript (triggers "clean git repo" explanation)
+        let output = run(&args(&["prog", "stop"]), "{}");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed and output JSON with systemMessage to stdout
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert!(!output.stdout.is_empty(), "Expected stdout to contain JSON output");
+        assert!(output.stderr.is_empty(), "Expected stderr to be empty");
+
+        // Verify the output is valid JSON with systemMessage
+        let json: serde_json::Value =
+            serde_json::from_str(&output.stdout[0]).expect("Output should be valid JSON");
+        assert!(json.get("systemMessage").is_some(), "JSON should contain systemMessage field");
+        let message = json["systemMessage"].as_str().unwrap();
+        assert!(message.contains("[Stop permitted:"), "should contain stop explanation");
     }
 }
