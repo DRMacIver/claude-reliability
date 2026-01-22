@@ -19,8 +19,17 @@ fn main() -> ExitCode {
 
     let (exit_code, messages) = claude_reliability::cli::run(&args, &stdin);
 
-    for msg in messages {
-        eprintln!("{msg}");
+    // stdout = shown to user, stderr = shown to LLM as feedback
+    // When stop is allowed (exit 0), messages are for the user (stdout)
+    // When stop is blocked (exit non-0), messages are feedback to LLM (stderr)
+    if exit_code == ExitCode::SUCCESS {
+        for msg in messages {
+            println!("{msg}");
+        }
+    } else {
+        for msg in messages {
+            eprintln!("{msg}");
+        }
     }
 
     exit_code
