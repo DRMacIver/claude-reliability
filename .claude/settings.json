@@ -1,6 +1,0 @@
-{
-  "enabledPlugins": {
-    "plugin-dev@claude-code-plugins": true,
-    "claude-reliability@claude-reliability-marketplace": true
-  }
-}
