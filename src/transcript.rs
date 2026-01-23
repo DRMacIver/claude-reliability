@@ -167,21 +167,34 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                 // Reset modifying tool use tracking when we see a user message
                 info.has_modifying_tool_use_since_user = false;
 
+                // Check if this is a compaction event (not a real user message)
+                let is_compaction = entry.message.as_ref().is_some_and(|m| {
+                    if let MessageContent::Text(text) = &m.content {
+                        is_compaction_message(text)
+                    } else {
+                        false
+                    }
+                });
+
                 // Capture user message content
                 if let Some(message) = &entry.message {
                     if let MessageContent::Text(text) = &message.content {
-                        // Capture first user message
-                        if info.first_user_message.is_none() {
+                        // Capture first user message (excluding compaction)
+                        if info.first_user_message.is_none() && !is_compaction {
                             info.first_user_message = Some(text.clone());
                         }
-                        // Always update last user message
-                        info.last_user_message = Some(text.clone());
+                        // Always update last user message (excluding compaction)
+                        if !is_compaction {
+                            info.last_user_message = Some(text.clone());
+                        }
                     }
                 }
-                // Parse timestamp
-                if let Some(ts_str) = &entry.timestamp {
-                    if let Ok(ts) = parse_timestamp(ts_str) {
-                        info.last_user_message_time = Some(ts);
+                // Parse timestamp (only for real user messages, not compaction events)
+                if !is_compaction {
+                    if let Some(ts_str) = &entry.timestamp {
+                        if let Ok(ts) = parse_timestamp(ts_str) {
+                            info.last_user_message_time = Some(ts);
+                        }
                     }
                 }
             }
@@ -226,6 +239,14 @@ fn is_api_error_text(entry: &TranscriptEntry) -> bool {
         }
     }
     false
+}
+
+/// Check if a message is a compaction event rather than a real user message.
+///
+/// Compaction events are system-generated messages that appear as user messages
+/// but should not be counted for user activity tracking.
+fn is_compaction_message(text: &str) -> bool {
+    text.starts_with("This session is being continued from a previous conversation")
 }
 
 /// Parse an ISO 8601 timestamp.
@@ -279,7 +300,7 @@ pub fn is_simple_question(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -855,5 +876,70 @@ also not json
         let info = parse_transcript(file.path()).unwrap();
         // Should parse successfully, with no output (empty content)
         assert_eq!(info.last_assistant_output, None);
+    }
+
+    #[test]
+    fn test_is_compaction_message_true() {
+        assert!(is_compaction_message(
+            "This session is being continued from a previous conversation that ran out of context."
+        ));
+        assert!(is_compaction_message(
+            "This session is being continued from a previous conversation. The summary below..."
+        ));
+    }
+
+    #[test]
+    fn test_is_compaction_message_false() {
+        assert!(!is_compaction_message("Hello, how are you?"));
+        assert!(!is_compaction_message("Please continue working"));
+        assert!(!is_compaction_message("What is the session status?"));
+    }
+
+    #[test]
+    fn test_compaction_message_not_counted_for_user_activity() {
+        // Compaction event followed by real user message
+        let content = r#"{"type": "user", "timestamp": "2024-01-01T10:00:00Z", "message": {"content": "This session is being continued from a previous conversation that ran out of context."}}
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Hello!"}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // Should capture the REAL user message timestamp (12:00), not compaction (10:00)
+        let ts = info.last_user_message_time.unwrap();
+        assert_eq!(ts.hour(), 12);
+        // First/last user message should also exclude compaction
+        assert_eq!(info.first_user_message, Some("Hello!".to_string()));
+        assert_eq!(info.last_user_message, Some("Hello!".to_string()));
+    }
+
+    #[test]
+    fn test_compaction_only_no_real_user_messages() {
+        // Only compaction event, no real user messages
+        let content = r#"{"type": "user", "timestamp": "2024-01-01T10:00:00Z", "message": {"content": "This session is being continued from a previous conversation that ran out of context."}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I understand."}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // No real user messages, so these should be None
+        assert!(info.last_user_message_time.is_none());
+        assert!(info.first_user_message.is_none());
+        assert!(info.last_user_message.is_none());
+    }
+
+    #[test]
+    fn test_compaction_between_real_messages() {
+        // Real message, then compaction, then another real message
+        let content = r#"{"type": "user", "timestamp": "2024-01-01T10:00:00Z", "message": {"content": "First message"}}
+{"type": "user", "timestamp": "2024-01-01T11:00:00Z", "message": {"content": "This session is being continued from a previous conversation that ran out of context."}}
+{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Second real message"}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        // First user message should be "First message"
+        assert_eq!(info.first_user_message, Some("First message".to_string()));
+        // Last user message should be "Second real message" (not compaction)
+        assert_eq!(info.last_user_message, Some("Second real message".to_string()));
+        // Timestamp should be from "Second real message" (12:00)
+        let ts = info.last_user_message_time.unwrap();
+        assert_eq!(ts.hour(), 12);
     }
 }
