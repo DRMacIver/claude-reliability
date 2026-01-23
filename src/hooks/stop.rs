@@ -209,6 +209,7 @@ pub fn run_stop_hook(
     // Fast path: simple Q&A exchange
     // If the last user message is a simple question and no modifications were made
     // since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
+    // This allows the agent to ask clarifying questions even if tasks are requested.
     if !transcript_info.has_modifying_tool_use_since_user {
         if let Some(ref last_user_msg) = transcript_info.last_user_message {
             if is_simple_question(last_user_msg) {
@@ -298,6 +299,14 @@ pub fn run_stop_hook(
                 templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
                     .expect("problem_mode_activated.tera template should always render");
             return Ok(StopHookResult::block().with_message(message));
+        }
+
+        // Check for incomplete requested tasks (only if modifying work was done)
+        // Simple Q&A (no modifying tools) should still be allowed
+        if transcript_info.has_modifying_tool_use {
+            if let Some(result) = check_incomplete_requested_tasks(config) {
+                return Ok(result);
+            }
         }
 
         // Handle "work complete" phrase
@@ -460,6 +469,11 @@ pub fn run_stop_hook(
         // Agent already got the reflection prompt and is stopping again - allow it
         session::clear_reflect_marker(base_dir)?;
 
+        // Check for incomplete requested tasks before allowing stop (work was done)
+        if let Some(result) = check_incomplete_requested_tasks(config) {
+            return Ok(result);
+        }
+
         // Check if we should prompt to work on open tasks before allowing stop
         if let Some(result) = check_auto_work_tasks(config, &transcript_info) {
             return Ok(result);
@@ -472,6 +486,8 @@ pub fn run_stop_hook(
     // Skip reflection if agent is asking a question (waiting for user input)
     // This check is separate from check_interactive_question because that function
     // also checks user recency, but we want to skip reflection regardless of recency
+    // Note: incomplete requested tasks are checked earlier in the bypass phrase block (line 305-308)
+    // so we don't need to check again here
     if let Some(ref output) = transcript_info.last_assistant_output {
         if looks_like_question(output) {
             return Ok(StopHookResult::allow()
@@ -551,6 +567,43 @@ fn check_auto_work_tasks(
         .expect("auto_work_tasks.tera template should always render");
 
     Some(StopHookResult::block().with_message(message))
+}
+
+/// Check if there are incomplete requested tasks that block stopping.
+///
+/// Returns Some(block result) if there are incomplete requested tasks, None otherwise.
+/// A task is considered "incomplete" if it's requested and not complete/abandoned,
+/// unless it's blocked only on an unanswered question.
+fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookResult> {
+    let incomplete = tasks::get_incomplete_requested_tasks(config.base_dir());
+
+    if incomplete.is_empty() {
+        // No incomplete requested tasks - also clear request mode since all are done
+        tasks::clear_request_mode(config.base_dir());
+        return None;
+    }
+
+    let mut result = StopHookResult::block()
+        .with_message("# Requested Tasks Incomplete")
+        .with_message("")
+        .with_message(
+            "The following tasks were requested by the user and must be completed before stopping:",
+        )
+        .with_message("");
+
+    for (id, title, status) in &incomplete {
+        result = result.with_message(format!("- [{status}] {id}: {title}"));
+    }
+
+    result = result
+        .with_message("")
+        .with_message("Please complete these tasks or, if blocked, link them to questions explaining the blocker.")
+        .with_message("")
+        .with_message("If you've hit a problem you cannot solve without user input:")
+        .with_message("")
+        .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
+
+    Some(result)
 }
 
 /// Check if the assistant's last message is asking about committing or pushing.
@@ -3187,5 +3240,373 @@ mod tests {
 
         // Should still allow (git is clean) but via normal path
         assert!(result.allow_stop);
+    }
+
+    // ========== Requested Tasks Tests ==========
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_none() {
+        let dir = TempDir::new().unwrap();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // No tasks - should return None
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_blocks() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create a task store and request a task
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Important task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // Should block because there's an incomplete requested task
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+        assert!(result.messages.iter().any(|m| m.contains("Important task")));
+    }
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_completed_allows() {
+        use crate::tasks::{Priority, SqliteTaskStore, Status, TaskStore, TaskUpdate};
+
+        let dir = TempDir::new().unwrap();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create a task store, request a task, and complete it
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task to complete", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // Should allow because task is completed
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_blocked_on_question_allows() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create a task store, request a task, and block it with a question
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task blocked by question", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+        let question = store.create_question("What should I do?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // Should allow because task is blocked on a question
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_clears_request_mode() {
+        use crate::tasks::{Priority, SqliteTaskStore, Status, TaskStore, TaskUpdate};
+
+        let dir = TempDir::new().unwrap();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create a task store with request mode active
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "", Priority::High).unwrap();
+        store.request_all_open().unwrap();
+        assert!(store.is_request_mode_active().unwrap());
+
+        // Complete the task
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // Check should return None (allow) and clear request mode
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_none());
+
+        // Request mode should now be cleared
+        assert!(!store.is_request_mode_active().unwrap());
+    }
+
+    #[test]
+    fn test_run_stop_hook_blocks_with_incomplete_requested_tasks() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Set up git to have uncommitted changes
+        let runner = mock_uncommitted_changes();
+        let sub_agent = MockSubAgent::new();
+
+        // Create a transcript with modifying tool use and assistant output
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I made some changes."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because there's an incomplete requested task
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+    }
+
+    /// Create a mock that returns no uncommitted changes but IS ahead of remote.
+    /// This allows skipping the fast path at line 283 (because we're ahead)
+    /// while also skipping `handle_uncommitted_changes` (because no changes).
+    fn mock_no_changes_but_ahead() -> MockCommandRunner {
+        let mut runner = MockCommandRunner::new();
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let ahead_of_remote =
+            CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+
+        // First check_uncommitted_changes (fast path check at line 281)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            ahead_of_remote.clone(),
+        );
+
+        // Second check_uncommitted_changes (at line 420)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], ahead_of_remote);
+
+        runner
+    }
+
+    #[test]
+    fn test_run_stop_hook_blocks_after_reflection_with_incomplete_requested_tasks() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Set the reflection marker (simulating a second stop after work)
+        session::set_reflect_marker(base).unwrap();
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Mock git: no changes but ahead of remote (skips fast path AND handle_uncommitted_changes)
+        // require_push is false by default, so we won't block on unpushed commits
+        let runner = mock_no_changes_but_ahead();
+        let sub_agent = MockSubAgent::new();
+
+        let input = crate::hooks::HookInput::default();
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because there's an incomplete requested task
+        assert!(
+            !result.allow_stop,
+            "Expected stop to be blocked but got allow. Messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
+            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages
+        );
+
+        // Reflection marker should be cleared because we went through the reflection path
+        assert!(!session::has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_run_stop_hook_blocks_when_asking_question_with_modifying_tools_and_requested_tasks() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Set up git to have uncommitted changes
+        let runner = mock_uncommitted_changes();
+        let sub_agent = MockSubAgent::new();
+
+        // Transcript: agent has done modifying work and is now asking a question
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I made some changes. What should I do next?"}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because there's an incomplete requested task and modifying work was done
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+    }
+
+    #[test]
+    fn test_run_stop_hook_blocks_on_question_path_with_requested_tasks() {
+        // This test specifically covers line 492: the question check path (line 487-494)
+        // which is AFTER the reflection marker check, reached when:
+        // 1. git_repo = false (skip all git checks)
+        // 2. No reflection marker set
+        // 3. Agent output looks like a question
+        // 4. Has modifying tool use
+        // 5. Has incomplete requested tasks
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // No git repo - skip all git checks
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+
+        // Transcript: agent has done modifying work and is asking a question
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "What should I do next?"}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        // git_repo = false to skip all git-related checks
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because there's an incomplete requested task
+        assert!(
+            !result.allow_stop,
+            "Expected stop to be blocked but got allow. Messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
+            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages
+        );
     }
 }

@@ -140,6 +140,26 @@ pub trait TaskStore {
 
     /// Get all tasks that are currently in progress.
     fn get_in_progress_tasks(&self) -> Result<Vec<Task>>;
+
+    // Request mode operations
+
+    /// Mark multiple tasks as requested (bulk operation).
+    fn request_tasks(&self, task_ids: &[&str]) -> Result<usize>;
+
+    /// Mark all open tasks as requested and enable request mode.
+    /// When request mode is active, newly created tasks are automatically requested.
+    fn request_all_open(&self) -> Result<usize>;
+
+    /// Check if request mode is currently active.
+    fn is_request_mode_active(&self) -> Result<bool>;
+
+    /// Clear request mode (called when stop is allowed).
+    fn clear_request_mode(&self) -> Result<()>;
+
+    /// Get all incomplete requested tasks (for stop hook).
+    /// Returns tasks that are requested but not complete/abandoned, and not blocked on questions.
+    /// Also includes tasks that are dependencies of requested tasks (transitive).
+    fn get_incomplete_requested_tasks(&self) -> Result<Vec<Task>>;
 }
 
 /// Fields that can be updated on a task.
@@ -155,6 +175,8 @@ pub struct TaskUpdate {
     pub status: Option<Status>,
     /// New `in_progress` flag (if Some).
     pub in_progress: Option<bool>,
+    /// New `requested` flag (if Some).
+    pub requested: Option<bool>,
 }
 
 impl TaskUpdate {
@@ -166,6 +188,7 @@ impl TaskUpdate {
             && self.priority.is_none()
             && self.status.is_none()
             && self.in_progress.is_none()
+            && self.requested.is_none()
     }
 }
 
@@ -508,6 +531,16 @@ impl SqliteTaskStore {
             )?;
         }
 
+        // Migration: add requested column if it doesn't exist (for existing databases)
+        let has_requested: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('tasks') WHERE name = 'requested'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_requested {
+            conn.execute("ALTER TABLE tasks ADD COLUMN requested INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+
         // Sync built-in how-tos
         crate::tasks::builtin_howtos::sync_builtin_howtos(&conn)?;
 
@@ -558,6 +591,7 @@ impl SqliteTaskStore {
         let priority_val: u8 = row.get(3)?;
         let status_str: String = row.get(4)?;
         let in_progress_val: i64 = row.get(5)?;
+        let requested_val: i64 = row.get(6)?;
 
         Ok(Task {
             id: row.get(0)?,
@@ -566,8 +600,9 @@ impl SqliteTaskStore {
             priority: Priority::from_u8(priority_val).unwrap_or(Priority::Medium),
             status: Status::from_str(&status_str).unwrap_or(Status::Open),
             in_progress: in_progress_val != 0,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            requested: requested_val != 0,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     }
 
@@ -637,6 +672,39 @@ impl SqliteTaskStore {
 
         Ok(())
     }
+
+    /// Check if request mode is active (internal helper that takes a connection).
+    fn is_request_mode_active_internal(conn: &Connection) -> bool {
+        conn.query_row("SELECT value FROM metadata WHERE key = 'request_mode_active'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .is_some_and(|v| v == "true")
+    }
+
+    /// Get all task IDs that are dependencies of the given tasks (recursive).
+    fn get_transitive_dependencies(
+        conn: &Connection,
+        task_ids: &[String],
+    ) -> Result<HashSet<String>> {
+        let mut all_deps = HashSet::new();
+        let mut to_process: Vec<String> = task_ids.to_vec();
+
+        while let Some(task_id) = to_process.pop() {
+            let mut stmt =
+                conn.prepare("SELECT depends_on FROM task_dependencies WHERE task_id = ?1")?;
+            let deps: Vec<String> =
+                stmt.query_map(params![&task_id], |row| row.get(0))?.flatten().collect();
+
+            for dep in deps {
+                if all_deps.insert(dep.clone()) {
+                    to_process.push(dep);
+                }
+            }
+        }
+
+        Ok(all_deps)
+    }
 }
 
 impl TaskStore for SqliteTaskStore {
@@ -644,13 +712,16 @@ impl TaskStore for SqliteTaskStore {
         let conn = self.open()?;
         let id = generate_task_id(title);
 
+        // Check if request mode is active - if so, auto-request new tasks
+        let request_mode_active = Self::is_request_mode_active_internal(&conn);
+
         conn.execute(
-            "INSERT INTO tasks (id, title, description, priority) VALUES (?1, ?2, ?3, ?4)",
-            params![&id, title, description, priority.as_u8()],
+            "INSERT INTO tasks (id, title, description, priority, requested) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&id, title, description, priority.as_u8(), i32::from(request_mode_active)],
         )?;
 
         let task = conn.query_row(
-            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks WHERE id = ?1",
             params![&id],
             Self::parse_task,
@@ -666,7 +737,7 @@ impl TaskStore for SqliteTaskStore {
         let conn = self.open()?;
         let task = conn
             .query_row(
-                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -685,7 +756,7 @@ impl TaskStore for SqliteTaskStore {
         // Get current task for audit log
         let old_task: Option<Task> = conn
             .query_row(
-                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -724,6 +795,10 @@ impl TaskStore for SqliteTaskStore {
             updates.push("in_progress = ?");
             values.push(Box::new(i32::from(in_progress)));
         }
+        if let Some(requested) = update.requested {
+            updates.push("requested = ?");
+            values.push(Box::new(i32::from(requested)));
+        }
 
         values.push(Box::new(id.to_string()));
 
@@ -734,7 +809,7 @@ impl TaskStore for SqliteTaskStore {
 
         // Get updated task
         let new_task = conn.query_row(
-            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks WHERE id = ?1",
             params![id],
             Self::parse_task,
@@ -759,7 +834,7 @@ impl TaskStore for SqliteTaskStore {
         // Get task for audit log
         let task: Option<Task> = conn
             .query_row(
-                "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+                "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::parse_task,
@@ -839,7 +914,7 @@ impl TaskStore for SqliteTaskStore {
         };
 
         let sql = format!(
-            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks {where_clause}
              ORDER BY priority ASC, created_at ASC"
         );
@@ -1593,7 +1668,7 @@ impl TaskStore for SqliteTaskStore {
         // 3. Are NOT blocked by incomplete dependencies
         let mut stmt = conn.prepare(
             "SELECT DISTINCT t.id, t.title, t.description, t.priority, t.status,
-                    t.in_progress, t.created_at, t.updated_at
+                    t.in_progress, t.requested, t.created_at, t.updated_at
              FROM tasks t
              JOIN task_questions tq ON t.id = tq.task_id
              JOIN questions q ON tq.question_id = q.id
@@ -1623,13 +1698,178 @@ impl TaskStore for SqliteTaskStore {
     fn get_in_progress_tasks(&self) -> Result<Vec<Task>> {
         let conn = self.open()?;
         let mut stmt = conn.prepare(
-            "SELECT id, title, description, priority, status, in_progress, created_at, updated_at
+            "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks
              WHERE in_progress = 1
              ORDER BY priority, created_at",
         )?;
         let tasks: Vec<Task> = stmt.query_map([], Self::parse_task)?.flatten().collect();
         Ok(tasks)
+    }
+
+    fn request_tasks(&self, task_ids: &[&str]) -> Result<usize> {
+        if task_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self.open()?;
+
+        // Build IN clause with placeholders
+        let placeholders: Vec<&str> = task_ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "UPDATE tasks SET requested = 1, updated_at = datetime('now') WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let params: Vec<&dyn rusqlite::ToSql> =
+            task_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let updated = conn.execute(&sql, params.as_slice())?;
+
+        // Log audit for each task
+        for task_id in task_ids {
+            Self::log_audit(
+                &conn,
+                "request",
+                Some(task_id),
+                None,
+                None,
+                Some("marked as requested"),
+            )?;
+        }
+
+        Ok(updated)
+    }
+
+    fn request_all_open(&self) -> Result<usize> {
+        let conn = self.open()?;
+
+        // Mark all open/stuck tasks as requested
+        let updated = conn.execute(
+            "UPDATE tasks SET requested = 1, updated_at = datetime('now')
+             WHERE status IN ('open', 'stuck', 'blocked')",
+            [],
+        )?;
+
+        // Enable request mode for future tasks
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('request_mode_active', 'true')",
+            [],
+        )?;
+
+        Self::log_audit(&conn, "request_all", None, None, None, Some("enabled request mode"))?;
+
+        Ok(updated)
+    }
+
+    fn is_request_mode_active(&self) -> Result<bool> {
+        let conn = self.open()?;
+        Ok(Self::is_request_mode_active_internal(&conn))
+    }
+
+    fn clear_request_mode(&self) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute("DELETE FROM metadata WHERE key = 'request_mode_active'", [])?;
+        Self::log_audit(
+            &conn,
+            "clear_request_mode",
+            None,
+            None,
+            None,
+            Some("disabled request mode"),
+        )?;
+        Ok(())
+    }
+
+    fn get_incomplete_requested_tasks(&self) -> Result<Vec<Task>> {
+        let conn = self.open()?;
+
+        // First, get all directly requested incomplete tasks
+        let mut stmt = conn.prepare(
+            "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
+             FROM tasks
+             WHERE requested = 1
+               AND status NOT IN ('complete', 'abandoned')
+             ORDER BY priority, created_at",
+        )?;
+        let direct_requested: Vec<Task> = stmt.query_map([], Self::parse_task)?.flatten().collect();
+
+        if direct_requested.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Get task IDs
+        let task_ids: Vec<String> = direct_requested.iter().map(|t| t.id.clone()).collect();
+
+        // Get transitive dependencies (tasks that requested tasks depend on)
+        let dep_ids = Self::get_transitive_dependencies(&conn, &task_ids)?;
+
+        // Filter to incomplete dependencies that are not blocked on questions
+        let mut result: Vec<Task> = direct_requested
+            .into_iter()
+            .filter(|t| !Self::is_blocked_on_question_only(&conn, &t.id))
+            .collect();
+
+        // Add incomplete dependencies (treating them as transitively requested)
+        for dep_id in dep_ids {
+            let task = conn
+                .query_row(
+                    "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
+                     FROM tasks WHERE id = ?1",
+                    params![&dep_id],
+                    Self::parse_task,
+                )
+                .optional()?;
+
+            if let Some(task) = task {
+                // Include if incomplete and not blocked on a question
+                if !matches!(task.status, Status::Complete | Status::Abandoned)
+                    && !Self::is_blocked_on_question_only(&conn, &task.id)
+                    && !result.iter().any(|t| t.id == task.id)
+                {
+                    result.push(task);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl SqliteTaskStore {
+    /// Check if a task is blocked only by unanswered questions (not by dependencies).
+    fn is_blocked_on_question_only(conn: &Connection, task_id: &str) -> bool {
+        // Check if task has unanswered questions
+        let has_unanswered_questions: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM task_questions tq
+                    JOIN questions q ON tq.question_id = q.id
+                    WHERE tq.task_id = ?1 AND q.answer IS NULL
+                )",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !has_unanswered_questions {
+            return false;
+        }
+
+        // Check if task has incomplete dependencies (other than questions)
+        let has_incomplete_deps: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM task_dependencies d
+                    JOIN tasks t ON d.depends_on = t.id
+                    WHERE d.task_id = ?1 AND t.status NOT IN ('complete', 'abandoned')
+                )",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        // Blocked on question only if has questions but no other blockers
+        !has_incomplete_deps
     }
 }
 
@@ -2801,5 +3041,228 @@ mod tests {
         // Answering a nonexistent question should return None
         let result = store.answer_question("nonexistent-question-1234", "An answer").unwrap();
         assert!(result.is_none());
+    }
+
+    // ========== Requested Tasks Tests ==========
+
+    #[test]
+    fn test_request_tasks() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task1 = store.create_task("Task 1", "", Priority::High).unwrap();
+        let task2 = store.create_task("Task 2", "", Priority::Medium).unwrap();
+        let _task3 = store.create_task("Task 3", "", Priority::Low).unwrap();
+
+        // Initially, no tasks are requested
+        assert!(!task1.requested);
+        assert!(!task2.requested);
+
+        // Request specific tasks
+        let updated = store.request_tasks(&[&task1.id, &task2.id]).unwrap();
+        assert_eq!(updated, 2);
+
+        // Verify tasks are now requested
+        let t1 = store.get_task(&task1.id).unwrap().unwrap();
+        let t2 = store.get_task(&task2.id).unwrap().unwrap();
+        assert!(t1.requested);
+        assert!(t2.requested);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_request_tasks_empty() {
+        let (_dir, store) = create_test_store();
+
+        // Requesting empty list should return 0
+        let updated = store.request_tasks(&[]).unwrap();
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn test_request_all_open() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task1 = store.create_task("Open task", "", Priority::High).unwrap();
+        let task2 = store.create_task("Another open task", "", Priority::Medium).unwrap();
+        store
+            .update_task(
+                &task2.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        // Request all open tasks
+        let updated = store.request_all_open().unwrap();
+        assert_eq!(updated, 1); // Only task1 is open
+
+        // Verify request mode is active
+        assert!(store.is_request_mode_active().unwrap());
+
+        // Verify task1 is requested, task2 is not
+        let t1 = store.get_task(&task1.id).unwrap().unwrap();
+        let t2 = store.get_task(&task2.id).unwrap().unwrap();
+        assert!(t1.requested);
+        assert!(!t2.requested);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_clear_request_mode() {
+        let (_dir, store) = create_test_store();
+
+        // Enable request mode
+        store.request_all_open().unwrap();
+        assert!(store.is_request_mode_active().unwrap());
+
+        // Clear request mode
+        store.clear_request_mode().unwrap();
+        assert!(!store.is_request_mode_active().unwrap());
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task1 = store.create_task("Requested open", "", Priority::High).unwrap();
+        let task2 = store.create_task("Requested complete", "", Priority::Medium).unwrap();
+        let task3 = store.create_task("Not requested", "", Priority::Low).unwrap();
+
+        // Request task1 and task2
+        store.request_tasks(&[&task1.id, &task2.id]).unwrap();
+
+        // Complete task2
+        store
+            .update_task(
+                &task2.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        // Get incomplete requested tasks
+        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+
+        // Only task1 should be returned (open and requested)
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].id, task1.id);
+
+        // task3 is not requested, so it shouldn't be in the list
+        assert!(!incomplete.iter().any(|t| t.id == task3.id));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_transitive() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        // Create a chain: task1 depends on task2, task2 depends on task3
+        let task3 = store.create_task("Dependency 2", "", Priority::Low).unwrap();
+        let task2 = store.create_task("Dependency 1", "", Priority::Medium).unwrap();
+        let task1 = store.create_task("Main task", "", Priority::High).unwrap();
+
+        store.add_dependency(&task1.id, &task2.id).unwrap();
+        store.add_dependency(&task2.id, &task3.id).unwrap();
+
+        // Only request task1
+        store.request_tasks(&[&task1.id]).unwrap();
+
+        // Get incomplete requested tasks - should include task2 and task3 transitively
+        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+
+        assert_eq!(incomplete.len(), 3);
+        let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&task1.id.as_str()));
+        assert!(ids.contains(&task2.id.as_str()));
+        assert!(ids.contains(&task3.id.as_str()));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_blocked_on_question() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task1 = store.create_task("Task with question", "", Priority::High).unwrap();
+        let task2 = store.create_task("Normal task", "", Priority::Medium).unwrap();
+
+        // Request both tasks
+        store.request_tasks(&[&task1.id, &task2.id]).unwrap();
+
+        // Block task1 with an unanswered question
+        let question = store.create_question("What should I do?").unwrap();
+        store.link_task_to_question(&task1.id, &question.id).unwrap();
+
+        // Get incomplete requested tasks - task1 should be excluded (blocked on question)
+        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].id, task2.id);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_blocked_on_question_and_dep() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task1 = store.create_task("Task with question and dep", "", Priority::High).unwrap();
+        let task2 = store.create_task("Dependency task", "", Priority::Medium).unwrap();
+
+        // Create dependency
+        store.add_dependency(&task1.id, &task2.id).unwrap();
+
+        // Request task1
+        store.request_tasks(&[&task1.id]).unwrap();
+
+        // Block task1 with an unanswered question
+        let question = store.create_question("What should I do?").unwrap();
+        store.link_task_to_question(&task1.id, &question.id).unwrap();
+
+        // Get incomplete requested tasks
+        // task1 has both a question AND a dependency, so it's NOT blocked on question only
+        // task2 is a transitive dependency
+        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+
+        assert_eq!(incomplete.len(), 2);
+        let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&task1.id.as_str()));
+        assert!(ids.contains(&task2.id.as_str()));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_update_task_requested_field() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        let task = store.create_task("Task", "", Priority::Medium).unwrap();
+        assert!(!task.requested);
+
+        // Update via TaskUpdate
+        store
+            .update_task(&task.id, TaskUpdate { requested: Some(true), ..Default::default() })
+            .unwrap();
+
+        let updated = store.get_task(&task.id).unwrap().unwrap();
+        assert!(updated.requested);
+
+        // Set back to false
+        store
+            .update_task(&task.id, TaskUpdate { requested: Some(false), ..Default::default() })
+            .unwrap();
+
+        let updated = store.get_task(&task.id).unwrap().unwrap();
+        assert!(!updated.requested);
+
+        disable_deterministic_ids();
     }
 }

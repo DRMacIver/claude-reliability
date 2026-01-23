@@ -120,6 +120,47 @@ pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
     store.list_questions(true).unwrap_or_default()
 }
 
+/// Get incomplete requested tasks.
+///
+/// Returns a list of `(task_id, task_title, status)` tuples for tasks that:
+/// - Are requested by the user (directly or transitively via dependencies)
+/// - Are not complete or abandoned
+/// - Are not blocked only by unanswered questions
+///
+/// Returns empty vec if database doesn't exist or on any error.
+#[must_use]
+pub fn get_incomplete_requested_tasks(base_dir: &Path) -> Vec<(String, String, String)> {
+    let db_path = paths::project_db_path(base_dir);
+    if !db_path.exists() {
+        return Vec::new();
+    }
+
+    let Ok(store) = SqliteTaskStore::new(&db_path) else {
+        return Vec::new();
+    };
+
+    store
+        .get_incomplete_requested_tasks()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.id, t.title, t.status.as_str().to_string()))
+        .collect()
+}
+
+/// Clear request mode (called when all requested tasks are complete).
+///
+/// Does nothing if database doesn't exist or on any error.
+pub fn clear_request_mode(base_dir: &Path) {
+    let db_path = paths::project_db_path(base_dir);
+    if !db_path.exists() {
+        return;
+    }
+
+    if let Ok(store) = SqliteTaskStore::new(&db_path) {
+        let _ = store.clear_request_mode();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +369,80 @@ mod tests {
 
         let result = list_unanswered_questions(dir.path());
         assert!(result.is_empty());
+    }
+
+    // ========== Incomplete Requested Tasks Tests ==========
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_no_database() {
+        let dir = TempDir::new().unwrap();
+        let result = get_incomplete_requested_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_empty() {
+        let dir = TempDir::new().unwrap();
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let _store = SqliteTaskStore::new(&db_path).unwrap();
+
+        let result = get_incomplete_requested_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_with_tasks() {
+        let dir = TempDir::new().unwrap();
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        let task = store.create_task("Requested Task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        let result = get_incomplete_requested_tasks(dir.path());
+        assert_eq!(result.len(), 1);
+        let (id, title, status) = &result[0];
+        assert_eq!(id, &task.id);
+        assert_eq!(title, "Requested Task");
+        assert_eq!(status, "open");
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_tasks_corrupted_database() {
+        let dir = TempDir::new().unwrap();
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        std::fs::write(&db_path, "invalid database").unwrap();
+
+        let result = get_incomplete_requested_tasks(dir.path());
+        assert!(result.is_empty());
+    }
+
+    // ========== Clear Request Mode Tests ==========
+
+    #[test]
+    fn test_clear_request_mode_no_database() {
+        let dir = TempDir::new().unwrap();
+        // Should not panic
+        clear_request_mode(dir.path());
+    }
+
+    #[test]
+    fn test_clear_request_mode_clears() {
+        let dir = TempDir::new().unwrap();
+        let db_path = test_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.request_all_open().unwrap();
+        assert!(store.is_request_mode_active().unwrap());
+
+        clear_request_mode(dir.path());
+
+        assert!(!store.is_request_mode_active().unwrap());
     }
 }

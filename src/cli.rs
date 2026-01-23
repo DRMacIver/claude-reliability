@@ -552,10 +552,16 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_run_post_tool_use_via_cli() {
+        use crate::paths;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let original_dir = std::env::current_dir().unwrap();
+
+        // Set up the database directory (required for task creation)
+        let db_path = paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
         std::env::set_current_dir(dir.path()).unwrap();
 
         // Test with ExitPlanMode tool response

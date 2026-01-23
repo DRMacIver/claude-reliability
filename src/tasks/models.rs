@@ -140,6 +140,9 @@ pub struct Task {
     pub status: Status,
     /// Whether this task is currently being worked on.
     pub in_progress: bool,
+    /// Whether this task was explicitly requested by the user.
+    /// Requested tasks block the agent from stopping until complete or blocked on a question.
+    pub requested: bool,
     /// ISO 8601 timestamp when the task was created.
     pub created_at: String,
     /// ISO 8601 timestamp when the task was last updated.
@@ -315,6 +318,7 @@ mod tests {
             priority: Priority::Medium,
             status: Status::Open,
             in_progress: false,
+            requested: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
         };
@@ -343,6 +347,7 @@ mod tests {
             priority: Priority::High,
             status: Status::Open,
             in_progress: false,
+            requested: true,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
         };

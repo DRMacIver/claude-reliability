@@ -299,6 +299,13 @@ pub struct WorkOnInput {
     pub task_id: String,
 }
 
+/// Input for requesting specific tasks.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RequestTasksInput {
+    /// Task IDs to mark as requested.
+    pub task_ids: Vec<String>,
+}
+
 // Output types - defined at module level to avoid items_after_statements
 
 /// Task output representation.
@@ -311,6 +318,7 @@ struct TaskOutput {
     priority_label: &'static str,
     status: String,
     in_progress: bool,
+    requested: bool,
     created_at: String,
     updated_at: String,
     dependencies: Vec<String>,
@@ -327,6 +335,7 @@ impl TaskOutput {
             priority_label: priority_label(task.priority),
             status: task.status.as_str().to_string(),
             in_progress: task.in_progress,
+            requested: task.requested,
             created_at: task.created_at.clone(),
             updated_at: task.updated_at.clone(),
             dependencies: deps,
@@ -517,6 +526,7 @@ impl TasksServer {
             priority,
             status,
             in_progress: None,
+            requested: None,
         };
 
         let task = self
@@ -1172,6 +1182,71 @@ impl TasksServer {
                 input.task_id
             ))])),
         }
+    }
+
+    /// Mark specific tasks as requested by the user.
+    #[tool(
+        description = "Mark tasks as requested by the user. Requested tasks must be completed before the agent can stop."
+    )]
+    fn request_tasks(
+        &self,
+        #[tool(aggr)] input: RequestTasksInput,
+    ) -> Result<CallToolResult, McpError> {
+        let task_ids: Vec<&str> = input.task_ids.iter().map(String::as_str).collect();
+        let updated = self
+            .store
+            .request_tasks(&task_ids)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Marked {updated} task(s) as requested."
+        ))]))
+    }
+
+    /// Mark all open tasks as requested and enable request mode.
+    #[tool(
+        description = "Mark all open tasks as requested and enable request mode. New tasks will also be automatically requested until the agent successfully stops."
+    )]
+    fn request_all_open(&self) -> Result<CallToolResult, McpError> {
+        let updated = self
+            .store
+            .request_all_open()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Marked {updated} task(s) as requested. Request mode enabled - new tasks will be automatically requested."
+        ))]))
+    }
+
+    /// Get all incomplete requested tasks (tasks that must be completed before stopping).
+    #[tool(
+        description = "Get all incomplete requested tasks. These are tasks the user has requested that must be completed (or blocked on a question) before the agent can stop."
+    )]
+    fn get_incomplete_requested_tasks(&self) -> Result<CallToolResult, McpError> {
+        let tasks = self
+            .store
+            .get_incomplete_requested_tasks()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if tasks.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No incomplete requested tasks. The agent may stop when ready.".to_string(),
+            )]));
+        }
+
+        let output: Vec<TaskOutput> = tasks
+            .iter()
+            .map(|t| {
+                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
+                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
+                TaskOutput::from_task(t, deps, guidance)
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
