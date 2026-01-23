@@ -9,10 +9,10 @@
   "repository": "https://github.com/DRMacIver/claude-reliability",
   "license": "MIT",
   "keywords": ["reliability", "hooks", "quality", "code-review"],
-  "skills": "${CLAUDE_PLUGIN_ROOT}/skills/",
+  "skills": "./skills/",
   "mcpServers": {
     "tasks": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
+      "command": "./scripts/run-tasks-mcp.sh",
       "args": []
     }
   },
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh stop"
+            "command": "./scripts/hooks/hook.sh stop"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh user-prompt-submit"
+            "command": "./scripts/hooks/hook.sh user-prompt-submit"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh pre-tool-use"
+            "command": "./scripts/hooks/hook.sh pre-tool-use"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh post-tool-use"
+            "command": "./scripts/hooks/hook.sh post-tool-use"
           }
         ]
       }
