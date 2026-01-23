@@ -39,6 +39,7 @@
     ],
     "PreToolUse": [
       {
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -49,6 +50,7 @@
     ],
     "PostToolUse": [
       {
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
