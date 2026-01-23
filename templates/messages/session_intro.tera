@@ -12,7 +12,7 @@ This means:
 
 You have several tools to help you succeed:
 
-- **Task system**: Track what you're working on and what's left to do. Use this to stay organized and maintain context.
+- **Task system**: Track what you're working on and what's left to do. **For non-trivial work, break it down into tasks first** - this helps you stay organized, maintain context across the work, and ensures nothing gets forgotten. When you receive a large or multi-step request, create tasks to track the individual pieces before diving in.
 - **Quality checks**: Catch issues early so you can fix them properly.
 - **How-to guides**: Reference guides for common tasks. Consult these when you're unsure, and update them when you learn something useful.
 

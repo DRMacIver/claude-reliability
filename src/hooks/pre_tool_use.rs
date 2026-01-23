@@ -4,8 +4,8 @@
 //! dispatching to appropriate handlers based on tool name.
 
 use crate::hooks::{
-    run_code_review_hook, run_jkw_setup_hook, run_problem_mode_hook, run_protect_config_hook,
-    run_require_task_hook, run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
+    run_code_review_hook, run_problem_mode_hook, run_protect_config_hook, run_require_task_hook,
+    run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
 };
 use crate::subagent::RealSubAgent;
 use crate::templates;
@@ -71,9 +71,6 @@ pub fn run_pre_tool_use(
             // Validation tracking (doesn't block, just tracks)
             check_hook!(run_validation_hook(input, base_dir));
 
-            // JKW setup enforcement
-            check_hook!(run_jkw_setup_hook(input, base_dir));
-
             // Require task in progress
             check_hook!(run_require_task_hook(input, base_dir));
 
@@ -84,11 +81,6 @@ pub fn run_pre_tool_use(
         "NotebookEdit" => {
             // Validation tracking
             check_hook!(run_validation_hook(input, base_dir));
-        }
-
-        "Skill" => {
-            // JKW setup - sets marker if JKW invoked, always allows Skill itself
-            let _ = run_jkw_setup_hook(input, base_dir);
         }
 
         _ => {
@@ -294,54 +286,5 @@ mod tests {
         assert!(!output.is_block());
         // Check that validation marker was set
         assert!(crate::session::needs_validation(dir.path()));
-    }
-
-    #[test]
-    fn test_edit_blocked_by_jkw_setup() {
-        use crate::session::set_jkw_setup_required;
-
-        let dir = TempDir::new().unwrap();
-        let runner = MockCommandRunner::new();
-
-        // Set JKW setup required marker
-        set_jkw_setup_required(dir.path()).unwrap();
-
-        // Edit to non-session file should be blocked
-        let input = HookInput {
-            tool_name: Some("Edit".to_string()),
-            tool_input: Some(ToolInput {
-                file_path: Some("src/main.rs".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let output = run_pre_tool_use(&input, dir.path(), &runner);
-        // Should be blocked by jkw_setup hook (only Write/Edit blocked, not Skill)
-        assert!(output.is_block());
-    }
-
-    #[test]
-    fn test_skill_jkw_always_allowed() {
-        use crate::session::set_jkw_setup_required;
-
-        let dir = TempDir::new().unwrap();
-        let runner = MockCommandRunner::new();
-
-        // Set JKW setup required marker
-        set_jkw_setup_required(dir.path()).unwrap();
-
-        let input = HookInput {
-            tool_name: Some("Skill".to_string()),
-            tool_input: Some(ToolInput {
-                skill: Some("just-keep-working".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let output = run_pre_tool_use(&input, dir.path(), &runner);
-        // Skill tools are always allowed (they set the marker, don't get blocked by it)
-        assert!(!output.is_block());
     }
 }

@@ -14,7 +14,7 @@ digraph StopHookStateMachine {
 
     // 1. Problem Mode Check
     CheckProblemMode [label="Check:\nproblem_mode_active?"];
-    ProblemModeExit [label="Problem Mode Exit\n(cleanup session)"];
+    ProblemModeExit [label="Problem Mode Exit"];
 
     // 2. API Error Loop Check
     CheckAPIErrors [label="Check:\nconsecutive_api_errors >= 2?"];
@@ -32,8 +32,7 @@ digraph StopHookStateMachine {
     ValidationFailed [label="Validation Failed\n(show output)"];
     ClearValidation [label="Clear validation marker"];
 
-    // 5. Fast Path Check (no JKW session + clean git)
-    CheckFastPath [label="Check:\nno JKW session?\n(parse session state)"];
+    // 5. Fast Path Check (clean git repo)
     CheckGitClean [label="Check git status:\nno uncommitted changes?\nnot ahead of remote?"];
     FastPathExit [label="Fast Path:\nClean state"];
 
@@ -46,9 +45,9 @@ digraph StopHookStateMachine {
 
     // Complete phrase path
     CompletePhraseDetected [label="Complete Phrase\nDetected"];
-    CheckReadyIssues [label="Check beads:\nready issues count?\n(bd ready)"];
-    ExitPhraseRejected [label="Exit Phrase Rejected\n(workable issues remain)"];
-    BypassAllowed [label="Bypass Allowed\n(cleanup session)"];
+    CheckReadyIssues [label="Check tasks:\nopen task count?"];
+    ExitPhraseRejected [label="Exit Phrase Rejected\n(open tasks remain)"];
+    BypassAllowed [label="Bypass Allowed"];
 
     // 7. Uncommitted Changes Check
     CheckUncommitted [label="Check git:\nuncommitted changes?"];
@@ -59,8 +58,6 @@ digraph StopHookStateMachine {
         style=dashed;
 
         MarkHadChanges [label="Mark:\nhad_uncommitted_changes"];
-        CheckBeadsInteraction [label="Check beads:\nhas interaction?"];
-        BeadsWarning [label="Beads Interaction\nRequired (first time)"];
         AnalyzeDiff [label="Analyze diff:\n- suppressions\n- empty except\n- secrets\n- TODOs"];
         RunQualityOnChanges [label="Run quality checks\n(if enabled)"];
         ShowUncommittedBlock [label="Block: Uncommitted\nChanges Detected\n(show analysis)"];
@@ -85,29 +82,11 @@ digraph StopHookStateMachine {
         DecisionContinue [label="Decision:\nContinue"];
     }
 
-    // 10. JKW Mode Handler
-    CheckJKWActive [label="Check:\nJKW session active?"];
+    // 10. Quality Check
+    QualityCheck [label="Run quality checks\n(if enabled)"];
+    QualityFailed [label="Quality Gates Failed"];
 
-    subgraph cluster_jkw {
-        label="Handle JKW Mode";
-        style=dashed;
-
-        IncrementIteration [label="Increment iteration\nUpdate session state"];
-        GetIssueState [label="Get current issues\n(beads or git hash)"];
-        CheckStaleness [label="Check staleness:\niterations_since_change\n>= threshold?"];
-        StalenessExit [label="Staleness Detected\n(cleanup session)"];
-        CheckAllDone [label="Check:\nbeads available &&\nno outstanding issues?"];
-        JKWQualityCheck [label="Run quality checks"];
-        JKWQualityFailed [label="Quality Gates Failed"];
-        JKWAllDoneBlock [label="All Done:\nShow options\n(/ideate or exit phrase)"];
-        JKWWorkRemains [label="Work Remains:\nShow status"];
-    }
-
-    // 11. Non-JKW Quality Check
-    NonJKWQuality [label="Run quality checks\n(if enabled, non-JKW)"];
-    NonJKWQualityFailed [label="Quality Gates Failed\n(non-JKW)"];
-
-    // 12. Simple Reflection Check (marker-based)
+    // 11. Simple Reflection Check (marker-based)
     CheckReflectMarker [label="Check:\nmust_reflect marker?"];
     ClearReflectMarker [label="Clear reflect marker\n(second stop attempt)"];
     CheckModifyingTools [label="Check transcript:\nmodifying tool use?\n(Write/Edit/Delete)"];
@@ -139,17 +118,15 @@ digraph StopHookStateMachine {
 
     // 4. Validation
     CheckNeedsValidation -> RunValidation [label="yes + cmd exists"];
-    CheckNeedsValidation -> CheckFastPath [label="no"];
+    CheckNeedsValidation -> CheckGitClean [label="no"];
     RunValidation -> ValidationFailed [label="exit != 0"];
     RunValidation -> ClearValidation [label="exit == 0"];
     ValidationFailed -> BlockStop;
-    ClearValidation -> CheckFastPath;
+    ClearValidation -> CheckGitClean;
 
     // 5. Fast Path
-    CheckFastPath -> CheckGitClean [label="no session + git repo"];
-    CheckFastPath -> CheckBypassPhrases [label="has session"];
     CheckGitClean -> FastPathExit [label="clean"];
-    CheckGitClean -> CheckBypassPhrases [label="dirty"];
+    CheckGitClean -> CheckBypassPhrases [label="dirty or not git"];
     FastPathExit -> AllowStop;
 
     // 6. Bypass Phrases
@@ -160,10 +137,10 @@ digraph StopHookStateMachine {
     ProblemPhraseDetected -> EnterProblemMode;
     EnterProblemMode -> BlockStop [label="tools blocked"];
 
-    CompletePhraseDetected -> CheckReadyIssues [label="beads available"];
-    CompletePhraseDetected -> BypassAllowed [label="no beads"];
-    CheckReadyIssues -> ExitPhraseRejected [label="ready > 0"];
-    CheckReadyIssues -> BypassAllowed [label="ready == 0"];
+    CompletePhraseDetected -> CheckReadyIssues [label="tasks available"];
+    CompletePhraseDetected -> BypassAllowed [label="no tasks"];
+    CheckReadyIssues -> ExitPhraseRejected [label="open > 0"];
+    CheckReadyIssues -> BypassAllowed [label="open == 0"];
     ExitPhraseRejected -> BlockStop;
     BypassAllowed -> AllowStop;
 
@@ -171,10 +148,7 @@ digraph StopHookStateMachine {
     CheckUncommitted -> MarkHadChanges [label="yes", lhead=cluster_uncommitted];
     CheckUncommitted -> CheckUnpushed [label="no"];
 
-    MarkHadChanges -> CheckBeadsInteraction;
-    CheckBeadsInteraction -> BeadsWarning [label="no interaction\n(first time)"];
-    CheckBeadsInteraction -> AnalyzeDiff [label="has interaction\nor warned"];
-    BeadsWarning -> BlockStop;
+    MarkHadChanges -> AnalyzeDiff;
     AnalyzeDiff -> RunQualityOnChanges;
     RunQualityOnChanges -> ShowUncommittedBlock;
     ShowUncommittedBlock -> BlockStop;
@@ -186,7 +160,7 @@ digraph StopHookStateMachine {
 
     // 9. Interactive Question
     CheckQuestion -> CheckContinueQ [label="is question +\nuser active", lhead=cluster_question];
-    CheckQuestion -> CheckJKWActive [label="not question"];
+    CheckQuestion -> QualityCheck [label="not question"];
 
     CheckContinueQ -> AutoAnswerContinue [label="yes"];
     CheckContinueQ -> SubAgentDecision [label="no"];
@@ -196,31 +170,14 @@ digraph StopHookStateMachine {
     SubAgentDecision -> DecisionContinue [label="Continue"];
     DecisionAllowStop -> AllowStop;
     DecisionAnswer -> BlockStop [label="inject response"];
-    DecisionContinue -> CheckJKWActive;
+    DecisionContinue -> QualityCheck;
 
-    // 10. JKW Mode
-    CheckJKWActive -> IncrementIteration [label="yes", lhead=cluster_jkw];
-    CheckJKWActive -> NonJKWQuality [label="no"];
+    // 10. Quality Check
+    QualityCheck -> QualityFailed [label="failed"];
+    QualityCheck -> CheckReflectMarker [label="passed or\nnot enabled"];
+    QualityFailed -> BlockStop;
 
-    IncrementIteration -> GetIssueState;
-    GetIssueState -> CheckStaleness;
-    CheckStaleness -> StalenessExit [label="stale"];
-    CheckStaleness -> CheckAllDone [label="not stale"];
-    StalenessExit -> AllowStop;
-    CheckAllDone -> JKWQualityCheck [label="all done"];
-    CheckAllDone -> JKWWorkRemains [label="work remains"];
-    JKWQualityCheck -> JKWQualityFailed [label="failed"];
-    JKWQualityCheck -> JKWAllDoneBlock [label="passed"];
-    JKWQualityFailed -> BlockStop;
-    JKWAllDoneBlock -> BlockStop;
-    JKWWorkRemains -> BlockStop;
-
-    // 11. Non-JKW Quality
-    NonJKWQuality -> NonJKWQualityFailed [label="failed"];
-    NonJKWQuality -> CheckReflectMarker [label="passed or\nnot enabled"];
-    NonJKWQualityFailed -> BlockStop;
-
-    // 12. Simple Reflection (marker-based)
+    // 11. Simple Reflection (marker-based)
     CheckReflectMarker -> ClearReflectMarker [label="marker exists\n(second stop)"];
     CheckReflectMarker -> CheckModifyingTools [label="no marker"];
     ClearReflectMarker -> AllowStop;
@@ -254,8 +211,6 @@ digraph StopHookStateMachine {
     // - AnalyzeDiff: Bash(git diff --cached, git diff)
     // - RunQualityOnChanges: Bash(sh -c "quality_command")
     // - RunValidation: Bash(sh -c "quality_command")
-    // - CheckBeadsInteraction: Bash(bd show, bd list)
-    // - CheckReadyIssues: Bash(bd ready)
-    // - GetIssueState: Bash(bd list --status=open, bd list --status=in_progress) OR Bash(git diff --stat)
+    // - CheckReadyIssues: MCP task tools
     // - SubAgentDecision: Sub-agent API call (decide_on_question)
 }

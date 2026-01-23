@@ -1,16 +1,16 @@
-//! Stop hook for just-keep-working mode and code quality checks.
+//! Stop hook for code quality checks.
 //!
 //! This hook runs when Claude attempts to stop/exit. It implements:
-//! - Just-keep-working mode management with staleness detection
 //! - Uncommitted changes detection and blocking
 //! - Quality checks via configured command
 //! - Interactive question handling with sub-agent
+//! - Task completion tracking
 
 use crate::error::Result;
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
-use crate::session::{self, SessionConfig, STALENESS_THRESHOLD};
+use crate::session;
 use crate::tasks;
 use crate::templates;
 use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
@@ -76,11 +76,6 @@ impl StopHookConfig {
     /// Get the base directory for file operations, defaulting to current directory.
     fn base_dir(&self) -> &Path {
         self.base_dir.as_deref().unwrap_or_else(|| Path::new("."))
-    }
-
-    /// Get the session state file path (relative to `base_dir`).
-    fn session_state_path(&self) -> PathBuf {
-        self.base_dir().join(session::SESSION_STATE_PATH)
     }
 }
 
@@ -187,7 +182,6 @@ pub fn run_stop_hook(
     // Check for problem mode - if active, allow unconditional stop
     if session::is_problem_mode_active(config.base_dir()) {
         session::exit_problem_mode(config.base_dir())?;
-        session::cleanup_session_files(config.base_dir())?;
         let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
             .expect("problem_mode_exit.tera template should always render");
         return Ok(StopHookResult::allow()
@@ -277,23 +271,13 @@ pub fn run_stop_hook(
         }
     }
 
-    // Check if just-keep-working session is active
-    // JKW mode is active if EITHER the session notes OR state file exists
-    let session_state_path = config.session_state_path();
-    let session_notes_exist = session::jkw_session_file_exists(config.base_dir());
-    let mut session_config = session::parse_session_state(&session_state_path)?;
-
-    // If session notes exist but state doesn't, create default state (first stop in JKW mode)
-    if session_notes_exist && session_config.is_none() {
-        session_config = Some(session::SessionConfig::default());
-    }
-
-    // Fast path: if no just-keep-working session and no git changes, allow immediate exit
-    if session_config.is_none() && config.git_repo {
+    // Fast path: if no git changes, allow immediate exit
+    if config.git_repo {
         let git_status = git::check_uncommitted_changes(runner)?;
         if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
-            return Ok(StopHookResult::allow()
-                .with_explanation(config.explain_stops, "clean git repo, no JKW session"));
+            return Ok(
+                StopHookResult::allow().with_explanation(config.explain_stops, "clean git repo")
+            );
         }
     }
 
@@ -415,7 +399,7 @@ pub fn run_stop_hook(
                 return Ok(result);
             }
 
-            // Bypass allowed - but don't cleanup session files so JKW can resume
+            // Bypass allowed - work is complete
             return Ok(StopHookResult::allow()
                 .with_explanation(config.explain_stops, "human input required phrase used"));
         }
@@ -450,12 +434,7 @@ pub fn run_stop_hook(
         return Ok(result);
     }
 
-    // Check just-keep-working mode
-    if let Some(mut session) = session_config {
-        return handle_jkw_mode(&mut session, config, runner, sub_agent, &transcript_info);
-    }
-
-    // Not in just-keep-working mode - run quality checks if enabled
+    // Run quality checks if enabled
     if config.quality_check_enabled {
         if let Some(ref cmd) = config.quality_check_command {
             let output = runner.run("sh", &["-c", cmd], None)?;
@@ -734,95 +713,6 @@ fn check_interactive_question(
         )),
         SubAgentDecision::Continue => Ok(None),
     }
-}
-
-/// Handle just-keep-working mode.
-#[allow(clippy::too_many_lines)] // Complex logic with many status checks
-fn handle_jkw_mode(
-    session: &mut SessionConfig,
-    config: &StopHookConfig,
-    runner: &dyn CommandRunner,
-    _sub_agent: &dyn SubAgent,
-    _transcript_info: &TranscriptInfo,
-) -> Result<StopHookResult> {
-    let session_state_path = config.session_state_path();
-
-    // Increment iteration
-    session.iteration += 1;
-    let iteration = session.iteration;
-
-    // Track git working state changes
-    let current_git_hash = git::working_state_hash(runner)?;
-    if session.git_diff_hash.as_ref() != Some(&current_git_hash) {
-        session.last_issue_change_iteration = iteration;
-        session.git_diff_hash = Some(current_git_hash);
-    }
-
-    // Update session state file
-    session::write_session_state(&session_state_path, session)?;
-
-    // Check staleness - allow stop but don't cleanup session files so JKW can resume
-    let iterations_since_change = session.iterations_since_change();
-    if iterations_since_change >= STALENESS_THRESHOLD {
-        return Ok(StopHookResult::allow()
-            .with_message("# Session Paused")
-            .with_message("")
-            .with_message(format!("No git changes for {iterations_since_change} iterations."))
-            .with_message(
-                "If you're working through something complex, that's fine - just checking in.",
-            )
-            .with_message("")
-            .with_message("Session preserved - JKW mode will resume on next message.")
-            .with_explanation(
-                config.explain_stops,
-                format!(
-                    "staleness detected ({iterations_since_change} iterations without progress)"
-                ),
-            ));
-    }
-
-    // Work remains
-    let mut result =
-        StopHookResult::block().with_message("# Just-Keep-Working Mode Active").with_message("");
-
-    result.messages.push(format!("**Iteration {iteration}**"));
-    result.messages.push(format!("Iterations since last git change: {iterations_since_change}"));
-    result.messages.push(String::new());
-    result.messages.push("## Progress Tracking".to_string());
-    result.messages.push("- Tracking progress via git working state".to_string());
-    result.messages.push(String::new());
-    result.messages.push("## Action Required".to_string());
-    result.messages.push(String::new());
-    result.messages.push("Continue working:".to_string());
-    result.messages.push(String::new());
-    result.messages.push("1. Make progress on your current task".to_string());
-    result.messages.push("2. Stage changes to indicate progress".to_string());
-    result.messages.push("3. Run quality checks after completing work".to_string());
-
-    if iterations_since_change > 2 {
-        result.messages.push(String::new());
-        result
-            .messages
-            .push(format!("**Note**: No git changes for {iterations_since_change} iterations - making sure you're not stuck."));
-        result
-            .messages
-            .push(format!("Session will pause for check-in at {STALENESS_THRESHOLD} iterations."));
-    }
-
-    result.messages.push(String::new());
-    result.messages.push("---".to_string());
-    result.messages.push(String::new());
-    result
-        .messages
-        .push("If you cannot proceed without human input, use one of these phrases:".to_string());
-    result.messages.push(String::new());
-    result.messages.push("When all your work is done:".to_string());
-    result.messages.push(format!("  \"{HUMAN_INPUT_REQUIRED}\""));
-    result.messages.push(String::new());
-    result.messages.push("When you've hit a problem you can't solve:".to_string());
-    result.messages.push(format!("  \"{PROBLEM_NEEDS_USER}\""));
-
-    Ok(result)
 }
 
 /// Truncate output to the last N lines.
@@ -1716,11 +1606,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quality_check_fails_not_jkw_mode() {
+    fn test_quality_check_fails() {
         use tempfile::TempDir;
 
-        // Test quality check failure when NOT in just-keep-working mode
-        // This requires: no session, ahead of remote (skip fast path),
+        // Test quality check failure
+        // This requires: ahead of remote (skip fast path),
         // require_push=false, quality check enabled and fails
         let dir = TempDir::new().unwrap();
         let mut runner = MockCommandRunner::new();
@@ -1769,244 +1659,6 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Quality")));
-    }
-
-    // Helper to create a session file for just-keep-working mode tests
-    fn create_session_state(base: &std::path::Path, iteration: u32, last_change: u32) {
-        create_session_state_with_git_hash(base, iteration, last_change, None);
-    }
-
-    fn create_session_state_with_git_hash(
-        base: &std::path::Path,
-        iteration: u32,
-        last_change: u32,
-        git_hash: Option<&str>,
-    ) {
-        let session_dir = base.join(".claude");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        // Write plain YAML (no frontmatter) to the state file
-        let git_diff_line =
-            git_hash.map_or_else(String::new, |hash| format!("git_diff_hash: {hash}\n"));
-        let content = format!(
-            "iteration: {iteration}\nlast_issue_change_iteration: {last_change}\n{git_diff_line}"
-        );
-        std::fs::write(session_dir.join("jkw-state.local.yaml"), content).unwrap();
-    }
-
-    #[test]
-    fn test_jkw_mode_work_remaining() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file (iteration 3, last change at 2)
-        create_session_state(base, 3, 2);
-
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let sha =
-            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped due to session file)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // working_state_hash for git-based staleness tracking
-        runner.expect("git", &["rev-parse", "HEAD"], sha);
-        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
-        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
-        assert!(result.messages.iter().any(|m| m.contains("Iteration 4")));
-    }
-
-    #[test]
-    fn test_jkw_mode_staleness_detected() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file with high staleness (iteration 10, last change at 3)
-        // This means iterations_since_change = 10-3 = 7, and after increment = 11-3 = 8 >= 5
-        // Set git_diff_hash to match what working_state_hash will compute for the mock values
-        create_session_state_with_git_hash(base, 10, 3, Some("142ea91925d6c755"));
-
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let sha =
-            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // working_state_hash for git-based staleness tracking (returns same hash - no change)
-        runner.expect("git", &["rev-parse", "HEAD"], sha);
-        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
-        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Session Paused")));
-    }
-
-    #[test]
-    fn test_jkw_mode_with_staleness_warning() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create session file with some staleness
-        // (iteration 5, last change at 2 - gives 3 iterations since change)
-        // After increment it becomes iteration 6, so iterations_since_change = 4 > 2
-        // Set git_diff_hash to match what working_state_hash will compute
-        create_session_state_with_git_hash(base, 5, 2, Some("142ea91925d6c755"));
-
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let sha =
-            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path skipped)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // working_state_hash - returns same hash as stored (no change detected)
-        runner.expect("git", &["rev-parse", "HEAD"], sha);
-        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
-        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")));
-        // Check for staleness warning (iterations > 2)
-        assert!(result.messages.iter().any(|m| m.contains("Note")));
-    }
-
-    #[test]
-    fn test_jkw_mode_detected_from_notes_file_only() {
-        // Test that JKW mode is detected when only the notes file exists (no state file)
-        // This can happen when the LLM creates the session file but exits before
-        // the stop hook runs for the first time.
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create ONLY the session notes file (no state file)
-        let session_dir = base.join(".claude");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        std::fs::write(
-            session_dir.join("jkw-session.local.md"),
-            "# JKW Session\n\nSession notes here.\n",
-        )
-        .unwrap();
-
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let sha =
-            CommandOutput { exit_code: 0, stdout: "abc123\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // working_state_hash for git-based staleness tracking
-        runner.expect("git", &["rev-parse", "HEAD"], sha);
-        runner.expect("git", &["diff", "--cached", "--name-only"], empty_success.clone());
-        runner.expect("git", &["diff", "--name-only"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-
-        // Should detect JKW mode and block exit
-        assert!(!result.allow_stop, "Should block exit when JKW session notes exist");
-        assert!(
-            result.messages.iter().any(|m| m.contains("Just-Keep-Working Mode Active")),
-            "Should show JKW mode active message"
-        );
-        // Should show iteration 1 (first stop in this session)
-        assert!(result.messages.iter().any(|m| m.contains("Iteration 1")), "Should be iteration 1");
     }
 
     #[test]

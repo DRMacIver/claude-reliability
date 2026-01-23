@@ -182,6 +182,7 @@ install-tools:
 lint: check-bin-size
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo fmt --check
+	uv run scripts/check-templates.py
 
 release:
 	#!/usr/bin/env bash

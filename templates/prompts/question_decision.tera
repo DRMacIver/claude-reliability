@@ -6,7 +6,7 @@ Variables:
   - user_last_active: Human-readable timestamp of when user was last active (e.g., "2 minutes ago")
   - has_modifications_since_user: Whether any modifying tool calls (Write/Edit/Delete) were made since the user last spoke
 #}
-You are a sub-agent helping to manage a just-keep-working session.
+You are a sub-agent helping to manage agent sessions.
 
 The main agent has stopped and its last output appears to contain a question.
 

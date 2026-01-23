@@ -1,7 +1,6 @@
 //! Hook implementations for Claude Code.
 
 mod code_review;
-mod jkw_setup;
 mod no_verify;
 mod plan_tasks;
 mod post_tool_use;
@@ -14,7 +13,6 @@ mod user_prompt_submit;
 mod validation;
 
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
-pub use jkw_setup::run_jkw_setup_hook;
 pub use no_verify::run_no_verify_hook;
 pub use post_tool_use::{run_post_tool_use, PostToolUseInput};
 pub use pre_tool_use::run_pre_tool_use;

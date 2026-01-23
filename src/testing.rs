@@ -7,7 +7,6 @@
 #![allow(clippy::needless_pass_by_ref_mut)] // &mut self for ergonomics with RefCell
 
 use crate::error::Result;
-use crate::session::SessionConfig;
 use crate::traits::{
     CommandOutput, CommandRunner, QuestionContext, StateStore, SubAgent, SubAgentDecision,
 };
@@ -217,8 +216,6 @@ impl SubAgent for FailingSubAgent {
 /// Stores state in memory and records operations for verification.
 #[derive(Debug, Default)]
 pub struct MockStateStore {
-    session_state: RefCell<Option<SessionConfig>>,
-    issue_snapshot: RefCell<HashSet<String>>,
     markers: RefCell<HashSet<String>>,
 }
 
@@ -236,32 +233,6 @@ impl MockStateStore {
 }
 
 impl StateStore for MockStateStore {
-    fn get_session_state(&self) -> Result<Option<SessionConfig>> {
-        Ok(self.session_state.borrow().clone())
-    }
-
-    fn set_session_state(&self, state: &SessionConfig) -> Result<()> {
-        *self.session_state.borrow_mut() = Some(state.clone());
-        Ok(())
-    }
-
-    fn clear_session_state(&self) -> Result<()> {
-        *self.session_state.borrow_mut() = None;
-        self.issue_snapshot.borrow_mut().clear();
-        Ok(())
-    }
-
-    fn get_issue_snapshot(&self) -> Result<HashSet<String>> {
-        Ok(self.issue_snapshot.borrow().clone())
-    }
-
-    fn set_issue_snapshot(&self, issues: &[String]) -> Result<()> {
-        let mut snapshot = self.issue_snapshot.borrow_mut();
-        snapshot.clear();
-        snapshot.extend(issues.iter().cloned());
-        Ok(())
-    }
-
     fn has_marker(&self, name: &str) -> bool {
         self.markers.borrow().contains(name)
     }
@@ -292,26 +263,6 @@ impl FailingStateStore {
 }
 
 impl StateStore for FailingStateStore {
-    fn get_session_state(&self) -> Result<Option<SessionConfig>> {
-        Err(std::io::Error::other(self.error_message.clone()).into())
-    }
-
-    fn set_session_state(&self, _state: &SessionConfig) -> Result<()> {
-        Err(std::io::Error::other(self.error_message.clone()).into())
-    }
-
-    fn clear_session_state(&self) -> Result<()> {
-        Err(std::io::Error::other(self.error_message.clone()).into())
-    }
-
-    fn get_issue_snapshot(&self) -> Result<HashSet<String>> {
-        Err(std::io::Error::other(self.error_message.clone()).into())
-    }
-
-    fn set_issue_snapshot(&self, _issues: &[String]) -> Result<()> {
-        Err(std::io::Error::other(self.error_message.clone()).into())
-    }
-
     fn has_marker(&self, _name: &str) -> bool {
         false
     }
@@ -360,26 +311,6 @@ impl FailingSetMarkerStore {
 }
 
 impl StateStore for FailingClearMarkerStore {
-    fn get_session_state(&self) -> Result<Option<SessionConfig>> {
-        self.inner.get_session_state()
-    }
-
-    fn set_session_state(&self, state: &SessionConfig) -> Result<()> {
-        self.inner.set_session_state(state)
-    }
-
-    fn clear_session_state(&self) -> Result<()> {
-        self.inner.clear_session_state()
-    }
-
-    fn get_issue_snapshot(&self) -> Result<HashSet<String>> {
-        self.inner.get_issue_snapshot()
-    }
-
-    fn set_issue_snapshot(&self, issues: &[String]) -> Result<()> {
-        self.inner.set_issue_snapshot(issues)
-    }
-
     fn has_marker(&self, name: &str) -> bool {
         self.inner.has_marker(name)
     }
@@ -394,26 +325,6 @@ impl StateStore for FailingClearMarkerStore {
 }
 
 impl StateStore for FailingSetMarkerStore {
-    fn get_session_state(&self) -> Result<Option<SessionConfig>> {
-        self.inner.get_session_state()
-    }
-
-    fn set_session_state(&self, state: &SessionConfig) -> Result<()> {
-        self.inner.set_session_state(state)
-    }
-
-    fn clear_session_state(&self) -> Result<()> {
-        self.inner.clear_session_state()
-    }
-
-    fn get_issue_snapshot(&self) -> Result<HashSet<String>> {
-        self.inner.get_issue_snapshot()
-    }
-
-    fn set_issue_snapshot(&self, issues: &[String]) -> Result<()> {
-        self.inner.set_issue_snapshot(issues)
-    }
-
     fn has_marker(&self, name: &str) -> bool {
         self.inner.has_marker(name)
     }
@@ -517,48 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_state_store_session_state() {
-        let store = MockStateStore::new();
-
-        // Initially no state
-        assert!(store.get_session_state().unwrap().is_none());
-
-        // Set state
-        let state = SessionConfig {
-            iteration: 5,
-            last_issue_change_iteration: 3,
-            issue_snapshot: vec!["a".to_string()],
-            git_diff_hash: Some("hash".to_string()),
-        };
-        store.set_session_state(&state).unwrap();
-
-        // Read back
-        let read = store.get_session_state().unwrap().unwrap();
-        assert_eq!(read.iteration, 5);
-        assert_eq!(read.issue_snapshot, vec!["a"]);
-
-        // Clear
-        store.clear_session_state().unwrap();
-        assert!(store.get_session_state().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_mock_state_store_issue_snapshot() {
-        let store = MockStateStore::new();
-
-        // Initially empty
-        assert!(store.get_issue_snapshot().unwrap().is_empty());
-
-        // Set snapshot
-        store.set_issue_snapshot(&["a".to_string(), "b".to_string()]).unwrap();
-
-        let snapshot = store.get_issue_snapshot().unwrap();
-        assert_eq!(snapshot.len(), 2);
-        assert!(snapshot.contains("a"));
-        assert!(snapshot.contains("b"));
-    }
-
-    #[test]
     fn test_mock_state_store_markers() {
         let store = MockStateStore::new();
 
@@ -581,11 +450,6 @@ mod tests {
         let store = FailingStateStore::new("test error");
 
         // All methods should return errors or false
-        assert!(store.get_session_state().is_err());
-        assert!(store.set_session_state(&SessionConfig::default()).is_err());
-        assert!(store.clear_session_state().is_err());
-        assert!(store.get_issue_snapshot().is_err());
-        assert!(store.set_issue_snapshot(&[]).is_err());
         assert!(!store.has_marker("test"));
         assert!(store.set_marker("test").is_err());
         assert!(store.clear_marker("test").is_err());
@@ -595,18 +459,6 @@ mod tests {
     fn test_failing_clear_marker_store_delegates_other_methods() {
         let inner = MockStateStore::new();
         let store = FailingClearMarkerStore::new(inner, "clear failed");
-
-        // Session state methods should delegate to inner
-        assert!(store.get_session_state().unwrap().is_none());
-        store.set_session_state(&SessionConfig::default()).unwrap();
-        assert!(store.get_session_state().unwrap().is_some());
-        store.clear_session_state().unwrap();
-        assert!(store.get_session_state().unwrap().is_none());
-
-        // Issue snapshot methods should delegate
-        assert!(store.get_issue_snapshot().unwrap().is_empty());
-        store.set_issue_snapshot(&["issue1".to_string()]).unwrap();
-        assert!(store.get_issue_snapshot().unwrap().contains("issue1"));
 
         // Marker methods: has_marker and set_marker should delegate, clear_marker should fail
         assert!(!store.has_marker("test"));
@@ -619,18 +471,6 @@ mod tests {
     fn test_failing_set_marker_store_delegates_other_methods() {
         let inner = MockStateStore::new();
         let store = FailingSetMarkerStore::new(inner, "set failed");
-
-        // Session state methods should delegate to inner
-        assert!(store.get_session_state().unwrap().is_none());
-        store.set_session_state(&SessionConfig::default()).unwrap();
-        assert!(store.get_session_state().unwrap().is_some());
-        store.clear_session_state().unwrap();
-        assert!(store.get_session_state().unwrap().is_none());
-
-        // Issue snapshot methods should delegate
-        assert!(store.get_issue_snapshot().unwrap().is_empty());
-        store.set_issue_snapshot(&["issue1".to_string()]).unwrap();
-        assert!(store.get_issue_snapshot().unwrap().contains("issue1"));
 
         // Marker methods: has_marker and clear_marker should delegate, set_marker should fail
         assert!(!store.has_marker("test"));

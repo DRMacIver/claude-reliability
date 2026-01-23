@@ -57,23 +57,11 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/stop/staleness_detected.tera",
         include_str!("../templates/messages/stop/staleness_detected.tera"),
     );
-    m.insert(
-        "messages/stop/jkw_status.tera",
-        include_str!("../templates/messages/stop/jkw_status.tera"),
-    );
-    m.insert(
-        "messages/stop/jkw_complete.tera",
-        include_str!("../templates/messages/stop/jkw_complete.tera"),
-    );
 
     // Other hook messages
     m.insert(
         "messages/problem_mode_block.tera",
         include_str!("../templates/messages/problem_mode_block.tera"),
-    );
-    m.insert(
-        "messages/jkw_setup_required.tera",
-        include_str!("../templates/messages/jkw_setup_required.tera"),
     );
     m.insert(
         "messages/protect_config_write.tera",
@@ -90,10 +78,6 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
     m.insert(
         "messages/session_intro.tera",
         include_str!("../templates/messages/session_intro.tera"),
-    );
-    m.insert(
-        "messages/protect_jkw_session.tera",
-        include_str!("../templates/messages/protect_jkw_session.tera"),
     );
     m.insert("messages/require_task.tera", include_str!("../templates/messages/require_task.tera"));
 

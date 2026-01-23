@@ -1,9 +1,0 @@
-{# Message shown when trying to delete JKW session files via Bash rm.
-
-Variables: none
-#}
-# JKW Session File - Deletion Blocked
-
-Do not manually delete JKW session files (`.claude/jkw-session.local.md` or `.claude/jkw-state.local.yaml`).
-
-The stop hook automatically cleans up these files when just-keep-working mode ends normally. If you need to cancel JKW mode, use the `/cancel-just-keep-working` command instead.

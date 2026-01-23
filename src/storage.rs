@@ -1,8 +1,6 @@
-//! `SQLite`-based state storage for session and marker data.
+//! `SQLite`-based state storage for marker data.
 //!
 //! This module provides persistent storage for:
-//! - Session state (JKW mode iteration, staleness tracking)
-//! - Issue snapshots (for detecting issue changes)
 //! - Boolean markers (problem mode, validation needed, etc.)
 //!
 //! All state is stored in a single `SQLite` database at
@@ -10,18 +8,14 @@
 
 use crate::error::Result;
 use crate::paths;
-use crate::session::SessionConfig;
 use crate::traits::StateStore;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Marker name constants for consistent usage across the codebase.
 pub mod markers {
     /// Problem mode is active - tool use blocked until stop.
     pub const PROBLEM_MODE: &str = "problem_mode";
-    /// JKW setup is required - Write/Edit blocked until session file exists.
-    pub const JKW_SETUP_REQUIRED: &str = "jkw_setup_required";
     /// Validation is needed - modifying tool was used.
     pub const NEEDS_VALIDATION: &str = "needs_validation";
     /// Agent should reflect on work before stopping.
@@ -121,29 +115,25 @@ impl SqliteStore {
 
     /// Migrate state from old file-based storage.
     ///
-    /// This checks for old marker files and YAML state, migrates them
-    /// to the `SQLite` database, and removes the old files.
+    /// This checks for old marker files, migrates them to the `SQLite` database,
+    /// and removes the old files.
     ///
     /// # Errors
     ///
     /// Returns an error if migration fails.
     pub fn migrate_from_files(&self, base_dir: &Path) -> Result<()> {
-        // Migrate session state from YAML
-        let yaml_path = base_dir.join(".claude/jkw-state.local.yaml");
-        if yaml_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-                if let Ok(config) = serde_yaml::from_str::<SessionConfig>(&content) {
-                    self.set_session_state(&config)?;
-                    // Remove old file after successful migration
-                    let _ = std::fs::remove_file(&yaml_path);
-                }
+        // Remove legacy JKW files if they exist
+        let legacy_files = [".claude/jkw-state.local.yaml", ".claude/jkw-session.local.md"];
+        for file_path in legacy_files {
+            let full_path = base_dir.join(file_path);
+            if full_path.exists() {
+                let _ = std::fs::remove_file(&full_path);
             }
         }
 
         // Migrate marker files
         let marker_migrations = [
             (".claude/problem-mode.local", markers::PROBLEM_MODE),
-            (".claude/jkw-setup-required.local", markers::JKW_SETUP_REQUIRED),
             (".claude/needs-validation.local", markers::NEEDS_VALIDATION),
             (".claude/must-reflect.local", markers::MUST_REFLECT),
         ];
@@ -162,87 +152,6 @@ impl SqliteStore {
 }
 
 impl StateStore for SqliteStore {
-    fn get_session_state(&self) -> Result<Option<SessionConfig>> {
-        let conn = self.open()?;
-
-        let state: Option<(i64, i64, Option<String>)> = conn
-            .query_row(
-                "SELECT iteration, last_issue_change_iteration, git_diff_hash
-                 FROM session_state WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-
-        match state {
-            Some((iteration, last_issue_change_iteration, git_diff_hash)) => {
-                // Get issue snapshot
-                let mut stmt = conn.prepare("SELECT issue_id FROM issue_snapshot")?;
-                let issue_snapshot: Vec<String> =
-                    stmt.query_map([], |row| row.get(0))?.flatten().collect();
-
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                Ok(Some(SessionConfig {
-                    iteration: iteration as u32,
-                    last_issue_change_iteration: last_issue_change_iteration as u32,
-                    issue_snapshot,
-                    git_diff_hash,
-                }))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn set_session_state(&self, state: &SessionConfig) -> Result<()> {
-        let conn = self.open()?;
-
-        // Upsert session state
-        conn.execute(
-            "INSERT INTO session_state (id, iteration, last_issue_change_iteration, git_diff_hash)
-             VALUES (1, ?1, ?2, ?3)
-             ON CONFLICT(id) DO UPDATE SET
-                 iteration = excluded.iteration,
-                 last_issue_change_iteration = excluded.last_issue_change_iteration,
-                 git_diff_hash = excluded.git_diff_hash",
-            params![
-                i64::from(state.iteration),
-                i64::from(state.last_issue_change_iteration),
-                &state.git_diff_hash,
-            ],
-        )?;
-
-        // Update issue snapshot - clear and repopulate
-        conn.execute("DELETE FROM issue_snapshot", [])?;
-        for issue_id in &state.issue_snapshot {
-            conn.execute("INSERT INTO issue_snapshot (issue_id) VALUES (?1)", params![issue_id])?;
-        }
-
-        Ok(())
-    }
-
-    fn clear_session_state(&self) -> Result<()> {
-        let conn = self.open()?;
-        conn.execute("DELETE FROM session_state", [])?;
-        conn.execute("DELETE FROM issue_snapshot", [])?;
-        Ok(())
-    }
-
-    fn get_issue_snapshot(&self) -> Result<HashSet<String>> {
-        let conn = self.open()?;
-        let mut stmt = conn.prepare("SELECT issue_id FROM issue_snapshot")?;
-        let issues: HashSet<String> = stmt.query_map([], |row| row.get(0))?.flatten().collect();
-        Ok(issues)
-    }
-
-    fn set_issue_snapshot(&self, issues: &[String]) -> Result<()> {
-        let conn = self.open()?;
-        conn.execute("DELETE FROM issue_snapshot", [])?;
-        for issue_id in issues {
-            conn.execute("INSERT INTO issue_snapshot (issue_id) VALUES (?1)", params![issue_id])?;
-        }
-        Ok(())
-    }
-
     fn has_marker(&self, name: &str) -> bool {
         let Ok(conn) = self.open() else {
             return false;
@@ -285,101 +194,6 @@ mod tests {
         assert!(path_str.contains(".claude-reliability"));
         assert!(path_str.contains("projects"));
         assert!(path_str.ends_with(paths::DATABASE_FILENAME));
-    }
-
-    #[test]
-    fn test_session_state_roundtrip() {
-        let (_dir, store) = create_test_store();
-
-        // Initially no state
-        assert!(store.get_session_state().unwrap().is_none());
-
-        // Set state
-        let state = SessionConfig {
-            iteration: 5,
-            last_issue_change_iteration: 3,
-            issue_snapshot: vec!["issue-1".to_string(), "issue-2".to_string()],
-            git_diff_hash: Some("abc123".to_string()),
-        };
-        store.set_session_state(&state).unwrap();
-
-        // Read back
-        let read_state = store.get_session_state().unwrap().unwrap();
-        assert_eq!(read_state.iteration, 5);
-        assert_eq!(read_state.last_issue_change_iteration, 3);
-        assert_eq!(read_state.issue_snapshot, vec!["issue-1", "issue-2"]);
-        assert_eq!(read_state.git_diff_hash, Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn test_session_state_update() {
-        let (_dir, store) = create_test_store();
-
-        // Set initial state
-        let state1 = SessionConfig {
-            iteration: 1,
-            last_issue_change_iteration: 1,
-            issue_snapshot: vec!["issue-1".to_string()],
-            git_diff_hash: None,
-        };
-        store.set_session_state(&state1).unwrap();
-
-        // Update state
-        let state2 = SessionConfig {
-            iteration: 2,
-            last_issue_change_iteration: 2,
-            issue_snapshot: vec!["issue-2".to_string(), "issue-3".to_string()],
-            git_diff_hash: Some("def456".to_string()),
-        };
-        store.set_session_state(&state2).unwrap();
-
-        // Read back - should have updated values
-        let read_state = store.get_session_state().unwrap().unwrap();
-        assert_eq!(read_state.iteration, 2);
-        assert_eq!(read_state.issue_snapshot, vec!["issue-2", "issue-3"]);
-        assert_eq!(read_state.git_diff_hash, Some("def456".to_string()));
-    }
-
-    #[test]
-    fn test_clear_session_state() {
-        let (_dir, store) = create_test_store();
-
-        // Set state
-        let state = SessionConfig {
-            iteration: 5,
-            last_issue_change_iteration: 3,
-            issue_snapshot: vec!["issue-1".to_string()],
-            git_diff_hash: None,
-        };
-        store.set_session_state(&state).unwrap();
-        assert!(store.get_session_state().unwrap().is_some());
-
-        // Clear
-        store.clear_session_state().unwrap();
-        assert!(store.get_session_state().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_issue_snapshot_separate_operations() {
-        let (_dir, store) = create_test_store();
-
-        // Initially empty
-        assert!(store.get_issue_snapshot().unwrap().is_empty());
-
-        // Set snapshot
-        store.set_issue_snapshot(&["a".to_string(), "b".to_string()]).unwrap();
-
-        let snapshot = store.get_issue_snapshot().unwrap();
-        assert_eq!(snapshot.len(), 2);
-        assert!(snapshot.contains("a"));
-        assert!(snapshot.contains("b"));
-
-        // Update snapshot
-        store.set_issue_snapshot(&["c".to_string()]).unwrap();
-
-        let snapshot = store.get_issue_snapshot().unwrap();
-        assert_eq!(snapshot.len(), 1);
-        assert!(snapshot.contains("c"));
     }
 
     #[test]
@@ -426,9 +240,9 @@ mod tests {
     fn test_marker_constants() {
         // Verify marker constants are defined
         assert!(!markers::PROBLEM_MODE.is_empty());
-        assert!(!markers::JKW_SETUP_REQUIRED.is_empty());
         assert!(!markers::NEEDS_VALIDATION.is_empty());
         assert!(!markers::MUST_REFLECT.is_empty());
+        assert!(!markers::QUESTIONS_SHOWN.is_empty());
     }
 
     #[test]
@@ -457,37 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_from_files_session_state() {
+    fn test_migrate_removes_legacy_jkw_files() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
         // Create old YAML state file
         let claude_dir = base.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(
-            base.join(".claude/jkw-state.local.yaml"),
-            r"iteration: 5
-last_issue_change_iteration: 3
-issue_snapshot:
-  - issue-1
-  - issue-2
-git_diff_hash: abc123
-",
-        )
-        .unwrap();
+        std::fs::write(base.join(".claude/jkw-state.local.yaml"), "iteration: 5").unwrap();
 
         // Create store and migrate
         let store = SqliteStore::new(base).unwrap();
         store.migrate_from_files(base).unwrap();
 
-        // Session state should be migrated
-        let state = store.get_session_state().unwrap().unwrap();
-        assert_eq!(state.iteration, 5);
-        assert_eq!(state.last_issue_change_iteration, 3);
-        assert_eq!(state.issue_snapshot, vec!["issue-1", "issue-2"]);
-        assert_eq!(state.git_diff_hash, Some("abc123".to_string()));
-
-        // Old file should be removed
+        // Old file should be removed (not migrated since JKW is removed)
         assert!(!base.join(".claude/jkw-state.local.yaml").exists());
     }
 
@@ -500,8 +297,8 @@ git_diff_hash: abc123
         let store = SqliteStore::new(base).unwrap();
         store.migrate_from_files(base).unwrap();
 
-        // Should work without error
-        assert!(store.get_session_state().unwrap().is_none());
+        // Should work without error (no markers set)
+        assert!(!store.has_marker(markers::PROBLEM_MODE));
     }
 
     #[test]
@@ -515,51 +312,6 @@ git_diff_hash: abc123
         // Should work
         store.set_marker("test").unwrap();
         assert!(store.has_marker("test"));
-    }
-
-    #[test]
-    fn test_session_state_without_git_diff_hash() {
-        let (_dir, store) = create_test_store();
-
-        let state = SessionConfig {
-            iteration: 1,
-            last_issue_change_iteration: 1,
-            issue_snapshot: vec![],
-            git_diff_hash: None,
-        };
-        store.set_session_state(&state).unwrap();
-
-        let read_state = store.get_session_state().unwrap().unwrap();
-        assert!(read_state.git_diff_hash.is_none());
-    }
-
-    #[test]
-    fn test_session_state_empty_snapshot() {
-        let (_dir, store) = create_test_store();
-
-        let state = SessionConfig {
-            iteration: 1,
-            last_issue_change_iteration: 1,
-            issue_snapshot: vec![],
-            git_diff_hash: None,
-        };
-        store.set_session_state(&state).unwrap();
-
-        let read_state = store.get_session_state().unwrap().unwrap();
-        assert!(read_state.issue_snapshot.is_empty());
-    }
-
-    #[test]
-    fn test_clear_issue_snapshot_via_empty_set() {
-        let (_dir, store) = create_test_store();
-
-        // Set some issues
-        store.set_issue_snapshot(&["a".to_string(), "b".to_string()]).unwrap();
-        assert_eq!(store.get_issue_snapshot().unwrap().len(), 2);
-
-        // Clear by setting empty
-        store.set_issue_snapshot(&[]).unwrap();
-        assert!(store.get_issue_snapshot().unwrap().is_empty());
     }
 
     #[test]

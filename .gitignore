@@ -2,7 +2,6 @@
 .devcontainer/.credentials/
 .devcontainer/.ssh/
 .devcontainer/.docker-build-hash
-.claude/jkw-session.local.md
 .claude/settings.local.json
 .claude/setup.local.md
 .claude/bin/
@@ -23,6 +22,3 @@ __pycache__/
 docs/*.png
 .claude/*.sqlite3
 .claude/*.sqlite3-*
-
-# Added by capability regeneration
-.claude/jkw-state.local.yaml
