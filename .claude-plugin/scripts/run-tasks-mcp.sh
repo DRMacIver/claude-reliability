@@ -1,1 +1,0 @@
-../../scripts/run-tasks-mcp.sh
