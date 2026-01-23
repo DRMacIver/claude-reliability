@@ -1,5 +1,6 @@
 ---
-description: This skill should be used when the user asks to "create tasks", "break down work", "plan the implementation", or when starting complex multi-step work that needs tracking. Provides guidance on creating fine-grained tasks with proper dependencies.
+name: Task Management
+description: "This skill should be used when starting complex multi-step work, when breaking down work into smaller pieces, or when needing to track progress on tasks. Provides guidance on creating fine-grained tasks with proper dependencies."
 ---
 
 # Creating Tasks Effectively
@@ -37,22 +38,22 @@ Dependencies ensure tasks happen in the right order. Use them to:
 ```
 1. create_task("Design API for feature X")
 2. create_task("Write tests for feature X")
-   → add_dependency(task_id="write-tests", depends_on="design-api")
+   -> add_dependency(task_id="write-tests", depends_on="design-api")
 3. create_task("Implement feature X")
-   → add_dependency(task_id="implement", depends_on="write-tests")
+   -> add_dependency(task_id="implement", depends_on="write-tests")
 ```
 
-This ensures: Design → Tests → Implementation
+This ensures: Design -> Tests -> Implementation
 
 ### Multi-Phase Work
 ```
 1. create_task("Research options for auth system")
 2. create_task("Prototype chosen approach")
-   → add_dependency(depends_on="research")
+   -> add_dependency(depends_on="research")
 3. create_task("Full implementation")
-   → add_dependency(depends_on="prototype")
+   -> add_dependency(depends_on="prototype")
 4. create_task("Write documentation")
-   → add_dependency(depends_on="implementation")
+   -> add_dependency(depends_on="implementation")
 ```
 
 ### Parallel with Sync Point
@@ -60,8 +61,8 @@ This ensures: Design → Tests → Implementation
 1. create_task("Implement frontend component")
 2. create_task("Implement backend API")
 3. create_task("Integration testing")
-   → add_dependency(depends_on="frontend")
-   → add_dependency(depends_on="backend")
+   -> add_dependency(depends_on="frontend")
+   -> add_dependency(depends_on="backend")
 ```
 
 Both frontend and backend can proceed in parallel, but testing waits for both.
@@ -81,11 +82,11 @@ Both frontend and backend can proceed in parallel, but testing waits for both.
 ```
 create_task("Add reset_token field to User model")
 create_task("Create POST /auth/reset-password endpoint")
-  → depends on model change
+  -> depends on model change
 create_task("Add email sending for reset links")
-  → depends on endpoint
+  -> depends on endpoint
 create_task("Write integration tests")
-  → depends on all above
+  -> depends on all above
 ```
 
 ## Tips

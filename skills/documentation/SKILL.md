@@ -1,5 +1,6 @@
 ---
-description: This skill should be used when the user asks to "create a how-to", "document a procedure", "write instructions", or when capturing reusable procedures for future reference. Provides guidance for creating effective how-to documentation.
+name: How-To Documentation
+description: "This skill should be used when creating documentation, writing instructions, capturing reusable procedures, or when the user asks to 'create a how-to' or 'document a procedure'. Provides guidance for creating effective how-to documentation."
 ---
 
 # Writing How-To Guides
