@@ -20,6 +20,41 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Instructions for the MCP server, shown to agents using this server.
+const INSTRUCTIONS: &str = r#"Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, how-to guides, and questions requiring user input.
+
+## Bulk Task Creation
+
+When creating multiple tasks at once (3+), use the bulk-tasks binary instead of calling create_task repeatedly:
+
+```bash
+~/.claude-reliability/bin/bulk-tasks create <<'EOF'
+{
+  "tasks": [
+    {"id": "t1", "title": "First task", "description": "...", "priority": 1},
+    {"id": "t2", "title": "Second task", "description": "...", "priority": 2, "depends_on": ["t1"]},
+    {"id": "t3", "title": "Third task", "description": "...", "priority": 2, "depends_on": ["t1", "t2"]}
+  ]
+}
+EOF
+```
+
+The `id` fields are temporary identifiers used only for setting up dependencies within the same batch. The actual task IDs are returned in the output.
+
+To add dependencies to existing tasks:
+```bash
+~/.claude-reliability/bin/bulk-tasks add-deps <<'EOF'
+{
+  "dependencies": [
+    {"task_id": "actual-task-id-1", "depends_on": "actual-task-id-2"}
+  ]
+}
+EOF
+```
+
+Priority values: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
+"#;
+
 /// MCP server for task management.
 #[derive(Clone)]
 pub struct TasksServer {
@@ -1256,10 +1291,11 @@ impl rmcp::ServerHandler for TasksServer {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation { name: "tasks-mcp".to_string(), version: env!("CARGO_PKG_VERSION").to_string() },
-            instructions: Some(
-                "Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, how-to guides, and questions requiring user input.".to_string(),
-            ),
+            server_info: Implementation {
+                name: "tasks-mcp".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            instructions: Some(INSTRUCTIONS.to_string()),
         }
     }
 }

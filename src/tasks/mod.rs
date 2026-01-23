@@ -26,6 +26,7 @@
 //! ```
 
 pub mod builtin_howtos;
+pub mod bulk;
 pub mod id;
 pub mod models;
 pub mod store;

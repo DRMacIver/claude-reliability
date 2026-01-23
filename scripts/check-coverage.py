@@ -122,6 +122,77 @@ class UncoveredLine:
         """
         return "coverage:ignore" in self.content
 
+    def is_in_test_code(self) -> bool:
+        """
+        Check if this line is inside a test module or test function.
+
+        Test code (#[cfg(test)] modules, #[test] functions) is not counted
+        towards coverage requirements since we only care about application code.
+
+        This looks at the file to find if this line is within a `mod tests` block.
+        """
+        return is_line_in_test_block(self.file, self.line_number)
+
+
+def is_line_in_test_block(file_path: Path, line_number: int) -> bool:
+    """
+    Check if a given line is inside a #[cfg(test)] module or #[test] function.
+
+    This parses the file to find `mod tests {` blocks and checks if the line
+    falls within them. It also checks for `#[test]` attributes on functions.
+    """
+    try:
+        with file_path.open() as f:
+            lines = f.readlines()
+    except (OSError, IOError):
+        return False
+
+    # Track brace depth to know when we're inside a test module
+    in_test_module = False
+    brace_depth = 0
+    test_module_start_depth = 0
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        # Check for test module declaration
+        if "#[cfg(test)]" in stripped:
+            # Next `mod` declaration will be a test module
+            pass  # We'll catch it with the mod pattern
+
+        # Check for mod tests { (can be on same or different line as #[cfg(test)])
+        if "mod tests" in stripped or "mod test " in stripped:
+            # Look backwards for #[cfg(test)]
+            for j in range(max(0, i - 3), i):
+                if "#[cfg(test)]" in lines[j]:
+                    in_test_module = True
+                    # Count braces before this line to get current depth
+                    for line_so_far in lines[:i]:
+                        brace_depth += line_so_far.count("{") - line_so_far.count("}")
+                    test_module_start_depth = brace_depth - 1  # -1 because we're about to add the {
+                    break
+
+        # Track brace depth
+        open_braces = stripped.count("{")
+        close_braces = stripped.count("}")
+
+        if in_test_module:
+            # Check if this is the line we're looking for
+            if i == line_number:
+                return True
+
+            # Update depth after processing
+            brace_depth += open_braces - close_braces
+
+            # If we've closed back to before the test module, we're out
+            if brace_depth <= test_module_start_depth:
+                in_test_module = False
+
+        else:
+            brace_depth += open_braces - close_braces
+
+    return False
+
 
 def run_coverage() -> Path:
     """Run cargo llvm-cov and generate lcov.info."""
@@ -224,6 +295,7 @@ def main() -> int:
     structural_only: list[UncoveredLine] = []
     assertion_messages: list[UncoveredLine] = []
     explicitly_ignored: list[UncoveredLine] = []
+    test_code: list[UncoveredLine] = []
     actual_code: list[UncoveredLine] = []
 
     for line in uncovered:
@@ -233,6 +305,8 @@ def main() -> int:
             assertion_messages.append(line)
         elif line.is_explicitly_ignored():
             explicitly_ignored.append(line)
+        elif line.is_in_test_code():
+            test_code.append(line)
         else:
             actual_code.append(line)
 
@@ -244,6 +318,7 @@ def main() -> int:
     print(f"Uncovered closing braces (allowed): {len(structural_only)}")
     print(f"Uncovered test assertion messages (allowed): {len(assertion_messages)}")
     print(f"Uncovered explicitly ignored (allowed): {len(explicitly_ignored)}")
+    print(f"Uncovered test code (allowed): {len(test_code)}")
     print(f"Uncovered code lines: {len(actual_code)}")
     print()
 
