@@ -790,14 +790,7 @@ mod tests {
         use std::process::Command;
         use tempfile::TempDir;
 
-        // Skip test if just is not installed (e.g., in CI)
-        // coverage:ignore - skip path only executes in environments without just
-        let just_check = Command::new("just").arg("--version").output();
-        if just_check.is_err() || !just_check.unwrap().status.success() {
-            eprintln!("Skipping test: just is not installed"); // coverage:ignore
-            return; // coverage:ignore
-        }
-
+        // This test requires `just` to be installed
         let dir = TempDir::new().unwrap();
         let dir_path = dir.path();
 
