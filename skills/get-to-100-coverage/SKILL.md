@@ -1,5 +1,5 @@
 ---
-name: Get to 100% Coverage
+name: get-to-100-coverage
 description: This skill should be used when the user asks to "get to 100% coverage", "improve test coverage", "cover uncovered code", "fix coverage gaps", or mentions uncovered lines or coverage percentage. Provides strategies for achieving complete test coverage through better code design.
 ---
 
