@@ -1,5 +1,6 @@
 ---
-description: Guidance on creating and organizing tasks effectively with dependencies
+name: Create Tasks
+description: This skill should be used when the user asks to "create tasks", "break down work", "plan the implementation", or when starting complex multi-step work that needs tracking. Provides guidance on creating fine-grained tasks with proper dependencies.
 ---
 
 # Creating Tasks Effectively
