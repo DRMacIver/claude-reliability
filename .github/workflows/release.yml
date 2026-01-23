@@ -71,23 +71,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             artifact_name: linux-x86_64
-            binary_ext: ""
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             artifact_name: linux-aarch64
-            binary_ext: ""
           - os: macos-13
             target: x86_64-apple-darwin
             artifact_name: macos-x86_64
-            binary_ext: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: macos-aarch64
-            binary_ext: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: windows-x86_64
-            binary_ext: ".exe"
 
     runs-on: ${{ matrix.os }}
 
@@ -121,32 +113,20 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --features cli
 
-      - name: Strip binary (Unix)
-        if: matrix.binary_ext == ''
-        run: strip target/${{ matrix.target }}/release/claude-reliability${{ matrix.binary_ext }}
+      - name: Strip binary
+        run: strip target/${{ matrix.target }}/release/claude-reliability
 
-      - name: Package (Unix)
-        if: matrix.binary_ext == ''
+      - name: Package
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.tar.gz claude-reliability
           mv *.tar.gz ../../../
 
-      - name: Package (Windows)
-        if: matrix.binary_ext == '.exe'
-        shell: pwsh
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path claude-reliability.exe -DestinationPath claude-reliability-${{ needs.check-release.outputs.version }}-${{ matrix.artifact_name }}.zip
-          Move-Item *.zip ../../../
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.artifact_name }}
-          path: |
-            *.tar.gz
-            *.zip
+          path: "*.tar.gz"
 
   release:
     needs: [check-release, build]
