@@ -109,7 +109,7 @@ pub trait SubAgent {
     ///
     /// * `diff` - The git diff to review.
     /// * `files` - The list of files being committed.
-    /// * `review_guide` - Optional review guidelines from REVIEWGUIDE.md.
+    /// * `review_guide` - Optional review guidelines
     ///
     /// # Returns
     ///
