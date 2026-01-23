@@ -7,6 +7,9 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'templates/**'
+      - '.github/workflows/release.yml'
+      - 'scripts/release.py'
 
 permissions:
   contents: write
@@ -43,8 +46,8 @@ jobs:
             exit 0
           fi
 
-          # Check if src/ or Cargo.toml changed since last tag
-          DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Cargo.toml Cargo.lock)
+          # Check if src/, Cargo.toml, templates, or release workflow changed since last tag
+          DIFF=$(git diff --name-only "$LAST_TAG" HEAD -- src/ Cargo.toml Cargo.lock templates/ .github/workflows/release.yml scripts/release.py)
           if [ -n "$DIFF" ]; then
             echo "Changes detected since $LAST_TAG:"
             echo "$DIFF"
