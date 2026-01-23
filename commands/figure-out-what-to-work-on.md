@@ -1,7 +1,5 @@
 ---
-name: Figure Out What to Work On
 description: This skill should be used when the user asks "what should I work on", "what's next", "pick a task", or when needing to select between multiple available tasks. Provides guidance for prioritizing and selecting tasks.
-version: 0.1.0
 ---
 
 # Figuring Out What to Work On
