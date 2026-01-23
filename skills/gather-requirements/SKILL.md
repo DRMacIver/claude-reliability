@@ -1,6 +1,7 @@
 ---
 name: gather-requirements
 description: This skill should be used when the user's request is ambiguous, the scope is unclear, there are multiple valid interpretations, or details need clarification before proceeding. Guides collaborative requirements gathering to understand the problem being solved.
+user-invocable: true
 ---
 
 # Gathering Requirements

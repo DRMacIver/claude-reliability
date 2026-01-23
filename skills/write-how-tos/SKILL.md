@@ -1,6 +1,7 @@
 ---
 name: write-how-tos
 description: This skill should be used when the user asks to "create a how-to", "document a procedure", "write instructions", or when capturing reusable procedures for future reference. Provides guidance for creating effective how-to documentation.
+user-invocable: true
 ---
 
 # Writing How-To Guides
