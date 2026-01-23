@@ -348,6 +348,47 @@ mod tests {
         strs.iter().map(|s| (*s).to_string()).collect()
     }
 
+    /// Create a fake command script in a temp directory and return a guard that
+    /// prepends it to PATH. When the guard is dropped, PATH is restored.
+    struct FakeCommandGuard {
+        original_path: String,
+    }
+
+    impl FakeCommandGuard {
+        /// Create a fake command that exits with code 0.
+        fn new(bin_dir: &std::path::Path, command_name: &str) -> Self {
+            let script_path = bin_dir.join(command_name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, create a .bat file
+                std::fs::write(
+                    bin_dir.join(format!("{command_name}.bat")),
+                    "@echo off\nexit /b 0\n",
+                )
+                .unwrap();
+            }
+
+            let original_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{}", bin_dir.display(), original_path);
+            std::env::set_var("PATH", &new_path);
+
+            Self { original_path }
+        }
+    }
+
+    impl Drop for FakeCommandGuard {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.original_path);
+        }
+    }
+
     #[test]
     fn test_parse_args_no_args() {
         assert_eq!(parse_args(&args(&["prog"])), ParseResult::ShowUsage);
@@ -777,9 +818,12 @@ mod tests {
         use std::process::Command;
         use tempfile::TempDir;
 
-        // This test requires `just` to be installed
         let dir = TempDir::new().unwrap();
         let dir_path = dir.path();
+
+        // Create a fake `just` command so test doesn't depend on system install
+        let bin_dir = TempDir::new().unwrap();
+        let _fake_just = FakeCommandGuard::new(bin_dir.path(), "just");
 
         // Initialize git repo
         Command::new("git").args(["init"]).current_dir(dir_path).output().unwrap();
