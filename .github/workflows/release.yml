@@ -150,7 +150,7 @@ jobs:
 
       - name: Commit version update
         run: |
-          git add Cargo.toml
+          git add Cargo.toml .claude-plugin/plugin.json .claude-plugin/marketplace.json
           git commit -m "Release ${{ needs.check-release.outputs.version }}"
 
       - name: Download all artifacts

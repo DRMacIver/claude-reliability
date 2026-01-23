@@ -99,15 +99,18 @@ def get_calver() -> str:
 
 
 def update_version(new_version: str) -> None:
-    """Update version in Cargo.toml."""
-    cargo_path = Path(__file__).parent.parent / "Cargo.toml"
+    """Update version in Cargo.toml, plugin.json, and marketplace.json."""
+    root = Path(__file__).parent.parent
+
+    # Update Cargo.toml
+    cargo_path = root / "Cargo.toml"
     content = cargo_path.read_text()
 
     # Safety check: verify this is the right Cargo.toml
     name_pattern = r'^name = "([^"]+)"'
     name_match = re.search(name_pattern, content, flags=re.MULTILINE)
     if not name_match or name_match.group(1) != "claude-reliability":
-        print(f"Error: Cargo.toml does not belong to claude-reliability", file=sys.stderr)
+        print("Error: Cargo.toml does not belong to claude-reliability", file=sys.stderr)
         sys.exit(1)
 
     # Update version in [package] section
@@ -120,6 +123,32 @@ def update_version(new_version: str) -> None:
         flags=re.MULTILINE,
     )
     cargo_path.write_text(content)
+
+    # Update plugin.json
+    plugin_path = root / ".claude-plugin" / "plugin.json"
+    if plugin_path.exists():
+        content = plugin_path.read_text()
+        content = re.sub(
+            r'"version":\s*"[^"]+"',
+            f'"version": "{new_version}"',
+            content,
+            count=1,
+        )
+        plugin_path.write_text(content)
+        print(f"Updated plugin.json to {new_version}", file=sys.stderr)
+
+    # Update marketplace.json
+    marketplace_path = root / ".claude-plugin" / "marketplace.json"
+    if marketplace_path.exists():
+        content = marketplace_path.read_text()
+        # Update both metadata version and plugin version
+        content = re.sub(
+            r'"version":\s*"[^"]+"',
+            f'"version": "{new_version}"',
+            content,
+        )
+        marketplace_path.write_text(content)
+        print(f"Updated marketplace.json to {new_version}", file=sys.stderr)
 
 
 def main() -> None:
