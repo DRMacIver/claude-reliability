@@ -12,7 +12,7 @@
   "skills": "./skills/",
   "mcpServers": {
     "tasks": {
-      "command": "./scripts/run-tasks-mcp.sh",
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
       "args": []
     }
   },
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/hooks/hook.sh stop"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh stop"
           }
         ]
       }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/hooks/hook.sh user-prompt-submit"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh user-prompt-submit"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/hooks/hook.sh pre-tool-use"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh pre-tool-use"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/hooks/hook.sh post-tool-use"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/hooks/hook.sh post-tool-use"
           }
         ]
       }
