@@ -62,12 +62,16 @@ pub fn suggest_task(base_dir: &Path) -> Option<(String, String)> {
 /// Count the number of ready tasks (open and not blocked).
 ///
 /// Returns 0 if the database doesn't exist or on any error.
+///
+/// # Panics
+///
+/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn count_ready_tasks(base_dir: &Path) -> u32 {
-    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
-    let Some(db_path) = paths::project_db_path(base_dir) else {
-        return 0; // coverage:ignore
-    };
+    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
+    // on misconfigured systems without a home directory - not a supported config
+    let db_path = paths::project_db_path(base_dir)
+        .expect("home directory must be available via $HOME or /etc/passwd");
     if !db_path.exists() {
         return 0;
     }
@@ -83,12 +87,16 @@ pub fn count_ready_tasks(base_dir: &Path) -> u32 {
 ///
 /// Returns a list of `(task_id, task_title, blocking_questions)` tuples.
 /// Returns empty vec if database doesn't exist or on any error.
+///
+/// # Panics
+///
+/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Question>)> {
-    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
-    let Some(db_path) = paths::project_db_path(base_dir) else {
-        return Vec::new(); // coverage:ignore
-    };
+    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
+    // on misconfigured systems without a home directory - not a supported config
+    let db_path = paths::project_db_path(base_dir)
+        .expect("home directory must be available via $HOME or /etc/passwd");
     if !db_path.exists() {
         return Vec::new();
     }
@@ -97,12 +105,10 @@ pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Q
         return Vec::new();
     };
 
-    // coverage:ignore - Query failure after successful open is unreachable in practice
-    let Ok(tasks) = store.get_question_blocked_tasks() else {
-        return Vec::new(); // coverage:ignore
-    };
-
-    tasks
+    // Query failures return empty vec - corruption/locking issues are handled gracefully
+    store
+        .get_question_blocked_tasks()
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|task| {
             let questions = store.get_blocking_questions(&task.id).ok()?;
@@ -114,12 +120,16 @@ pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Q
 /// List all unanswered questions.
 ///
 /// Returns empty vec if database doesn't exist or on any error.
+///
+/// # Panics
+///
+/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
-    // coverage:ignore - dirs::home_dir() falls back to /etc/passwd, so None is unreachable
-    let Some(db_path) = paths::project_db_path(base_dir) else {
-        return Vec::new(); // coverage:ignore
-    };
+    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
+    // on misconfigured systems without a home directory - not a supported config
+    let db_path = paths::project_db_path(base_dir)
+        .expect("home directory must be available via $HOME or /etc/passwd");
     if !db_path.exists() {
         return Vec::new();
     }

@@ -258,16 +258,19 @@ fn run_intro_cmd() -> (ExitCode, Vec<String>) {
 }
 
 fn run_sync_beads_cmd() -> (ExitCode, Vec<String>) {
+    run_sync_beads_with_runner(&RealCommandRunner::new())
+}
+
+fn run_sync_beads_with_runner(runner: &dyn CommandRunner) -> (ExitCode, Vec<String>) {
     use crate::beads_sync::sync_beads_to_tasks;
     use std::path::Path;
 
-    let runner = RealCommandRunner::new();
     let base_dir = Path::new(".");
 
-    match sync_beads_to_tasks(&runner, base_dir) {
-        Ok(result) => format_sync_result(&result),
-        Err(e) => (ExitCode::from(1), vec![format!("Sync failed: {e}")]), // coverage:ignore - I/O errors
-    }
+    sync_beads_to_tasks(runner, base_dir).map_or_else(
+        |e| (ExitCode::from(1), vec![format!("Sync failed: {e}")]),
+        |result| format_sync_result(&result),
+    )
 }
 
 fn format_sync_result(result: &crate::beads_sync::SyncResult) -> (ExitCode, Vec<String>) {
@@ -288,11 +291,12 @@ fn format_sync_result(result: &crate::beads_sync::SyncResult) -> (ExitCode, Vec<
 }
 
 fn run_user_prompt_submit_cmd() -> (ExitCode, Vec<String>) {
-    match run_user_prompt_submit_hook(None) {
-        Ok(()) => (ExitCode::SUCCESS, Vec::new()),
-        // coverage:ignore - Error path requires database write failure in ~/.claude-reliability/
-        Err(e) => (ExitCode::from(1), vec![format!("Error running user-prompt-submit hook: {e}")]), // coverage:ignore
-    }
+    run_user_prompt_submit_hook(None)
+        .map_or_else(|e| format_user_prompt_submit_error(&e), |()| (ExitCode::SUCCESS, Vec::new()))
+}
+
+fn format_user_prompt_submit_error(e: &crate::error::Error) -> (ExitCode, Vec<String>) {
+    (ExitCode::from(1), vec![format!("Error running user-prompt-submit hook: {e}")])
 }
 
 fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
@@ -1100,5 +1104,139 @@ mod tests {
 
         assert_eq!(exit_code, ExitCode::from(1));
         assert!(messages.iter().any(|m| m.contains("Error: proj-1")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_sync_beads_with_no_issues() {
+        use crate::testing::MockCommandRunner;
+        use crate::traits::CommandOutput;
+        use tempfile::TempDir;
+
+        // Run in a temp dir
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Create .beads directory so beads appears available
+        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
+
+        // Create a mock runner that makes beads appear available but returns no issues
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+        // bd list --status=open - return empty list
+        runner.expect(
+            "bd",
+            &["list", "--status=open", "--format=json"],
+            CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
+        );
+        // bd list --status=in_progress - return empty list
+        runner.expect(
+            "bd",
+            &["list", "--status=in_progress", "--format=json"],
+            CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
+        );
+
+        let (exit_code, messages) = run_sync_beads_with_runner(&runner);
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // With no issues, we get success
+        assert_eq!(exit_code, ExitCode::SUCCESS);
+        assert!(messages.is_empty());
+        runner.verify();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_sync_beads_error_path() {
+        use crate::testing::MockCommandRunner;
+        use crate::traits::CommandOutput;
+        use tempfile::TempDir;
+
+        // Run in a temp dir
+        let dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        // Make the .claude-reliability directory read-only to cause database creation to fail
+        let data_dir = dirs::home_dir().unwrap().join(".claude-reliability");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Create projects dir
+        let projects_dir = data_dir.join("projects");
+        std::fs::create_dir_all(&projects_dir).unwrap();
+
+        // Remove any existing project subdirectory for this temp dir
+        // to ensure create_dir_all will try to create it
+        let project_dir_name = crate::paths::project_data_dir(dir.path())
+            .expect("should get project dir")
+            .file_name()
+            .expect("should have file name")
+            .to_string_lossy()
+            .to_string();
+        let project_subdir = projects_dir.join(&project_dir_name);
+        let _ = std::fs::remove_dir_all(&project_subdir);
+
+        // Create .beads directory so beads appears available
+        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Create a mock runner that makes beads appear available and returns issues
+            let mut runner = MockCommandRunner::new();
+            // Mark bd as available
+            runner.set_available("bd");
+            // bd list --status=open - return one issue
+            runner.expect(
+                "bd",
+                &["list", "--status=open", "--format=json"],
+                CommandOutput {
+                    exit_code: 0,
+                    stdout: r#"[{"id":"proj-1","title":"Test issue","description":"","priority":2,"status":"open"}]"#.to_string(),
+                    stderr: String::new(),
+                },
+            );
+            // bd list --status=in_progress
+            runner.expect(
+                "bd",
+                &["list", "--status=in_progress", "--format=json"],
+                CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
+            );
+
+            let orig_perms = std::fs::metadata(&projects_dir).unwrap().permissions();
+
+            // Make projects dir read-only BEFORE calling sync
+            std::fs::set_permissions(&projects_dir, std::fs::Permissions::from_mode(0o444))
+                .unwrap();
+
+            // Now sync should fail when trying to create the project subdirectory
+            let (exit_code, messages) = run_sync_beads_with_runner(&runner);
+
+            runner.verify();
+
+            // Restore permissions
+            std::fs::set_permissions(&projects_dir, orig_perms).unwrap();
+
+            // Should get failure exit code and error message
+            assert_eq!(exit_code, ExitCode::from(1));
+            assert!(!messages.is_empty());
+            assert!(messages[0].contains("Sync failed"));
+        }
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_format_user_prompt_submit_error() {
+        let error = crate::error::Error::Io(std::io::Error::other("test error"));
+        let (exit_code, messages) = format_user_prompt_submit_error(&error);
+
+        assert_eq!(exit_code, ExitCode::from(1));
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("Error running user-prompt-submit hook"));
+        assert!(messages[0].contains("test error"));
     }
 }
