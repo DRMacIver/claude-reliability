@@ -1,4 +1,3 @@
 git_repo: true
-beads_installed: true
 code_review_section: '## Code Review'
 require_push: false

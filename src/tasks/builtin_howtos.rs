@@ -21,17 +21,20 @@ pub struct BuiltinHowTo {
 }
 
 /// All built-in how-tos.
-/// Add new how-tos here and increment `BUILTIN_HOWTOS_VERSION`.
-pub static BUILTIN_HOWTOS: &[BuiltinHowTo] = &[BuiltinHowTo {
-    id: "builtin-using-claude-reliability-tools",
-    title: "How to Use Claude Reliability Tools",
-    instructions: include_str!("../../templates/howtos/using_claude_reliability_tools.md"),
-}];
+///
+/// NOTE: Built-in how-tos have been replaced with skills in .claude-plugin/skills/.
+/// Skills are more discoverable and can be invoked by name.
+/// This list is intentionally empty - see skills for guidance content.
+pub static BUILTIN_HOWTOS: &[BuiltinHowTo] = &[];
 
 /// Sync built-in how-tos to the database if needed.
 ///
 /// This function checks the stored version and only updates if the binary
 /// has a newer version of the built-in how-tos.
+///
+/// NOTE: The `BUILTIN_HOWTOS` list is intentionally empty - guidance content
+/// has been moved to skills in .claude-plugin/skills/. This function now only
+/// tracks the version to prevent re-running on every startup.
 ///
 /// # Errors
 ///
@@ -51,27 +54,8 @@ pub fn sync_builtin_howtos(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    // Sync each built-in how-to
-    for howto in BUILTIN_HOWTOS {
-        // Check if it already exists
-        let exists: bool = conn
-            .query_row("SELECT 1 FROM howtos WHERE id = ?1", [howto.id], |_| Ok(true))
-            .unwrap_or(false);
-
-        if exists {
-            // Update existing
-            conn.execute(
-                "UPDATE howtos SET title = ?1, instructions = ?2, updated_at = datetime('now') WHERE id = ?3",
-                (howto.title, howto.instructions, howto.id),
-            )?;
-        } else {
-            // Insert new
-            conn.execute(
-                "INSERT INTO howtos (id, title, instructions) VALUES (?1, ?2, ?3)",
-                (howto.id, howto.title, howto.instructions),
-            )?;
-        }
-    }
+    // NOTE: BUILTIN_HOWTOS is intentionally empty - guidance is now in skills.
+    // We still update the version to track that we've run.
 
     // Update stored version
     conn.execute(
@@ -112,19 +96,19 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_creates_builtin_howtos() {
+    fn test_sync_with_empty_builtins() {
         let conn = setup_test_db();
 
         // Initially empty
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM howtos", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0);
 
-        // Sync
+        // Sync (with empty BUILTIN_HOWTOS list)
         sync_builtin_howtos(&conn).unwrap();
 
-        // Should have created how-tos
+        // Should still be empty
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM howtos", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, i64::try_from(BUILTIN_HOWTOS.len()).unwrap());
+        assert_eq!(count, 0);
 
         // Version should be stored
         let version: String = conn
@@ -143,59 +127,14 @@ mod tests {
         sync_builtin_howtos(&conn).unwrap();
         sync_builtin_howtos(&conn).unwrap();
 
-        // Should still have same count
+        // Should still have same count (zero since BUILTIN_HOWTOS is empty)
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM howtos", [], |r| r.get(0)).unwrap();
         assert_eq!(count, i64::try_from(BUILTIN_HOWTOS.len()).unwrap());
     }
 
     #[test]
-    fn test_sync_updates_on_version_change() {
-        let conn = setup_test_db();
-
-        // Sync at "old" version
-        conn.execute("INSERT INTO metadata (key, value) VALUES ('builtin_howtos_version', 0)", [])
-            .unwrap();
-
-        // Manually insert an outdated how-to
-        conn.execute(
-            "INSERT INTO howtos (id, title, instructions) VALUES ('builtin-using-claude-reliability-tools', 'Old Title', 'Old instructions')",
-            [],
-        )
-        .unwrap();
-
-        // Sync should update
-        sync_builtin_howtos(&conn).unwrap();
-
-        // Title should be updated
-        let title: String = conn
-            .query_row(
-                "SELECT title FROM howtos WHERE id = 'builtin-using-claude-reliability-tools'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(title, "How to Use Claude Reliability Tools");
-
-        // Version should be updated
-        let version: String = conn
-            .query_row("SELECT value FROM metadata WHERE key = 'builtin_howtos_version'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(version, BUILTIN_HOWTOS_VERSION.to_string());
-    }
-
-    #[test]
-    fn test_builtin_howto_content_is_valid() {
-        // Verify all built-in how-tos have non-empty content
-        for howto in BUILTIN_HOWTOS {
-            assert!(!howto.id.is_empty(), "How-to ID should not be empty");
-            assert!(!howto.title.is_empty(), "How-to title should not be empty");
-            assert!(!howto.instructions.is_empty(), "How-to instructions should not be empty");
-            assert!(
-                howto.id.starts_with("builtin-"),
-                "Built-in how-to IDs should start with 'builtin-'"
-            );
-        }
+    fn test_builtin_howtos_list_is_empty() {
+        // Verify that built-in how-tos have been replaced with skills
+        assert!(BUILTIN_HOWTOS.is_empty(), "Built-in how-tos should be empty - use skills instead");
     }
 }

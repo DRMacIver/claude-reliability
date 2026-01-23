@@ -5,6 +5,7 @@
 .claude/settings.local.json
 .claude/setup.local.md
 .claude/bin/
+.claude-reliability/
 target/
 Cargo.lock
 lcov.info
@@ -22,3 +23,4 @@ __pycache__/
 docs/*.png
 .claude/*.sqlite3
 .claude/*.sqlite3-*
+.rustup/

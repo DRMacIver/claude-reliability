@@ -17,7 +17,7 @@ if [ -d /mnt/host-ssh ]; then
 fi
 
 # Install Claude Code plugins
-# claude-reliability: Quality hooks, stop detection, commands like /just-keep-working
+# claude-reliability: Quality hooks, stop detection, task management
 # Skip if this IS the claude-reliability repo (can't install a plugin into its own source)
 if command -v claude &> /dev/null; then
     REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "")
@@ -27,21 +27,6 @@ if command -v claude &> /dev/null; then
 
         # Install plugin (idempotent - won't reinstall if already present)
         claude plugin install claude-reliability@claude-reliability-marketplace 2>/dev/null || true
-    fi
-fi
-
-# Update beads to latest (Claude Code auto-updates via native installer)
-sudo npm install -g @beads/bd || true
-
-# Configure beads
-if [ ! -d .beads ]; then
-    # New project - initialize beads
-    bd init || true
-else
-    # Cloned project - ensure beads is properly configured
-    # Fix repo fingerprint if needed (common after cloning)
-    if bd doctor 2>&1 | grep -q "Repo Fingerprint.*different repository"; then
-        echo "y" | bd migrate --update-repo-id || true
     fi
 fi
 

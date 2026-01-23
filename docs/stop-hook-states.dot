@@ -92,6 +92,10 @@ digraph StopHookStateMachine {
     CheckModifyingTools [label="Check transcript:\nmodifying tool use?\n(Write/Edit/Delete)"];
     SetReflectMarker [label="Set reflect marker\nPrompt for reflection"];
 
+    // 12. Auto-Work Task Check
+    CheckAutoWorkTasks [label="Check:\nauto_work_on_tasks &&\nuser idle > N min &&\nopen tasks exist?"];
+    AutoWorkBlock [label="Block:\nWork on open tasks"];
+
     // ========== Transitions ==========
 
     // Start
@@ -180,10 +184,15 @@ digraph StopHookStateMachine {
     // 11. Simple Reflection (marker-based)
     CheckReflectMarker -> ClearReflectMarker [label="marker exists\n(second stop)"];
     CheckReflectMarker -> CheckModifyingTools [label="no marker"];
-    ClearReflectMarker -> AllowStop;
+    ClearReflectMarker -> CheckAutoWorkTasks [label="check auto-work"];
     CheckModifyingTools -> SetReflectMarker [label="has modifying\ntool use"];
-    CheckModifyingTools -> AllowStop [label="no modifying\ntool use"];
+    CheckModifyingTools -> CheckAutoWorkTasks [label="no modifying\ntool use"];
     SetReflectMarker -> BlockStop [label="prompt reflection"];
+
+    // 12. Auto-Work Task Check
+    CheckAutoWorkTasks -> AutoWorkBlock [label="enabled &&\nidle && tasks"];
+    CheckAutoWorkTasks -> AllowStop [label="disabled or\nuser active or\nno tasks"];
+    AutoWorkBlock -> BlockStop;
 
     // ========== Legend ==========
     subgraph cluster_legend {

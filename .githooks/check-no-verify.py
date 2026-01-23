@@ -71,7 +71,6 @@ def main() -> int:
     print("important for:", file=err)
     print("- Running quality checks before commits", file=err)
     print("- Preventing secrets from being committed", file=err)
-    print("- Ensuring beads are properly synced", file=err)
     print("", file=err)
     print("If the user has explicitly said you can skip hooks, set:", file=err)
     print("", file=err)

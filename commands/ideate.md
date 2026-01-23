@@ -4,7 +4,7 @@ description: Generate new features and improvements for the project
 
 # Ideate - Getting Unstuck
 
-Use this when you're in just-keep-working mode and feel stuck, blocked, or uncertain about next steps.
+Use this when you feel stuck, blocked, or uncertain about next steps.
 
 ## Step 1: Assess Current State
 
@@ -14,7 +14,7 @@ Use this when you're in just-keep-working mode and feel stuck, blocked, or uncer
 
 ## Step 2: Check Available Context
 
-1. Review `bd list --status=open` for tracked issues that might help
+1. Review `list_tasks` for tracked tasks that might help
 2. Check CLAUDE.md for guidance you might have missed
 3. Look at git status to see what work is in flight
 
@@ -31,12 +31,12 @@ Consider these strategies for getting unstuck:
 ## Step 4: Choose and Execute
 
 1. Pick the most promising approach
-2. If still stuck, use `bd create` to log the blocker as an issue
+2. If still stuck, use `create_task` to log the blocker
 3. Move on to the next available task
 
 ## Key Principle
 
-In just-keep-working mode, momentum matters. If blocked on one task:
+When blocked on one task:
 1. Log the blocker
 2. Move to the next ready task
 3. Return to blocked tasks when conditions change

@@ -1,7 +1,7 @@
 # Hello World Script Test
 
 This test verifies that the agent can work in a minimal environment
-without git, beads, or a justfile.
+without git or a justfile.
 
 ## Scenario
 
@@ -9,7 +9,7 @@ The agent is asked to create a "Hello world" shell script and run it.
 
 ## Setup
 
-An empty directory with no git repository, no beads, and no justfile.
+An empty directory with no git repository and no justfile.
 
 ## Expected Behavior
 

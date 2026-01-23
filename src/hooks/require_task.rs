@@ -45,7 +45,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_test_store(base: &Path) -> SqliteTaskStore {
-        let db_path = paths::project_db_path(base).expect("should have home dir");
+        let db_path = paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         SqliteTaskStore::new(&db_path).unwrap()
     }

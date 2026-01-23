@@ -15,9 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = if let Ok(path) = env::var("TASKS_DB_PATH") {
         PathBuf::from(path)
     } else {
-        // Default to current directory's project-specific path in ~/.claude-reliability/
+        // Default to current directory's project-specific path in .claude-reliability/
         let cwd = env::current_dir()?;
-        paths::project_db_path(&cwd).ok_or("Cannot determine home directory for database path")?
+        paths::project_db_path(&cwd)
     };
 
     // Create the server

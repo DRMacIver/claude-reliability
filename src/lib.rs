@@ -2,7 +2,6 @@
 //!
 //! Hooks for improving Claude Code reliability and safety.
 
-pub mod beads_sync;
 pub mod cli;
 pub mod command;
 pub mod config;

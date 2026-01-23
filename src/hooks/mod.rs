@@ -20,7 +20,7 @@ pub use problem_mode::run_problem_mode_hook;
 pub use protect_config::run_protect_config_hook;
 pub use require_task::run_require_task_hook;
 pub use stop::{run_stop_hook, StopHookConfig, StopHookResult};
-pub use user_prompt_submit::run_user_prompt_submit_hook;
+pub use user_prompt_submit::{run_user_prompt_submit_hook, UserPromptSubmitInput};
 pub use validation::run_validation_hook;
 
 use crate::error::Result;

@@ -36,10 +36,6 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub git_repo: bool,
 
-    /// Whether beads (bd) is installed and available.
-    #[serde(default)]
-    pub beads_installed: bool,
-
     /// Command to run for quality checks (e.g., "just check").
     /// None means no quality check command is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +55,20 @@ pub struct ProjectConfig {
     /// When true, the stop hook always includes a message explaining the reason.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub explain_stops: bool,
+
+    /// Whether to automatically work on open tasks when user is idle.
+    /// When true and user hasn't been active for `auto_work_idle_minutes`,
+    /// the stop hook will prompt to work on remaining tasks.
+    #[serde(default = "default_auto_work_on_tasks", skip_serializing_if = "std::ops::Not::not")]
+    pub auto_work_on_tasks: bool,
+
+    /// Minutes of user inactivity before prompting to work on tasks.
+    /// Only used when `auto_work_on_tasks` is true.
+    #[serde(
+        default = "default_auto_work_idle_minutes",
+        skip_serializing_if = "is_default_idle_minutes"
+    )]
+    pub auto_work_idle_minutes: u32,
 }
 
 /// Default value for `require_push` - true by default.
@@ -66,15 +76,32 @@ const fn default_require_push() -> bool {
     true
 }
 
+/// Default value for `auto_work_on_tasks` - true by default.
+const fn default_auto_work_on_tasks() -> bool {
+    true
+}
+
+/// Default value for `auto_work_idle_minutes` - 15 minutes.
+const fn default_auto_work_idle_minutes() -> u32 {
+    15
+}
+
+/// Check if idle minutes is the default value (for `skip_serializing_if`).
+#[allow(clippy::trivially_copy_pass_by_ref)] // Required signature for serde's skip_serializing_if
+const fn is_default_idle_minutes(val: &u32) -> bool {
+    *val == default_auto_work_idle_minutes()
+}
+
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
             git_repo: false,
-            beads_installed: false,
             check_command: None,
             code_review_section: None,
             require_push: true,
             explain_stops: false,
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
         }
     }
 }
@@ -136,7 +163,6 @@ impl ProjectConfig {
     ///
     /// This checks:
     /// - Whether `.git` directory exists (`git_repo`)
-    /// - Whether `bd` command is available (`beads_installed`)
     /// - Whether `just check` is viable (`check_command`)
     pub fn detect(runner: &dyn CommandRunner) -> Self {
         Self::detect_in(runner, Path::new("."))
@@ -145,7 +171,6 @@ impl ProjectConfig {
     /// Detect project configuration in a specific directory.
     pub fn detect_in(runner: &dyn CommandRunner, base_dir: &Path) -> Self {
         let git_repo = base_dir.join(".git").exists();
-        let beads_installed = runner.is_available("bd");
         let check_command = detect_check_command(runner, base_dir);
         let code_review_section = find_code_review_section(base_dir);
 
@@ -154,11 +179,12 @@ impl ProjectConfig {
 
         Self {
             git_repo,
-            beads_installed,
             check_command,
             code_review_section,
             require_push,
             explain_stops: false,
+            auto_work_on_tasks: default_auto_work_on_tasks(),
+            auto_work_idle_minutes: default_auto_work_idle_minutes(),
         }
     }
 
@@ -511,7 +537,6 @@ mod tests {
     fn test_project_config_default() {
         let config = ProjectConfig::default();
         assert!(!config.git_repo);
-        assert!(!config.beads_installed);
         assert!(config.check_command.is_none());
     }
 
@@ -528,11 +553,11 @@ mod tests {
 
         let config = ProjectConfig {
             git_repo: true,
-            beads_installed: true,
             check_command: Some("just check".to_string()),
             code_review_section: None,
             require_push: true,
             explain_stops: false,
+            ..Default::default()
         };
 
         config.save_to(dir.path()).unwrap();
@@ -547,18 +572,17 @@ mod tests {
 
         let config = ProjectConfig {
             git_repo: true,
-            beads_installed: false,
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: true,
             explain_stops: false,
+            ..Default::default()
         };
 
         config.save_to(dir.path()).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
         assert!(content.contains("git_repo: true"));
-        assert!(content.contains("beads_installed: false"));
         assert!(content.contains("check_command: make test"));
         assert!(content.contains("require_push: true"));
     }
@@ -591,16 +615,6 @@ mod tests {
         // No remote, so require_push should be false
         assert!(!config.require_push);
         runner.verify();
-    }
-
-    #[test]
-    fn test_project_config_detect_beads() {
-        let dir = TempDir::new().unwrap();
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-
-        let config = ProjectConfig::detect_in(&runner, dir.path());
-        assert!(config.beads_installed);
     }
 
     #[test]
@@ -742,7 +756,6 @@ mod tests {
         let config = ensure_config_in(&runner, dir.path()).unwrap();
 
         assert!(config.git_repo);
-        assert!(config.beads_installed);
 
         // Verify file was created
         assert!(dir.path().join(CONFIG_FILE_PATH).exists());
@@ -756,11 +769,11 @@ mod tests {
         // Create existing config without .git
         let existing = ProjectConfig {
             git_repo: false,
-            beads_installed: true,
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: false,
             explain_stops: false,
+            ..Default::default()
         };
         existing.save_to(dir.path()).unwrap();
 
@@ -769,7 +782,6 @@ mod tests {
 
         // Should preserve non-git fields from saved config
         assert!(!config.git_repo); // Still false, no .git exists
-        assert!(config.beads_installed);
         assert_eq!(config.check_command, Some("make test".to_string()));
     }
 
@@ -782,11 +794,11 @@ mod tests {
         // Create existing config without .git
         let existing = ProjectConfig {
             git_repo: false,
-            beads_installed: true,
             check_command: Some("make test".to_string()),
             code_review_section: None,
             require_push: false,
             explain_stops: false,
+            ..Default::default()
         };
         existing.save_to(dir.path()).unwrap();
 
@@ -806,7 +818,6 @@ mod tests {
         // git_repo should now be true (re-detected)
         assert!(config.git_repo);
         // Other fields should be preserved
-        assert!(config.beads_installed);
         assert_eq!(config.check_command, Some("make test".to_string()));
         // require_push should be updated (false because no remote)
         assert!(!config.require_push);
@@ -1256,7 +1267,7 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
 
         // Create config without require_push field
-        std::fs::write(&config_path, "git_repo: true\nbeads_installed: false\n").unwrap();
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
 
         let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
         // require_push should default to true
@@ -1313,11 +1324,7 @@ mod tests {
 
         // Create .claude directory and config without code_review_section
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config_path,
-            "git_repo: true\nbeads_installed: false\nrequire_push: false\n",
-        )
-        .unwrap();
+        std::fs::write(&config_path, "git_repo: true\nrequire_push: false\n").unwrap();
 
         // Create CLAUDE.md with Code Review section (to be discovered)
         std::fs::write(&claude_md, "# Project\n\n## Code Review\n\nGuidelines.").unwrap();
@@ -1371,7 +1378,7 @@ mod tests {
         // Create config WITHOUT code_review_section (not yet detected)
         let config_path = base.join(CONFIG_FILE_PATH);
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, "git_repo: false\nbeads_installed: false\n").unwrap();
+        std::fs::write(&config_path, "git_repo: false\n").unwrap();
 
         let runner = MockCommandRunner::new();
 
@@ -1398,7 +1405,7 @@ mod tests {
         // Create config WITHOUT code_review_section
         let config_path = base.join(CONFIG_FILE_PATH);
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, "git_repo: false\nbeads_installed: false\n").unwrap();
+        std::fs::write(&config_path, "git_repo: false\n").unwrap();
 
         let runner = MockCommandRunner::new();
 
@@ -1454,11 +1461,11 @@ mod tests {
         // Create a config and save it
         let config = ProjectConfig {
             git_repo: true,
-            beads_installed: false,
             check_command: Some("just check".to_string()),
             code_review_section: None,
             require_push: true,
             explain_stops: false,
+            ..Default::default()
         };
 
         // Change to temp dir to test save() wrapper
@@ -1646,7 +1653,6 @@ mod tests {
 
         // Create a fully populated config file
         let original_content = "git_repo: true
-beads_installed: true
 check_command: just check
 code_review_section: '## Code Review'
 require_push: true
@@ -1662,7 +1668,6 @@ explain_stops: true
 
         // Verify all fields are preserved
         assert!(config.git_repo);
-        assert!(config.beads_installed);
         assert_eq!(config.check_command, Some("just check".to_string()));
         assert_eq!(config.code_review_section, Some("## Code Review".to_string()));
         assert!(config.require_push);
@@ -1680,11 +1685,11 @@ explain_stops: true
 
         let config = ProjectConfig {
             git_repo: true,
-            beads_installed: true,
             check_command: Some("just check".to_string()),
             code_review_section: Some("## Code Review".to_string()),
             require_push: true,
             explain_stops: true,
+            ..Default::default()
         };
 
         config.save_to(dir.path()).unwrap();
@@ -1697,5 +1702,97 @@ explain_stops: true
             Some("just check".to_string()),
             "Expected check_command to be preserved after save/load"
         );
+    }
+
+    #[test]
+    fn test_auto_work_on_tasks_default_true() {
+        let config = ProjectConfig::default();
+        assert!(config.auto_work_on_tasks);
+    }
+
+    #[test]
+    fn test_auto_work_idle_minutes_default_15() {
+        let config = ProjectConfig::default();
+        assert_eq!(config.auto_work_idle_minutes, 15);
+    }
+
+    #[test]
+    fn test_auto_work_on_tasks_not_serialized_when_false() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { auto_work_on_tasks: false, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // auto_work_on_tasks should not appear in YAML when false
+        assert!(!content.contains("auto_work_on_tasks"));
+    }
+
+    #[test]
+    fn test_auto_work_on_tasks_serialized_when_true() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { auto_work_on_tasks: true, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // auto_work_on_tasks should appear in YAML when true
+        assert!(content.contains("auto_work_on_tasks: true"));
+    }
+
+    #[test]
+    fn test_auto_work_idle_minutes_not_serialized_when_default() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { auto_work_idle_minutes: 15, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // auto_work_idle_minutes should not appear when at default value
+        assert!(!content.contains("auto_work_idle_minutes"));
+    }
+
+    #[test]
+    fn test_auto_work_idle_minutes_serialized_when_non_default() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { auto_work_idle_minutes: 30, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        // auto_work_idle_minutes should appear when not at default
+        assert!(content.contains("auto_work_idle_minutes: 30"));
+    }
+
+    #[test]
+    fn test_auto_work_fields_loaded_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create config with custom auto_work values
+        std::fs::write(
+            &config_path,
+            "git_repo: false\nauto_work_on_tasks: true\nauto_work_idle_minutes: 30\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(config.auto_work_on_tasks);
+        assert_eq!(config.auto_work_idle_minutes, 30);
+    }
+
+    #[test]
+    fn test_auto_work_fields_default_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        // Create config without auto_work fields
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(config.auto_work_on_tasks); // Defaults to true
+        assert_eq!(config.auto_work_idle_minutes, 15); // Defaults to 15
     }
 }

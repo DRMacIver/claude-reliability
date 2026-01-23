@@ -49,7 +49,7 @@ use std::path::Path;
 /// Returns `Some((id, title))` of the suggested task.
 #[must_use]
 pub fn suggest_task(base_dir: &Path) -> Option<(String, String)> {
-    let db_path = paths::project_db_path(base_dir)?;
+    let db_path = paths::project_db_path(base_dir);
     if !db_path.exists() {
         return None;
     }
@@ -62,16 +62,9 @@ pub fn suggest_task(base_dir: &Path) -> Option<(String, String)> {
 /// Count the number of ready tasks (open and not blocked).
 ///
 /// Returns 0 if the database doesn't exist or on any error.
-///
-/// # Panics
-///
-/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn count_ready_tasks(base_dir: &Path) -> u32 {
-    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
-    // on misconfigured systems without a home directory - not a supported config
-    let db_path = paths::project_db_path(base_dir)
-        .expect("home directory must be available via $HOME or /etc/passwd");
+    let db_path = paths::project_db_path(base_dir);
     if !db_path.exists() {
         return 0;
     }
@@ -87,16 +80,9 @@ pub fn count_ready_tasks(base_dir: &Path) -> u32 {
 ///
 /// Returns a list of `(task_id, task_title, blocking_questions)` tuples.
 /// Returns empty vec if database doesn't exist or on any error.
-///
-/// # Panics
-///
-/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Question>)> {
-    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
-    // on misconfigured systems without a home directory - not a supported config
-    let db_path = paths::project_db_path(base_dir)
-        .expect("home directory must be available via $HOME or /etc/passwd");
+    let db_path = paths::project_db_path(base_dir);
     if !db_path.exists() {
         return Vec::new();
     }
@@ -120,16 +106,9 @@ pub fn get_question_blocked_tasks(base_dir: &Path) -> Vec<(String, String, Vec<Q
 /// List all unanswered questions.
 ///
 /// Returns empty vec if database doesn't exist or on any error.
-///
-/// # Panics
-///
-/// Panics if the home directory cannot be determined (no `$HOME` and user not in `/etc/passwd`).
 #[must_use]
 pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
-    // dirs::home_dir() falls back to /etc/passwd on Linux, so None only occurs
-    // on misconfigured systems without a home directory - not a supported config
-    let db_path = paths::project_db_path(base_dir)
-        .expect("home directory must be available via $HOME or /etc/passwd");
+    let db_path = paths::project_db_path(base_dir);
     if !db_path.exists() {
         return Vec::new();
     }
@@ -148,7 +127,7 @@ mod tests {
 
     /// Get the database path for a project directory (for tests).
     fn test_db_path(project_dir: &Path) -> std::path::PathBuf {
-        paths::project_db_path(project_dir).expect("test should have home dir")
+        paths::project_db_path(project_dir)
     }
 
     #[test]

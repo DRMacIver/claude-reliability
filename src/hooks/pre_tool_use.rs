@@ -9,7 +9,7 @@ use crate::hooks::{
 };
 use crate::subagent::RealSubAgent;
 use crate::templates;
-use crate::traits::CommandRunner;
+use crate::traits::{CommandRunner, SubAgent};
 use std::path::Path;
 use tera::Context;
 
@@ -31,6 +31,19 @@ pub fn run_pre_tool_use(
     input: &HookInput,
     base_dir: &Path,
     runner: &dyn CommandRunner,
+) -> PreToolUseOutput {
+    let sub_agent = RealSubAgent::new(runner);
+    run_pre_tool_use_with_sub_agent(input, base_dir, runner, &sub_agent)
+}
+
+/// Run all applicable `PreToolUse` hooks with a provided sub-agent.
+///
+/// This is the testable version that accepts a `SubAgent` trait.
+pub fn run_pre_tool_use_with_sub_agent(
+    input: &HookInput,
+    base_dir: &Path,
+    runner: &dyn CommandRunner,
+    sub_agent: &dyn SubAgent,
 ) -> PreToolUseOutput {
     let tool_name = input.tool_name.as_deref().unwrap_or("");
 
@@ -54,15 +67,12 @@ pub fn run_pre_tool_use(
             check_hook!(run_no_verify_check(input));
 
             // Code review for git commits
-            // The sub-agent calls out to claude CLI, tested via code_review module
-            let sub_agent = RealSubAgent::new(runner);
             let config = CodeReviewConfig::default();
-            if let Ok(exit_code) = run_code_review_hook(input, &config, runner, &sub_agent) {
+            if let Ok(exit_code) = run_code_review_hook(input, &config, runner, sub_agent) {
                 if exit_code != 0 {
-                    // coverage:ignore - requires real claude CLI; code_review.rs tests rejection path
-                    #[rustfmt::skip]
-                    return PreToolUseOutput::block(Some( // coverage:ignore
-                        "Code review required before commit".to_string())); // coverage:ignore
+                    return PreToolUseOutput::block(Some(
+                        "Code review required before commit".to_string(),
+                    ));
                 }
             }
         }
@@ -245,7 +255,7 @@ mod tests {
         let runner = MockCommandRunner::new();
 
         // Set up task store with in-progress task
-        let db_path = paths::project_db_path(dir.path()).expect("should have home dir");
+        let db_path = paths::project_db_path(dir.path());
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
         let task = store.create_task("Test task", "Description", Priority::Medium).unwrap();
@@ -286,5 +296,56 @@ mod tests {
         assert!(!output.is_block());
         // Check that validation marker was set
         assert!(crate::session::needs_validation(dir.path()));
+    }
+
+    #[test]
+    fn test_bash_blocked_by_code_review_rejection() {
+        use crate::testing::MockSubAgent;
+        use crate::traits::CommandOutput;
+
+        let dir = TempDir::new().unwrap();
+        let mut runner = MockCommandRunner::new();
+
+        // Set up expectations for git diff commands used by code review
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--name-only"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "src/main.rs\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "-U0"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "+fn main() {}\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        // Sub-agent rejects the code review
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_review(false, "Security issue found");
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("git commit -m 'test'".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use_with_sub_agent(&input, dir.path(), &runner, &sub_agent);
+        assert!(output.is_block());
+        assert!(output
+            .hook_specific_output
+            .additional_context
+            .as_ref()
+            .unwrap()
+            .contains("Code review required"));
     }
 }

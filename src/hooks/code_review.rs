@@ -77,7 +77,6 @@ static SOURCE_DIRECTORIES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 /// Directories to always exclude.
 static EXCLUDED_DIRECTORIES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        ".beads",
         ".claude",
         ".git",
         ".github",
@@ -279,7 +278,6 @@ mod tests {
     #[test]
     fn test_is_source_code_file_excluded() {
         assert!(!is_source_code_file("node_modules/package/index.js"));
-        assert!(!is_source_code_file(".beads/issue.yaml"));
         assert!(!is_source_code_file("vendor/lib.py"));
         assert!(!is_source_code_file("__pycache__/foo.pyc"));
     }

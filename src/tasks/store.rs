@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::paths;
 use crate::tasks::id::generate_task_id;
 use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Question, Status, Task};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::hash_map::RandomState;
 use std::collections::HashSet;
@@ -251,9 +252,10 @@ impl HowToUpdate {
     }
 }
 
-#[rustfmt::skip]  // coverage:ignore - function unreachable in practice
-fn create_question_fetch_error() -> crate::error::Error { crate::error::Error::Task(Box::new( // coverage:ignore
-    std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to fetch created question"))) } // coverage:ignore
+/// Generate an ISO 8601 timestamp string for the current time.
+fn now_timestamp() -> String {
+    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 /// SQLite-based task store.
 #[derive(Debug, Clone)]
@@ -275,15 +277,13 @@ impl SqliteTaskStore {
 
     /// Create a new `SQLite` task store for the given project directory.
     ///
-    /// The database will be at `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
+    /// The database will be at `<project_dir>/.claude-reliability/working-memory.sqlite3`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined or
-    /// the database cannot be initialized.
+    /// Returns an error if the database cannot be initialized.
     pub fn for_project(project_dir: &Path) -> Result<Self> {
-        let db_path = paths::project_db_path(project_dir)
-            .ok_or_else(|| crate::error::Error::Config("Cannot determine home directory".into()))?;
+        let db_path = paths::project_db_path(project_dir);
         Self::new(db_path)
     }
 
@@ -1402,14 +1402,16 @@ impl TaskStore for SqliteTaskStore {
     fn create_question(&self, text: &str) -> Result<Question> {
         let conn = self.open()?;
         let id = generate_task_id(text);
+        let created_at = now_timestamp();
 
-        conn.execute("INSERT INTO questions (id, text) VALUES (?1, ?2)", params![id, text])?;
+        conn.execute(
+            "INSERT INTO questions (id, text, created_at) VALUES (?1, ?2, ?3)",
+            params![id, text, created_at],
+        )?;
 
         Self::log_audit(&conn, "create_question", Some(&id), None, None, Some(text))?;
 
-        // This error path is unreachable in practice: the INSERT succeeded,
-        // so the subsequent SELECT can only fail if the database is corrupted between operations.
-        self.get_question(&id)?.ok_or_else(create_question_fetch_error)
+        Ok(Question { id, text: text.to_string(), answer: None, created_at, answered_at: None })
     }
 
     fn get_question(&self, id: &str) -> Result<Option<Question>> {
@@ -1642,6 +1644,18 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let store = SqliteTaskStore::new(&db_path).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn test_now_timestamp_format() {
+        let ts = now_timestamp();
+        // Format should be "YYYY-MM-DD HH:MM:SS"
+        assert_eq!(ts.len(), 19);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], " ");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
     }
 
     #[test]
@@ -2149,10 +2163,9 @@ mod tests {
     fn test_for_project() {
         let dir = TempDir::new().unwrap();
         let store = SqliteTaskStore::for_project(dir.path()).unwrap();
-        // Database should be in ~/.claude-reliability/projects/<sanitized-path>/
+        // Database should be in <project>/.claude-reliability/
         let path_str = store.db_path().to_string_lossy();
         assert!(path_str.contains(".claude-reliability"));
-        assert!(path_str.contains("projects"));
     }
 
     #[test]

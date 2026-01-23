@@ -6,29 +6,11 @@ repos:
   # Local hooks
   - repo: local
     hooks:
-      # Require beads interaction on every commit (Claude Code sessions only)
-      - id: beads-interaction
-        name: Check beads interaction
-        entry: .githooks/check-beads-interaction.sh
-        language: script
-        always_run: true
-        pass_filenames: false
-        stages: [pre-commit]
-
       # Protect .claude/scripts/ hook edits (Claude Code sessions only)
       - id: hook-edits
         name: Check hook edits
         entry: .githooks/check-hook-edits.sh
         language: script
-        always_run: true
-        pass_filenames: false
-        stages: [pre-commit]
-
-      # Run bd pre-commit hook for JSONL sync
-      - id: beads-sync
-        name: Beads sync
-        entry: bd hooks run pre-commit
-        language: system
         always_run: true
         pass_filenames: false
         stages: [pre-commit]

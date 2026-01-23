@@ -43,11 +43,11 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if the home directory cannot be determined or
-    /// the database cannot be initialized.
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be initialized.
     pub fn new(project_dir: &Path) -> Result<Self> {
-        let db_path = paths::project_db_path(project_dir)
-            .ok_or_else(|| crate::error::Error::Config("Cannot determine home directory".into()))?;
+        let db_path = paths::project_db_path(project_dir);
         let store = Self { db_path };
         store.init_schema()?;
         Ok(store)
@@ -189,10 +189,9 @@ mod tests {
     fn test_new_store_creates_database() {
         let (_dir, store) = create_test_store();
         assert!(store.db_path().exists());
-        // Database should be in ~/.claude-reliability/projects/<sanitized-path>/
+        // Database should be in <project>/.claude-reliability/
         let path_str = store.db_path().to_string_lossy();
         assert!(path_str.contains(".claude-reliability"));
-        assert!(path_str.contains("projects"));
         assert!(path_str.ends_with(paths::DATABASE_FILENAME));
     }
 

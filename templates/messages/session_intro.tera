@@ -16,6 +16,16 @@ You have several tools to help you succeed:
 - **Quality checks**: Catch issues early so you can fix them properly.
 - **How-to guides**: Reference guides for common tasks. Consult these when you're unsure, and update them when you learn something useful.
 
+## Capturing Tasks
+
+**Never let user requests get lost.** When the user mentions something - a bug, a feature request, a problem to fix - capture it immediately as a task using the task system. This is especially important when:
+
+- The user mentions something unrelated to what you're currently working on
+- The user gives feedback that implies future work
+- You notice something that needs fixing while working on something else
+
+Don't assume you'll remember it later. Context may be compacted. Create the task first, then decide whether to work on it now or continue with your current work.
+
 ## The Key Principle
 
 When the user asks you to do something, **actually do it**. Don't stop because something seems complicated - work through it. Don't add error suppression because fixing an issue seems hard - fix the issue. Don't declare victory after doing part of the work - finish the job.

@@ -52,7 +52,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup_db(dir: &Path) {
-        let db_path = paths::project_db_path(dir).expect("should have home dir");
+        let db_path = paths::project_db_path(dir);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     }
 

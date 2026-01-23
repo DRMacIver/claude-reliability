@@ -179,10 +179,25 @@ install-tools:
 	rustup component add clippy rustfmt llvm-tools-preview
 	cargo install cargo-llvm-cov
 
-lint: check-bin-size
+lint: check-bin-size check-no-coverage-ignore
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo fmt --check
 	uv run scripts/check-templates.py
+
+# Ensure no coverage:ignore comments exist - all code must be tested
+check-no-coverage-ignore:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if grep -rn "coverage:ignore" src/; then
+		echo ""
+		echo "ERROR: Found coverage:ignore comments in source code"
+		echo "All code paths must be either:"
+		echo "  1. Properly tested"
+		echo "  2. Made unreachable with unreachable!() macro"
+		echo "  3. Removed as unnecessary error handling"
+		exit 1
+	fi
+	echo "No coverage:ignore comments found"
 
 release:
 	#!/usr/bin/env bash

@@ -57,6 +57,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/stop/staleness_detected.tera",
         include_str!("../templates/messages/stop/staleness_detected.tera"),
     );
+    m.insert(
+        "messages/stop/auto_work_tasks.tera",
+        include_str!("../templates/messages/stop/auto_work_tasks.tera"),
+    );
 
     // Other hook messages
     m.insert(
@@ -271,6 +275,8 @@ fn sample_context_for(template_name: &str) -> Context {
     ctx.insert("iterations_since_change", &2_u32);
     ctx.insert("iteration", &5_u32);
     ctx.insert("staleness_threshold", &5_u32);
+    ctx.insert("task_count", &3_u32);
+    ctx.insert("idle_minutes", &30_u32);
 
     // Other hooks
     ctx.insert("tool_name", "Bash");

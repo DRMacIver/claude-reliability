@@ -82,8 +82,7 @@ pub fn staged_diff(runner: &dyn CommandRunner) -> Result<String> {
 /// - List of modified (unstaged) files
 /// - List of untracked files
 ///
-/// The hash is used as a fallback for detecting progress when beads
-/// issue tracking is not available.
+/// The hash is used for detecting when working state has changed.
 ///
 /// # Errors
 ///

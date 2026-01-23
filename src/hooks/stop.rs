@@ -70,6 +70,10 @@ pub struct StopHookConfig {
     /// Whether to explain why stops are permitted.
     /// When true, always includes a message to the user explaining the reason.
     pub explain_stops: bool,
+    /// Whether to automatically work on open tasks when user is idle.
+    pub auto_work_on_tasks: bool,
+    /// Minutes of user inactivity before prompting to work on tasks.
+    pub auto_work_idle_minutes: u32,
 }
 
 impl StopHookConfig {
@@ -455,6 +459,12 @@ pub fn run_stop_hook(
     if session::has_reflect_marker(base_dir) {
         // Agent already got the reflection prompt and is stopping again - allow it
         session::clear_reflect_marker(base_dir)?;
+
+        // Check if we should prompt to work on open tasks before allowing stop
+        if let Some(result) = check_auto_work_tasks(config, &transcript_info) {
+            return Ok(result);
+        }
+
         return Ok(StopHookResult::allow()
             .with_explanation(config.explain_stops, "reflection already prompted on first stop"));
     }
@@ -487,7 +497,60 @@ pub fn run_stop_hook(
             .with_message("  - Then stop again to exit"));
     }
 
+    // Check if we should prompt to work on open tasks (before final allow)
+    if let Some(result) = check_auto_work_tasks(config, &transcript_info) {
+        return Ok(result);
+    }
+
     Ok(StopHookResult::allow().with_explanation(config.explain_stops, "no modifying tools used"))
+}
+
+/// Check if we should prompt the agent to work on open tasks.
+///
+/// This is triggered when:
+/// 1. `auto_work_on_tasks` is enabled
+/// 2. There are open, ready tasks in the database
+/// 3. User has been idle for at least `auto_work_idle_minutes`
+///
+/// Returns Some(block result) if agent should work on tasks, None otherwise.
+fn check_auto_work_tasks(
+    config: &StopHookConfig,
+    transcript_info: &TranscriptInfo,
+) -> Option<StopHookResult> {
+    // Skip if auto-work is disabled
+    if !config.auto_work_on_tasks {
+        return None;
+    }
+
+    // Check user idle time
+    let user_idle_minutes = transcript_info.last_user_message_time.map_or(u32::MAX, |ts| {
+        let now = Utc::now();
+        let minutes = now.signed_duration_since(ts).num_minutes();
+        // Clamp to u32 range (negative means user is in the future, treat as just now)
+        u32::try_from(minutes.max(0)).unwrap_or(u32::MAX)
+    }); // If no timestamp, treat as very idle
+
+    if user_idle_minutes < config.auto_work_idle_minutes {
+        return None;
+    }
+
+    // Check for open tasks
+    let base_dir = config.base_dir();
+    let ready_task_count = tasks::count_ready_tasks(base_dir);
+
+    if ready_task_count == 0 {
+        return None;
+    }
+
+    // User is idle and there are tasks - prompt to work on them
+    let mut ctx = Context::new();
+    ctx.insert("task_count", &ready_task_count);
+    ctx.insert("idle_minutes", &user_idle_minutes);
+
+    let message = templates::render("messages/stop/auto_work_tasks.tera", &ctx)
+        .expect("auto_work_tasks.tera template should always render");
+
+    Some(StopHookResult::block().with_message(message))
 }
 
 /// Check if the assistant's last message is asking about committing or pushing.
@@ -1031,6 +1094,222 @@ mod tests {
     }
 
     #[test]
+    fn test_check_auto_work_tasks_disabled() {
+        let config = StopHookConfig { auto_work_on_tasks: false, ..Default::default() };
+        let transcript = TranscriptInfo::default();
+
+        let result = check_auto_work_tasks(&config, &transcript);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_auto_work_tasks_user_recently_active() {
+        use chrono::Utc;
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            ..Default::default()
+        };
+        let transcript = TranscriptInfo {
+            last_user_message_time: Some(Utc::now()), // Just now
+            ..Default::default()
+        };
+
+        let result = check_auto_work_tasks(&config, &transcript);
+        assert!(result.is_none()); // User is active, shouldn't block
+    }
+
+    #[test]
+    fn test_check_auto_work_tasks_no_tasks() {
+        use chrono::Utc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let transcript = TranscriptInfo {
+            last_user_message_time: Some(Utc::now() - chrono::Duration::minutes(30)),
+            ..Default::default()
+        };
+
+        let result = check_auto_work_tasks(&config, &transcript);
+        assert!(result.is_none()); // No tasks, shouldn't block
+    }
+
+    #[test]
+    fn test_check_auto_work_tasks_blocks_with_tasks() {
+        use crate::tasks::models::Priority;
+        use crate::tasks::store::{SqliteTaskStore, TaskStore};
+        use chrono::Utc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = crate::paths::project_db_path(dir.path());
+
+        // Create a ready task
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.create_task("Test task", "description", Priority::Medium).unwrap();
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let transcript = TranscriptInfo {
+            last_user_message_time: Some(Utc::now() - chrono::Duration::minutes(30)),
+            ..Default::default()
+        };
+
+        let result = check_auto_work_tasks(&config, &transcript);
+        assert!(result.is_some()); // Has tasks and user is idle - should block
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+    }
+
+    #[test]
+    fn test_check_auto_work_tasks_no_timestamp_treats_as_idle() {
+        use crate::tasks::models::Priority;
+        use crate::tasks::store::{SqliteTaskStore, TaskStore};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = crate::paths::project_db_path(dir.path());
+
+        // Create a ready task
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.create_task("Test task", "description", Priority::Medium).unwrap();
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            base_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let transcript = TranscriptInfo {
+            last_user_message_time: None, // No timestamp
+            ..Default::default()
+        };
+
+        let result = check_auto_work_tasks(&config, &transcript);
+        assert!(result.is_some()); // No timestamp = very idle, should block
+    }
+
+    #[test]
+    fn test_stop_hook_auto_work_blocks_after_reflection() {
+        // Test that auto-work blocks after reflection marker is set (covers line 465)
+        use crate::tasks::models::Priority;
+        use crate::tasks::store::{SqliteTaskStore, TaskStore};
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use chrono::Utc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let db_path = crate::paths::project_db_path(base);
+
+        // Set up reflection marker (simulating previous stop)
+        crate::session::set_reflect_marker(base).unwrap();
+
+        // Create a ready task
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.create_task("Test task", "description", Priority::Medium).unwrap();
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // Create transcript showing user has been idle
+        let transcript_path = base.join("transcript.jsonl");
+        let old_time = Utc::now() - chrono::Duration::minutes(30);
+        std::fs::write(
+            &transcript_path,
+            format!(
+                r#"{{"type":"user","content":[{{"type":"text","text":"test"}}],"timestamp":"{}"}}"#,
+                old_time.to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block to work on tasks
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+    }
+
+    #[test]
+    fn test_stop_hook_auto_work_blocks_without_modifying_tools() {
+        // Test that auto-work blocks when no modifying tools used (covers line 502)
+        use crate::tasks::models::Priority;
+        use crate::tasks::store::{SqliteTaskStore, TaskStore};
+        use crate::testing::{MockCommandRunner, MockSubAgent};
+        use chrono::Utc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let db_path = crate::paths::project_db_path(base);
+
+        // Create a ready task
+        let store = SqliteTaskStore::new(&db_path).unwrap();
+        store.create_task("Test task", "description", Priority::Medium).unwrap();
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+
+        let config = StopHookConfig {
+            auto_work_on_tasks: true,
+            auto_work_idle_minutes: 15,
+            base_dir: Some(base.to_path_buf()),
+            // Not a git repo, so no git checks
+            git_repo: false,
+            ..Default::default()
+        };
+
+        // Create transcript showing user has been idle
+        let transcript_path = base.join("transcript.jsonl");
+        let old_time = Utc::now() - chrono::Duration::minutes(30);
+        std::fs::write(
+            &transcript_path,
+            format!(
+                r#"{{"type":"user","content":[{{"type":"text","text":"test"}}],"timestamp":"{}"}}"#,
+                old_time.to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block to work on tasks (no modifying tools = would normally allow, but tasks exist)
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+    }
+
+    #[test]
     fn test_truncate_output_short() {
         let output = "line1\nline2\nline3";
         assert_eq!(truncate_output(output, 10), output);
@@ -1516,7 +1795,7 @@ mod tests {
         let base = dir.path();
 
         // Create task database at the correct path
-        let db_path = paths::project_db_path(base).expect("should have home dir");
+        let db_path = paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
         store.create_task("Fix important bug", "Description", Priority::High).unwrap();
@@ -1654,6 +1933,7 @@ mod tests {
             require_push: false, // Don't block on unpushed commits
             base_dir: Some(dir.path().to_path_buf()),
             explain_stops: false,
+            ..Default::default()
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
@@ -2665,7 +2945,7 @@ mod tests {
         let base = dir.path();
 
         // Create task database at the correct path
-        let db_path = paths::project_db_path(base).expect("should have home dir");
+        let db_path = paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 
@@ -2719,7 +2999,7 @@ mod tests {
         let base = dir.path();
 
         // Create task database at the correct path
-        let db_path = paths::project_db_path(base).expect("should have home dir");
+        let db_path = paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 
@@ -2774,7 +3054,7 @@ mod tests {
         let base = dir.path();
 
         // Create task database at the correct path
-        let db_path = paths::project_db_path(base).expect("should have home dir");
+        let db_path = paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = SqliteTaskStore::new(&db_path).unwrap();
 

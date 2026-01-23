@@ -26,8 +26,6 @@ pub enum Command {
     EnsureGitignore,
     /// Print session intro message.
     Intro,
-    /// Sync beads issues to tasks database.
-    SyncBeads,
     /// Run the stop hook.
     Stop,
     /// Run the user-prompt-submit hook.
@@ -43,13 +41,8 @@ impl Command {
     #[must_use]
     pub const fn needs_stdin(self) -> bool {
         match self {
-            Self::Version
-            | Self::EnsureConfig
-            | Self::EnsureGitignore
-            | Self::Intro
-            | Self::SyncBeads
-            | Self::UserPromptSubmit => false,
-            Self::Stop | Self::PreToolUse | Self::PostToolUse => true,
+            Self::Version | Self::EnsureConfig | Self::EnsureGitignore | Self::Intro => false,
+            Self::Stop | Self::PreToolUse | Self::PostToolUse | Self::UserPromptSubmit => true,
         }
     }
 }
@@ -77,7 +70,6 @@ pub fn parse_args(args: &[String]) -> ParseResult {
         "ensure-config" => ParseResult::Command(Command::EnsureConfig),
         "ensure-gitignore" => ParseResult::Command(Command::EnsureGitignore),
         "intro" => ParseResult::Command(Command::Intro),
-        "sync-beads" => ParseResult::Command(Command::SyncBeads),
         "stop" => ParseResult::Command(Command::Stop),
         "user-prompt-submit" => ParseResult::Command(Command::UserPromptSubmit),
         "pre-tool-use" => ParseResult::Command(Command::PreToolUse),
@@ -95,7 +87,6 @@ pub fn usage(program: &str) -> String {
          ensure-config        Ensure config file exists\n  \
          ensure-gitignore     Ensure .gitignore has required entries\n  \
          intro                Print session intro message\n  \
-         sync-beads           Sync open beads issues to tasks database\n  \
          stop                 Run the stop hook\n  \
          user-prompt-submit   Run the user prompt submit hook\n  \
          pre-tool-use         Run the unified pre-tool-use hook\n  \
@@ -165,26 +156,36 @@ pub struct CliOutput {
 /// 3. Call this function
 /// 4. Print stdout/stderr messages and return exit code
 pub fn run(args: &[String], stdin: &str) -> CliOutput {
-    let (exit_code, messages, is_stop_cmd) = match parse_args(args) {
+    let (exit_code, messages, outputs_json) = match parse_args(args) {
         ParseResult::ShowUsage => (ExitCode::from(1), vec![usage(&args[0])], false),
         ParseResult::UnknownCommand(cmd) => {
             (ExitCode::from(1), vec![format!("Unknown command: {cmd}")], false)
         }
         ParseResult::Command(cmd) => {
-            let is_stop = matches!(cmd, Command::Stop);
+            // Stop and UserPromptSubmit can return JSON to stdout
+            let outputs_json = matches!(cmd, Command::Stop | Command::UserPromptSubmit);
             let (code, msgs) = run_command(cmd, stdin);
-            (code, msgs, is_stop)
+            (code, msgs, outputs_json)
         }
     };
 
     // Format output based on command type and exit code
-    // For stop hooks with exit 0 and messages: output JSON with systemMessage to stdout
-    // For blocked stops (exit non-0): messages go to stderr for LLM feedback
+    // For hooks that can return JSON (Stop, UserPromptSubmit) with exit 0 and messages:
+    //   - If already JSON (starts with {), output directly to stdout
+    //   - Otherwise wrap in systemMessage JSON and output to stdout
+    // For blocked hooks (exit non-0): messages go to stderr for LLM feedback
     // For other commands: messages go to stderr
-    if exit_code == ExitCode::SUCCESS && is_stop_cmd && !messages.is_empty() {
-        let system_message = messages.join("\n");
-        let json = serde_json::json!({"systemMessage": system_message});
-        CliOutput { exit_code, stdout: vec![json.to_string()], stderr: vec![] }
+    if exit_code == ExitCode::SUCCESS && outputs_json && !messages.is_empty() {
+        let first_msg = &messages[0];
+        if first_msg.starts_with('{') {
+            // Already JSON, pass through directly
+            CliOutput { exit_code, stdout: messages, stderr: vec![] }
+        } else {
+            // Wrap in systemMessage
+            let system_message = messages.join("\n");
+            let json = serde_json::json!({"systemMessage": system_message});
+            CliOutput { exit_code, stdout: vec![json.to_string()], stderr: vec![] }
+        }
     } else {
         CliOutput { exit_code, stdout: vec![], stderr: messages }
     }
@@ -198,9 +199,8 @@ fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
         Command::EnsureConfig => run_ensure_config_cmd(),
         Command::EnsureGitignore => run_ensure_gitignore_cmd(),
         Command::Intro => run_intro_cmd(),
-        Command::SyncBeads => run_sync_beads_cmd(),
         Command::Stop => run_stop_cmd(stdin),
-        Command::UserPromptSubmit => run_user_prompt_submit_cmd(),
+        Command::UserPromptSubmit => run_user_prompt_submit_cmd(stdin),
         Command::PreToolUse => run_pre_tool_use_cmd(stdin),
         Command::PostToolUse => run_post_tool_use_cmd(stdin),
     }
@@ -216,7 +216,6 @@ fn run_ensure_config_cmd() -> (ExitCode, Vec<String>) {
             let mut messages =
                 vec!["Config ensured at .claude/reliability-config.yaml".to_string()];
             messages.push(format!("  git_repo: {}", config.git_repo));
-            messages.push(format!("  beads_installed: {}", config.beads_installed));
             if let Some(ref cmd) = config.check_command {
                 messages.push(format!("  check_command: {cmd}"));
             } else {
@@ -257,42 +256,25 @@ fn run_intro_cmd() -> (ExitCode, Vec<String>) {
     (ExitCode::SUCCESS, vec![message])
 }
 
-fn run_sync_beads_cmd() -> (ExitCode, Vec<String>) {
-    run_sync_beads_with_runner(&RealCommandRunner::new())
-}
+fn run_user_prompt_submit_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
+    use crate::hooks::UserPromptSubmitInput;
 
-fn run_sync_beads_with_runner(runner: &dyn CommandRunner) -> (ExitCode, Vec<String>) {
-    use crate::beads_sync::sync_beads_to_tasks;
-    use std::path::Path;
+    // Parse input (empty or invalid JSON defaults to empty input)
+    let input: UserPromptSubmitInput =
+        serde_json::from_str(stdin).unwrap_or_else(|_| UserPromptSubmitInput::default());
 
-    let base_dir = Path::new(".");
-
-    sync_beads_to_tasks(runner, base_dir).map_or_else(
-        |e| (ExitCode::from(1), vec![format!("Sync failed: {e}")]),
-        |result| format_sync_result(&result),
-    )
-}
-
-fn format_sync_result(result: &crate::beads_sync::SyncResult) -> (ExitCode, Vec<String>) {
-    let mut messages = Vec::new();
-    if result.created > 0 {
-        messages.push(format!("Synced {} beads issues to tasks", result.created));
-    }
-    if result.skipped > 0 {
-        messages.push(format!("Skipped {} (already exist)", result.skipped));
-    }
-    if result.has_errors() {
-        for err in &result.errors {
-            messages.push(format!("Error: {err}"));
+    match run_user_prompt_submit_hook(&input, None) {
+        Ok(output) => {
+            if output.system_message.is_some() {
+                // Return JSON output to stdout when there's a message
+                let json = serde_json::to_string(&output).expect("output should serialize");
+                (ExitCode::SUCCESS, vec![json])
+            } else {
+                (ExitCode::SUCCESS, Vec::new())
+            }
         }
-        return (ExitCode::from(1), messages);
+        Err(e) => format_user_prompt_submit_error(&e),
     }
-    (ExitCode::SUCCESS, messages)
-}
-
-fn run_user_prompt_submit_cmd() -> (ExitCode, Vec<String>) {
-    run_user_prompt_submit_hook(None)
-        .map_or_else(|e| format_user_prompt_submit_error(&e), |()| (ExitCode::SUCCESS, Vec::new()))
 }
 
 fn format_user_prompt_submit_error(e: &crate::error::Error) -> (ExitCode, Vec<String>) {
@@ -323,6 +305,8 @@ fn run_stop_cmd(stdin: &str) -> (ExitCode, Vec<String>) {
         require_push: project_config.require_push,
         base_dir: None,
         explain_stops: project_config.explain_stops,
+        auto_work_on_tasks: project_config.auto_work_on_tasks,
+        auto_work_idle_minutes: project_config.auto_work_idle_minutes,
     };
 
     match run_stop(stdin, &config, &runner, &sub_agent) {
@@ -457,12 +441,12 @@ mod tests {
         assert!(!Command::EnsureConfig.needs_stdin());
         assert!(!Command::EnsureGitignore.needs_stdin());
         assert!(!Command::Intro.needs_stdin());
-        assert!(!Command::UserPromptSubmit.needs_stdin());
 
         // Commands that need stdin (hooks that receive JSON input)
         assert!(Command::Stop.needs_stdin());
         assert!(Command::PreToolUse.needs_stdin());
         assert!(Command::PostToolUse.needs_stdin());
+        assert!(Command::UserPromptSubmit.needs_stdin());
     }
 
     #[test]
@@ -740,8 +724,8 @@ mod tests {
             .output()
             .unwrap();
 
-        // Create .gitignore to ignore .claude/ (which ensure_config creates)
-        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
+        // Create .gitignore to ignore .claude/ and .claude-reliability/ (storage dir)
+        std::fs::write(dir_path.join(".gitignore"), ".claude/\n.claude-reliability/\n").unwrap();
         Command::new("git").args(["add", ".gitignore"]).current_dir(dir_path).output().unwrap();
         Command::new("git")
             .args(["commit", "-m", "add gitignore"])
@@ -783,7 +767,6 @@ mod tests {
         assert_eq!(output.exit_code, ExitCode::SUCCESS);
         assert!(output.stderr.iter().any(|m| m.contains("Config ensured")));
         assert!(output.stderr.iter().any(|m| m.contains("git_repo")));
-        assert!(output.stderr.iter().any(|m| m.contains("beads_installed")));
         // Check for check_command message (either with value or "(none)")
         assert!(output.stderr.iter().any(|m| m.contains("check_command")));
     }
@@ -951,6 +934,67 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_run_user_prompt_submit_post_compaction() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        // Send compaction summary input
+        let input = r#"{"isCompactSummary": true}"#;
+        let output = run(&args(&["prog", "user-prompt-submit"]), input);
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Should succeed and return JSON with systemMessage
+        assert_eq!(output.exit_code, ExitCode::SUCCESS);
+        assert_eq!(output.stdout.len(), 1);
+        assert!(output.stdout[0].contains("systemMessage"));
+        assert!(output.stdout[0].contains("Post-Compaction"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_user_prompt_submit_storage_error() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let dir_path = dir.path();
+
+        // Create storage dir as a read-only file to trigger error
+        let storage_dir = dir_path.join(".claude-reliability");
+        std::fs::write(&storage_dir, "this is a file, not a directory").unwrap();
+        let mut perms = std::fs::metadata(&storage_dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&storage_dir, perms).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir_path).unwrap();
+
+        let output = run(&args(&["prog", "user-prompt-submit"]), "{}");
+
+        std::env::set_current_dir(original_dir).unwrap();
+
+        // Reset permissions so tempdir can clean up
+        let storage_dir = dir_path.join(".claude-reliability");
+        if storage_dir.exists() {
+            let mut perms = std::fs::metadata(&storage_dir).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(&storage_dir, perms).unwrap();
+        }
+
+        // Should fail with error
+        assert_eq!(output.exit_code, ExitCode::from(1));
+        assert!(!output.stderr.is_empty());
+        assert!(output.stderr[0].contains("user-prompt-submit"));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_run_stop_config_load_fallback() {
         use tempfile::TempDir;
 
@@ -1012,8 +1056,8 @@ mod tests {
             .output()
             .unwrap();
 
-        // Create .gitignore to ignore .claude/
-        std::fs::write(dir_path.join(".gitignore"), ".claude/\n").unwrap();
+        // Create .gitignore to ignore .claude/ and .claude-reliability/ (storage dir)
+        std::fs::write(dir_path.join(".gitignore"), ".claude/\n.claude-reliability/\n").unwrap();
         Command::new("git").args(["add", ".gitignore"]).current_dir(dir_path).output().unwrap();
         Command::new("git")
             .args(["commit", "-m", "add gitignore"])
@@ -1050,183 +1094,6 @@ mod tests {
         assert!(json.get("systemMessage").is_some(), "JSON should contain systemMessage field");
         let message = json["systemMessage"].as_str().unwrap();
         assert!(message.contains("[Stop permitted:"), "should contain stop explanation");
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_sync_beads_no_beads() {
-        use tempfile::TempDir;
-
-        // Run in temp dir where beads is not available
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        let output = run(&args(&["prog", "sync-beads"]), "");
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // Should succeed with no output (no beads = nothing to sync)
-        assert_eq!(output.exit_code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    fn test_format_sync_result_created() {
-        use crate::beads_sync::SyncResult;
-
-        let result = SyncResult { created: 3, skipped: 0, errors: Vec::new() };
-        let (exit_code, messages) = format_sync_result(&result);
-
-        assert_eq!(exit_code, ExitCode::SUCCESS);
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].contains("Synced 3 beads issues"));
-    }
-
-    #[test]
-    fn test_format_sync_result_skipped() {
-        use crate::beads_sync::SyncResult;
-
-        let result = SyncResult { created: 0, skipped: 2, errors: Vec::new() };
-        let (exit_code, messages) = format_sync_result(&result);
-
-        assert_eq!(exit_code, ExitCode::SUCCESS);
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].contains("Skipped 2"));
-    }
-
-    #[test]
-    fn test_format_sync_result_with_errors() {
-        use crate::beads_sync::SyncResult;
-
-        let result =
-            SyncResult { created: 1, skipped: 0, errors: vec!["proj-1: db error".to_string()] };
-        let (exit_code, messages) = format_sync_result(&result);
-
-        assert_eq!(exit_code, ExitCode::from(1));
-        assert!(messages.iter().any(|m| m.contains("Error: proj-1")));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_sync_beads_with_no_issues() {
-        use crate::testing::MockCommandRunner;
-        use crate::traits::CommandOutput;
-        use tempfile::TempDir;
-
-        // Run in a temp dir
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        // Create .beads directory so beads appears available
-        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
-
-        // Create a mock runner that makes beads appear available but returns no issues
-        let mut runner = MockCommandRunner::new();
-        runner.set_available("bd");
-        // bd list --status=open - return empty list
-        runner.expect(
-            "bd",
-            &["list", "--status=open", "--format=json"],
-            CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
-        );
-        // bd list --status=in_progress - return empty list
-        runner.expect(
-            "bd",
-            &["list", "--status=in_progress", "--format=json"],
-            CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
-        );
-
-        let (exit_code, messages) = run_sync_beads_with_runner(&runner);
-
-        std::env::set_current_dir(original_dir).unwrap();
-
-        // With no issues, we get success
-        assert_eq!(exit_code, ExitCode::SUCCESS);
-        assert!(messages.is_empty());
-        runner.verify();
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_run_sync_beads_error_path() {
-        use crate::testing::MockCommandRunner;
-        use crate::traits::CommandOutput;
-        use tempfile::TempDir;
-
-        // Run in a temp dir
-        let dir = TempDir::new().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-
-        // Make the .claude-reliability directory read-only to cause database creation to fail
-        let data_dir = dirs::home_dir().unwrap().join(".claude-reliability");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        // Create projects dir
-        let projects_dir = data_dir.join("projects");
-        std::fs::create_dir_all(&projects_dir).unwrap();
-
-        // Remove any existing project subdirectory for this temp dir
-        // to ensure create_dir_all will try to create it
-        let project_dir_name = crate::paths::project_data_dir(dir.path())
-            .expect("should get project dir")
-            .file_name()
-            .expect("should have file name")
-            .to_string_lossy()
-            .to_string();
-        let project_subdir = projects_dir.join(&project_dir_name);
-        let _ = std::fs::remove_dir_all(&project_subdir);
-
-        // Create .beads directory so beads appears available
-        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            // Create a mock runner that makes beads appear available and returns issues
-            let mut runner = MockCommandRunner::new();
-            // Mark bd as available
-            runner.set_available("bd");
-            // bd list --status=open - return one issue
-            runner.expect(
-                "bd",
-                &["list", "--status=open", "--format=json"],
-                CommandOutput {
-                    exit_code: 0,
-                    stdout: r#"[{"id":"proj-1","title":"Test issue","description":"","priority":2,"status":"open"}]"#.to_string(),
-                    stderr: String::new(),
-                },
-            );
-            // bd list --status=in_progress
-            runner.expect(
-                "bd",
-                &["list", "--status=in_progress", "--format=json"],
-                CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
-            );
-
-            let orig_perms = std::fs::metadata(&projects_dir).unwrap().permissions();
-
-            // Make projects dir read-only BEFORE calling sync
-            std::fs::set_permissions(&projects_dir, std::fs::Permissions::from_mode(0o444))
-                .unwrap();
-
-            // Now sync should fail when trying to create the project subdirectory
-            let (exit_code, messages) = run_sync_beads_with_runner(&runner);
-
-            runner.verify();
-
-            // Restore permissions
-            std::fs::set_permissions(&projects_dir, orig_perms).unwrap();
-
-            // Should get failure exit code and error message
-            assert_eq!(exit_code, ExitCode::from(1));
-            assert!(!messages.is_empty());
-            assert!(messages[0].contains("Sync failed"));
-        }
-
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]
