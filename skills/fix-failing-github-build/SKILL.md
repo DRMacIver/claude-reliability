@@ -1,7 +1,7 @@
 ---
-name: fix-failing-github-build
+name: Fix Failing GitHub Build
 description: This skill should be used when the user asks to "fix the CI", "fix the build", "fix GitHub Actions", "why is the build failing", or mentions a failing CI/CD pipeline. Provides systematic workflow for diagnosing and fixing GitHub Actions failures.
-user-invocable: true
+version: 0.1.0
 ---
 
 # Fixing a Failing GitHub Build

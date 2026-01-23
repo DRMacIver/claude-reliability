@@ -1,7 +1,7 @@
 ---
-name: create-tasks
+name: Create Tasks
 description: This skill should be used when the user asks to "create tasks", "break down work", "plan the implementation", or when starting complex multi-step work that needs tracking. Provides guidance on creating fine-grained tasks with proper dependencies.
-user-invocable: true
+version: 0.1.0
 ---
 
 # Creating Tasks Effectively
