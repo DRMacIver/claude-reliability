@@ -158,7 +158,521 @@ fn show_file_list(result: &mut StopHookResult, files: &[String], max_files: usiz
     }
 }
 
+// =============================================================================
+// Tier 1: Fast Exit Checks
+// =============================================================================
+
+/// Check if problem mode was active and should allow immediate exit.
+///
+/// When problem mode is active (from a previous "I have run into a problem" phrase),
+/// we exit the mode and allow the stop unconditionally.
+fn check_problem_mode_exit(config: &StopHookConfig) -> Result<Option<StopHookResult>> {
+    if session::is_problem_mode_active(config.base_dir()) {
+        session::exit_problem_mode(config.base_dir())?;
+        let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
+            .expect("problem_mode_exit.tera template should always render");
+        return Ok(Some(
+            StopHookResult::allow()
+                .with_message(message)
+                .with_explanation(config.explain_stops, "problem mode was active"),
+        ));
+    }
+    Ok(None)
+}
+
+/// Check for API error loop and allow exit to prevent infinite loops.
+///
+/// If we've seen multiple consecutive API errors, allow the stop to prevent
+/// the agent from getting stuck in an error loop.
+fn check_api_error_loop(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
+        let mut ctx = Context::new();
+        ctx.insert("error_count", &transcript_info.consecutive_api_errors);
+        let message = templates::render("messages/stop/api_error_loop.tera", &ctx)
+            .expect("api_error_loop.tera template should always render");
+        return Some(StopHookResult::allow().with_message(message).with_explanation(
+            config.explain_stops,
+            format!("{} consecutive API errors detected", transcript_info.consecutive_api_errors),
+        ));
+    }
+    None
+}
+
+/// Check for simple Q&A exchange that should allow immediate exit.
+///
+/// If the last user message is a simple question and no modifications were made
+/// since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
+/// This allows the agent to ask clarifying questions even if tasks are requested.
+fn check_simple_qa_fast_path(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if !transcript_info.has_modifying_tool_use_since_user {
+        if let Some(ref last_user_msg) = transcript_info.last_user_message {
+            if is_simple_question(last_user_msg) {
+                if let Some(ref last_output) = transcript_info.last_assistant_output {
+                    // Check if the output looks like a simple answer (not asking a question,
+                    // and short enough that it's not a work summary)
+                    let is_simple_answer =
+                        !last_output.trim().ends_with('?') && last_output.lines().count() < 10;
+                    if is_simple_answer {
+                        return Some(StopHookResult::allow().with_explanation(
+                            config.explain_stops,
+                            "simple Q&A with no modifications since question",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check for commit/push confirmation questions and auto-confirm them.
+///
+/// When the agent asks "Would you like me to commit/push?" just say yes.
+/// This check is fast (string matching) so do it before git status checks.
+fn check_commit_push_auto_confirm(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if !config.git_repo {
+        return None;
+    }
+    if let Some(ref output) = transcript_info.last_assistant_output {
+        if let Some(response) = check_commit_push_question(output) {
+            return Some(StopHookResult::block().with_inject(response));
+        }
+    }
+    None
+}
+
+// =============================================================================
+// Tier 2: Validation Checks
+// =============================================================================
+
+/// Check if validation is needed and run quality checks.
+///
+/// If modifying tools were used since last user message or validation,
+/// run the validation command and block if it fails.
+fn check_validation_required(
+    config: &StopHookConfig,
+    runner: &dyn CommandRunner,
+) -> Result<Option<StopHookResult>> {
+    if !session::needs_validation(config.base_dir()) {
+        return Ok(None);
+    }
+
+    let Some(ref check_cmd) = config.quality_check_command else {
+        return Ok(None);
+    };
+
+    // Run the validation command
+    let output = runner.run("sh", &["-c", check_cmd], None)?;
+
+    if output.exit_code != 0 {
+        // Validation failed - block exit
+        let mut result = StopHookResult::block()
+            .with_message("# Validation Failed")
+            .with_message("")
+            .with_message(format!("The quality check command `{check_cmd}` found issues."))
+            .with_message("")
+            .with_message("Please fix these issues before continuing. Whether you introduced them or they were pre-existing, a clean quality check is part of completing your work well.");
+
+        if !output.stdout.is_empty() {
+            result = result.with_message("").with_message("**stdout:**");
+            for line in output.stdout.lines().take(50) {
+                result = result.with_message(format!("  {line}"));
+            }
+        }
+        if !output.stderr.is_empty() {
+            result = result.with_message("").with_message("**stderr:**");
+            for line in output.stderr.lines().take(50) {
+                result = result.with_message(format!("  {line}"));
+            }
+        }
+
+        return Ok(Some(result));
+    }
+
+    // Validation passed - clear the marker
+    session::clear_needs_validation(config.base_dir())?;
+    Ok(None)
+}
+
+/// Check if git repo is clean and allow immediate exit.
+///
+/// Fast path: if no git changes, allow immediate exit.
+fn check_clean_repo_fast_path(
+    config: &StopHookConfig,
+    runner: &dyn CommandRunner,
+) -> Result<Option<StopHookResult>> {
+    if !config.git_repo {
+        return Ok(None);
+    }
+
+    let git_status = git::check_uncommitted_changes(runner)?;
+    if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
+        return Ok(Some(
+            StopHookResult::allow().with_explanation(config.explain_stops, "clean git repo"),
+        ));
+    }
+    Ok(None)
+}
+
+// =============================================================================
+// Tier 3: Bypass Phrase Handling
+// =============================================================================
+
+/// Check for "I have run into a problem" phrase and enter problem mode.
+///
+/// When the agent says they've hit a problem they can't solve, enter problem mode
+/// which blocks all tool use until the next stop.
+fn check_problem_phrase(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Result<Option<StopHookResult>> {
+    let Some(ref output) = transcript_info.last_assistant_output else {
+        return Ok(None);
+    };
+
+    if output.contains(PROBLEM_NEEDS_USER) {
+        // Enter problem mode - this blocks all tool use until next stop
+        session::enter_problem_mode(config.base_dir())?;
+        let message =
+            templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
+                .expect("problem_mode_activated.tera template should always render");
+        return Ok(Some(StopHookResult::block().with_message(message)));
+    }
+    Ok(None)
+}
+
+/// Check for incomplete requested tasks that block stopping.
+///
+/// Only checks if modifying work was done. Simple Q&A (no modifying tools) should
+/// still be allowed.
+fn check_requested_tasks_block(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if !transcript_info.has_modifying_tool_use {
+        return None;
+    }
+    check_incomplete_requested_tasks(config)
+}
+
+/// Check for "work complete" phrase and handle completion logic.
+///
+/// This handles the complex completion flow including:
+/// - Checking for remaining ready tasks
+/// - Checking for tasks blocked by unanswered questions
+/// - Allowing bypass when all work is truly complete
+fn check_completion_phrase(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Result<Option<StopHookResult>> {
+    let Some(ref output) = transcript_info.last_assistant_output else {
+        return Ok(None);
+    };
+
+    if !output.contains(HUMAN_INPUT_REQUIRED) {
+        return Ok(None);
+    }
+
+    // Check if there are remaining tasks that can be worked on
+    let tasks_count = tasks::count_ready_tasks(config.base_dir());
+
+    if tasks_count > 0 {
+        let mut result = StopHookResult::block()
+            .with_message("# Exit Phrase Rejected")
+            .with_message("")
+            .with_message(format!("There are {tasks_count} task(s) ready to work on."))
+            .with_message("")
+            .with_message("Please work on the remaining tasks before exiting.");
+
+        // Add task suggestion if available
+        if let Some((id, title)) = tasks::suggest_task(config.base_dir()) {
+            result = result
+                .with_message("")
+                .with_message(format!("Suggestion: Work on task \"{id}: {title}\" next."));
+        }
+
+        result = result
+            .with_message("")
+            .with_message("If you've hit a blocker you can't resolve, use this phrase instead:")
+            .with_message("")
+            .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
+
+        return Ok(Some(result));
+    }
+
+    // Check for tasks blocked by unanswered questions
+    let question_blocked = tasks::get_question_blocked_tasks(config.base_dir());
+    if !question_blocked.is_empty() {
+        // There are tasks blocked by questions
+        let has_shown_questions = session::has_questions_shown_marker(config.base_dir());
+
+        if !has_shown_questions {
+            // First time: show questions and ask agent to reflect
+            session::set_questions_shown_marker(config.base_dir())?;
+
+            let mut result = StopHookResult::block()
+                .with_message("# Questions Require Reflection")
+                .with_message("")
+                .with_message("The following tasks are blocked by unanswered questions:")
+                .with_message("");
+
+            for (task_id, task_title, questions) in &question_blocked {
+                result = result.with_message(format!("## Task: {task_id} - {task_title}"));
+                for q in questions {
+                    result = result.with_message(format!("  - [{}] {}", q.id, q.text));
+                }
+                result = result.with_message("");
+            }
+
+            result = result
+                .with_message("Before asking the user, please reflect on these questions:")
+                .with_message(
+                    "- Can you now answer any of these questions yourself based on your work so far?",
+                )
+                .with_message("- Have you gained context that makes the answer clear?")
+                .with_message("")
+                .with_message(
+                    "If you can answer a question, use the `answer_question` tool to record your answer.",
+                )
+                .with_message("If you truly cannot answer, you may try to exit again.");
+
+            return Ok(Some(result));
+        }
+
+        // Second time: allow stop and present questions to user
+        session::clear_questions_shown_marker(config.base_dir())?;
+
+        // Collect unique questions across all blocked tasks
+        let mut seen_questions = HashSet::new();
+        let mut unique_questions = Vec::new();
+        for (_, _, questions) in &question_blocked {
+            for q in questions {
+                if seen_questions.insert(q.id.clone()) {
+                    unique_questions.push(q);
+                }
+            }
+        }
+
+        let mut result = StopHookResult::allow()
+            .with_explanation(
+                config.explain_stops,
+                "all unblocked work complete, questions for user",
+            )
+            .with_message("# Questions for User")
+            .with_message("")
+            .with_message("The following questions need user input to unblock remaining tasks:")
+            .with_message("");
+
+        for q in unique_questions {
+            result = result.with_message(format!("- [{}] {}", q.id, q.text));
+        }
+
+        result = result
+            .with_message("")
+            .with_message("Please answer these questions to unblock the remaining work.");
+
+        return Ok(Some(result));
+    }
+
+    // Bypass allowed - work is complete
+    Ok(Some(
+        StopHookResult::allow()
+            .with_explanation(config.explain_stops, "human input required phrase used"),
+    ))
+}
+
+// =============================================================================
+// Tier 4: Git State Checks
+// =============================================================================
+
+/// Check for uncommitted changes and block if present.
+fn check_uncommitted_changes_block(
+    config: &StopHookConfig,
+    runner: &dyn CommandRunner,
+    transcript_info: &TranscriptInfo,
+    sub_agent: &dyn SubAgent,
+) -> Result<Option<StopHookResult>> {
+    if !config.git_repo {
+        return Ok(None);
+    }
+
+    let git_status = git::check_uncommitted_changes(runner)?;
+
+    if git_status.uncommitted.has_changes() {
+        return Ok(Some(handle_uncommitted_changes(
+            &git_status,
+            config,
+            runner,
+            transcript_info,
+            sub_agent,
+        )?));
+    }
+
+    // Check if need to push
+    if config.require_push && git_status.ahead_of_remote {
+        let mut ctx = Context::new();
+        ctx.insert("commits_ahead", &git_status.commits_ahead);
+        let message = templates::render("messages/stop/unpushed_commits.tera", &ctx)
+            .expect("unpushed_commits.tera template should always render");
+        return Ok(Some(StopHookResult::block().with_message(message)));
+    }
+
+    Ok(None)
+}
+
+// =============================================================================
+// Tier 5: Interactive Handling (check_interactive_question already exists)
+// =============================================================================
+
+/// Wrapper for `check_interactive_question` that returns Option for consistency.
+fn check_interactive_question_block(
+    transcript_info: &TranscriptInfo,
+    sub_agent: &dyn SubAgent,
+    config: &StopHookConfig,
+) -> Result<Option<StopHookResult>> {
+    check_interactive_question(transcript_info, sub_agent, config)
+}
+
+// =============================================================================
+// Tier 6: Quality & Reflection Checks
+// =============================================================================
+
+/// Run quality checks if enabled and block on failure.
+fn check_quality_gate(
+    config: &StopHookConfig,
+    runner: &dyn CommandRunner,
+) -> Result<Option<StopHookResult>> {
+    if !config.quality_check_enabled {
+        return Ok(None);
+    }
+
+    let Some(ref cmd) = config.quality_check_command else {
+        return Ok(None);
+    };
+
+    let output = runner.run("sh", &["-c", cmd], None)?;
+    if !output.success() {
+        return Ok(Some(
+            StopHookResult::block()
+                .with_message("# Quality Check Issues")
+                .with_message("")
+                .with_message("Quality checks found issues that need your attention. Fixing these (whether you introduced them or not) helps maintain a healthy codebase.")
+                .with_message("")
+                .with_message(truncate_output(&output.combined_output(), 50)),
+        ));
+    }
+    Ok(None)
+}
+
+/// Check if reflection was already prompted and allow stop.
+///
+/// If the agent got the reflection prompt and is stopping again, allow it.
+/// Also checks for incomplete requested tasks before allowing.
+fn check_reflection_marker_allow(
+    config: &StopHookConfig,
+    transcript_info: &TranscriptInfo,
+) -> Result<Option<StopHookResult>> {
+    let base_dir = config.base_dir();
+    if !session::has_reflect_marker(base_dir) {
+        return Ok(None);
+    }
+
+    // Agent already got the reflection prompt and is stopping again - allow it
+    session::clear_reflect_marker(base_dir)?;
+
+    // Check for incomplete requested tasks before allowing stop (work was done)
+    if let Some(result) = check_incomplete_requested_tasks(config) {
+        return Ok(Some(result));
+    }
+
+    // Check if we should prompt to work on open tasks before allowing stop
+    if let Some(result) = check_auto_work_tasks(config, transcript_info) {
+        return Ok(Some(result));
+    }
+
+    Ok(Some(
+        StopHookResult::allow()
+            .with_explanation(config.explain_stops, "reflection already prompted on first stop"),
+    ))
+}
+
+/// Skip reflection if agent is asking a question (waiting for user input).
+///
+/// This check is separate from `check_interactive_question` because that function
+/// also checks user recency, but we want to skip reflection regardless of recency.
+fn check_question_skip_reflection(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if let Some(ref output) = transcript_info.last_assistant_output {
+        if looks_like_question(output) {
+            return Some(
+                StopHookResult::allow()
+                    .with_explanation(config.explain_stops, "agent is asking a question"),
+            );
+        }
+    }
+    None
+}
+
+/// Prompt for reflection on first stop if modifying tools were used.
+fn check_reflection_prompt(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Result<Option<StopHookResult>> {
+    if !transcript_info.has_modifying_tool_use {
+        return Ok(None);
+    }
+
+    // Modifying tools were used, prompt for reflection
+    session::set_reflect_marker(config.base_dir())?;
+    Ok(Some(
+        StopHookResult::block()
+            .with_message("# Task Completion Check")
+            .with_message("")
+            .with_message(
+                "Before exiting, carefully analyze whether you have fully completed the task.",
+            )
+            .with_message("")
+            .with_message("If you have NOT completed the task:")
+            .with_message("  - Continue working to finish it")
+            .with_message("")
+            .with_message("If you HAVE completed the task:")
+            .with_message("  - Provide a clear, concise summary of what was done for the user")
+            .with_message("  - Then stop again to exit"),
+    ))
+}
+
+/// Check if we should prompt to work on open tasks (final check before allow).
+fn check_auto_work_tasks_block(
+    config: &StopHookConfig,
+    transcript_info: &TranscriptInfo,
+) -> Option<StopHookResult> {
+    check_auto_work_tasks(config, transcript_info)
+}
+
 /// Run the stop hook.
+///
+/// This function orchestrates all stop checks in a specific order. Each check
+/// can either allow the stop, block it, or pass through to the next check.
+///
+/// # Check Order
+///
+/// 1. **Tier 1 - Fast exits**: Problem mode, API errors, simple Q&A, auto-confirm commit/push
+/// 2. **Tier 2 - Validation**: Run quality checks, clean repo fast path
+/// 3. **Tier 3 - Bypass phrases**: Problem phrase, requested tasks, completion phrase
+/// 4. **Tier 4 - Git state**: Uncommitted changes, unpushed commits
+/// 5. **Tier 5 - Interactive**: Question handling with sub-agent
+/// 6. **Tier 6 - Quality & reflection**: Quality gate, reflection prompts, auto-work tasks
 ///
 /// # Errors
 ///
@@ -169,7 +683,6 @@ fn show_file_list(result: &mut StopHookResult, files: &[String], max_files: usiz
 /// Panics if embedded templates fail to render. Templates are embedded via
 /// `include_str!` and verified by `test_all_embedded_templates_render`, so
 /// this should only occur if a template has a bug that escaped tests.
-#[allow(clippy::too_many_lines)] // Complex hook logic requires multiple checks
 pub fn run_stop_hook(
     input: &HookInput,
     config: &StopHookConfig,
@@ -183,341 +696,79 @@ pub fn run_stop_hook(
         .and_then(|p| transcript::parse_transcript(Path::new(p)).ok())
         .unwrap_or_default();
 
-    // Check for problem mode - if active, allow unconditional stop
-    if session::is_problem_mode_active(config.base_dir()) {
-        session::exit_problem_mode(config.base_dir())?;
-        let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
-            .expect("problem_mode_exit.tera template should always render");
-        return Ok(StopHookResult::allow()
-            .with_message(message)
-            .with_explanation(config.explain_stops, "problem mode was active"));
+    // =========================================================================
+    // Tier 1: Fast Exit Checks
+    // =========================================================================
+    if let Some(r) = check_problem_mode_exit(config)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_api_error_loop(&transcript_info, config) {
+        return Ok(r);
+    }
+    if let Some(r) = check_simple_qa_fast_path(&transcript_info, config) {
+        return Ok(r);
+    }
+    if let Some(r) = check_commit_push_auto_confirm(&transcript_info, config) {
+        return Ok(r);
     }
 
-    // Check for API error loop - if we've seen multiple consecutive API errors,
-    // allow the stop to prevent infinite loops
-    if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
-        let mut ctx = Context::new();
-        ctx.insert("error_count", &transcript_info.consecutive_api_errors);
-        let message = templates::render("messages/stop/api_error_loop.tera", &ctx)
-            .expect("api_error_loop.tera template should always render");
-        return Ok(StopHookResult::allow().with_message(message).with_explanation(
-            config.explain_stops,
-            format!("{} consecutive API errors detected", transcript_info.consecutive_api_errors),
-        ));
+    // =========================================================================
+    // Tier 2: Validation Checks
+    // =========================================================================
+    if let Some(r) = check_validation_required(config, runner)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_clean_repo_fast_path(config, runner)? {
+        return Ok(r);
     }
 
-    // Fast path: simple Q&A exchange
-    // If the last user message is a simple question and no modifications were made
-    // since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
-    // This allows the agent to ask clarifying questions even if tasks are requested.
-    if !transcript_info.has_modifying_tool_use_since_user {
-        if let Some(ref last_user_msg) = transcript_info.last_user_message {
-            if is_simple_question(last_user_msg) {
-                if let Some(ref last_output) = transcript_info.last_assistant_output {
-                    // Check if the output looks like a simple answer (not asking a question,
-                    // and short enough that it's not a work summary)
-                    let is_simple_answer =
-                        !last_output.trim().ends_with('?') && last_output.lines().count() < 10;
-                    if is_simple_answer {
-                        return Ok(StopHookResult::allow().with_explanation(
-                            config.explain_stops,
-                            "simple Q&A with no modifications since question",
-                        ));
-                    }
-                }
-            }
-        }
+    // =========================================================================
+    // Tier 3: Bypass Phrase Handling
+    // =========================================================================
+    if let Some(r) = check_problem_phrase(&transcript_info, config)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_requested_tasks_block(&transcript_info, config) {
+        return Ok(r);
+    }
+    if let Some(r) = check_completion_phrase(&transcript_info, config)? {
+        return Ok(r);
     }
 
-    // Fast path: auto-confirm commit/push questions
-    // When the agent asks "Would you like me to commit/push?" just say yes
-    // This check is fast (string matching) so do it before git status checks
-    if config.git_repo {
-        if let Some(ref output) = transcript_info.last_assistant_output {
-            if let Some(response) = check_commit_push_question(output) {
-                return Ok(StopHookResult::block().with_inject(response));
-            }
-        }
+    // =========================================================================
+    // Tier 4: Git State Checks
+    // =========================================================================
+    if let Some(r) = check_uncommitted_changes_block(config, runner, &transcript_info, sub_agent)? {
+        return Ok(r);
     }
 
-    // Check if validation is needed (modifying tools were used since last user message or validation)
-    if session::needs_validation(config.base_dir()) {
-        if let Some(ref check_cmd) = config.quality_check_command {
-            // Run the validation command
-            let output = runner.run("sh", &["-c", check_cmd], None)?;
-
-            if output.exit_code != 0 {
-                // Validation failed - block exit
-                let mut result = StopHookResult::block()
-                    .with_message("# Validation Failed")
-                    .with_message("")
-                    .with_message(format!("The quality check command `{check_cmd}` found issues."))
-                    .with_message("")
-                    .with_message("Please fix these issues before continuing. Whether you introduced them or they were pre-existing, a clean quality check is part of completing your work well.");
-
-                if !output.stdout.is_empty() {
-                    result = result.with_message("").with_message("**stdout:**");
-                    for line in output.stdout.lines().take(50) {
-                        result = result.with_message(format!("  {line}"));
-                    }
-                }
-                if !output.stderr.is_empty() {
-                    result = result.with_message("").with_message("**stderr:**");
-                    for line in output.stderr.lines().take(50) {
-                        result = result.with_message(format!("  {line}"));
-                    }
-                }
-
-                return Ok(result);
-            }
-
-            // Validation passed - clear the marker
-            session::clear_needs_validation(config.base_dir())?;
-        }
+    // =========================================================================
+    // Tier 5: Interactive Handling
+    // =========================================================================
+    if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config)? {
+        return Ok(r);
     }
 
-    // Fast path: if no git changes, allow immediate exit
-    if config.git_repo {
-        let git_status = git::check_uncommitted_changes(runner)?;
-        if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
-            return Ok(
-                StopHookResult::allow().with_explanation(config.explain_stops, "clean git repo")
-            );
-        }
+    // =========================================================================
+    // Tier 6: Quality & Reflection Checks
+    // =========================================================================
+    if let Some(r) = check_quality_gate(config, runner)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_reflection_marker_allow(config, &transcript_info)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_question_skip_reflection(&transcript_info, config) {
+        return Ok(r);
+    }
+    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
+        return Ok(r);
+    }
+    if let Some(r) = check_auto_work_tasks_block(config, &transcript_info) {
+        return Ok(r);
     }
 
-    // Check for bypass strings in Claude's last output
-    if let Some(ref output) = transcript_info.last_assistant_output {
-        let has_complete_phrase = output.contains(HUMAN_INPUT_REQUIRED);
-        let has_problem_phrase = output.contains(PROBLEM_NEEDS_USER);
-
-        // Handle "I have run into a problem" - enter problem mode
-        if has_problem_phrase {
-            // Enter problem mode - this blocks all tool use until next stop
-            session::enter_problem_mode(config.base_dir())?;
-            let message =
-                templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
-                    .expect("problem_mode_activated.tera template should always render");
-            return Ok(StopHookResult::block().with_message(message));
-        }
-
-        // Check for incomplete requested tasks (only if modifying work was done)
-        // Simple Q&A (no modifying tools) should still be allowed
-        if transcript_info.has_modifying_tool_use {
-            if let Some(result) = check_incomplete_requested_tasks(config) {
-                return Ok(result);
-            }
-        }
-
-        // Handle "work complete" phrase
-        if has_complete_phrase {
-            // Check if there are remaining tasks that can be worked on
-            let tasks_count = tasks::count_ready_tasks(config.base_dir());
-
-            if tasks_count > 0 {
-                let mut result = StopHookResult::block()
-                    .with_message("# Exit Phrase Rejected")
-                    .with_message("")
-                    .with_message(format!("There are {tasks_count} task(s) ready to work on."))
-                    .with_message("")
-                    .with_message("Please work on the remaining tasks before exiting.");
-
-                // Add task suggestion if available
-                if let Some((id, title)) = tasks::suggest_task(config.base_dir()) {
-                    result = result
-                        .with_message("")
-                        .with_message(format!("Suggestion: Work on task \"{id}: {title}\" next."));
-                }
-
-                result = result
-                    .with_message("")
-                    .with_message(
-                        "If you've hit a blocker you can't resolve, use this phrase instead:",
-                    )
-                    .with_message("")
-                    .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
-
-                return Ok(result);
-            }
-
-            // Check for tasks blocked by unanswered questions
-            let question_blocked = tasks::get_question_blocked_tasks(config.base_dir());
-            if !question_blocked.is_empty() {
-                // There are tasks blocked by questions
-                let has_shown_questions = session::has_questions_shown_marker(config.base_dir());
-
-                if !has_shown_questions {
-                    // First time: show questions and ask agent to reflect
-                    session::set_questions_shown_marker(config.base_dir())?;
-
-                    let mut result = StopHookResult::block()
-                        .with_message("# Questions Require Reflection")
-                        .with_message("")
-                        .with_message("The following tasks are blocked by unanswered questions:")
-                        .with_message("");
-
-                    for (task_id, task_title, questions) in &question_blocked {
-                        result = result.with_message(format!("## Task: {task_id} - {task_title}"));
-                        for q in questions {
-                            result = result.with_message(format!("  - [{}] {}", q.id, q.text));
-                        }
-                        result = result.with_message("");
-                    }
-
-                    result = result
-                        .with_message("Before asking the user, please reflect on these questions:")
-                        .with_message("- Can you now answer any of these questions yourself based on your work so far?")
-                        .with_message("- Have you gained context that makes the answer clear?")
-                        .with_message("")
-                        .with_message("If you can answer a question, use the `answer_question` tool to record your answer.")
-                        .with_message("If you truly cannot answer, you may try to exit again.");
-
-                    return Ok(result);
-                }
-
-                // Second time: allow stop and present questions to user
-                session::clear_questions_shown_marker(config.base_dir())?;
-
-                // Collect unique questions across all blocked tasks
-                let mut seen_questions = HashSet::new();
-                let mut unique_questions = Vec::new();
-                for (_, _, questions) in &question_blocked {
-                    for q in questions {
-                        if seen_questions.insert(q.id.clone()) {
-                            unique_questions.push(q);
-                        }
-                    }
-                }
-
-                let mut result = StopHookResult::allow()
-                    .with_explanation(
-                        config.explain_stops,
-                        "all unblocked work complete, questions for user",
-                    )
-                    .with_message("# Questions for User")
-                    .with_message("")
-                    .with_message(
-                        "The following questions need user input to unblock remaining tasks:",
-                    )
-                    .with_message("");
-
-                for q in unique_questions {
-                    result = result.with_message(format!("- [{}] {}", q.id, q.text));
-                }
-
-                result = result
-                    .with_message("")
-                    .with_message("Please answer these questions to unblock the remaining work.");
-
-                return Ok(result);
-            }
-
-            // Bypass allowed - work is complete
-            return Ok(StopHookResult::allow()
-                .with_explanation(config.explain_stops, "human input required phrase used"));
-        }
-    }
-
-    // Check for uncommitted changes (only in git repos)
-    if config.git_repo {
-        let git_status = git::check_uncommitted_changes(runner)?;
-
-        if git_status.uncommitted.has_changes() {
-            return handle_uncommitted_changes(
-                &git_status,
-                config,
-                runner,
-                &transcript_info,
-                sub_agent,
-            );
-        }
-
-        // Check if need to push
-        if config.require_push && git_status.ahead_of_remote {
-            let mut ctx = Context::new();
-            ctx.insert("commits_ahead", &git_status.commits_ahead);
-            let message = templates::render("messages/stop/unpushed_commits.tera", &ctx)
-                .expect("unpushed_commits.tera template should always render");
-            return Ok(StopHookResult::block().with_message(message));
-        }
-    }
-
-    // Check if agent is asking a question and user is recently active
-    if let Some(result) = check_interactive_question(&transcript_info, sub_agent, config)? {
-        return Ok(result);
-    }
-
-    // Run quality checks if enabled
-    if config.quality_check_enabled {
-        if let Some(ref cmd) = config.quality_check_command {
-            let output = runner.run("sh", &["-c", cmd], None)?;
-            if !output.success() {
-                return Ok(StopHookResult::block()
-                    .with_message("# Quality Check Issues")
-                    .with_message("")
-                    .with_message("Quality checks found issues that need your attention. Fixing these (whether you introduced them or not) helps maintain a healthy codebase.")
-                    .with_message("")
-                    .with_message(truncate_output(&output.combined_output(), 50)));
-            }
-        }
-    }
-
-    // Simple reflection check: if modifying tools were used, prompt for reflection
-    // on first stop attempt; allow on second consecutive stop
-    let base_dir = config.base_dir();
-    if session::has_reflect_marker(base_dir) {
-        // Agent already got the reflection prompt and is stopping again - allow it
-        session::clear_reflect_marker(base_dir)?;
-
-        // Check for incomplete requested tasks before allowing stop (work was done)
-        if let Some(result) = check_incomplete_requested_tasks(config) {
-            return Ok(result);
-        }
-
-        // Check if we should prompt to work on open tasks before allowing stop
-        if let Some(result) = check_auto_work_tasks(config, &transcript_info) {
-            return Ok(result);
-        }
-
-        return Ok(StopHookResult::allow()
-            .with_explanation(config.explain_stops, "reflection already prompted on first stop"));
-    }
-
-    // Skip reflection if agent is asking a question (waiting for user input)
-    // This check is separate from check_interactive_question because that function
-    // also checks user recency, but we want to skip reflection regardless of recency
-    // Note: incomplete requested tasks are checked earlier in the bypass phrase block (line 305-308)
-    // so we don't need to check again here
-    if let Some(ref output) = transcript_info.last_assistant_output {
-        if looks_like_question(output) {
-            return Ok(StopHookResult::allow()
-                .with_explanation(config.explain_stops, "agent is asking a question"));
-        }
-    }
-
-    if transcript_info.has_modifying_tool_use {
-        // Modifying tools were used, prompt for reflection
-        session::set_reflect_marker(base_dir)?;
-        return Ok(StopHookResult::block()
-            .with_message("# Task Completion Check")
-            .with_message("")
-            .with_message(
-                "Before exiting, carefully analyze whether you have fully completed the task.",
-            )
-            .with_message("")
-            .with_message("If you have NOT completed the task:")
-            .with_message("  - Continue working to finish it")
-            .with_message("")
-            .with_message("If you HAVE completed the task:")
-            .with_message("  - Provide a clear, concise summary of what was done for the user")
-            .with_message("  - Then stop again to exit"));
-    }
-
-    // Check if we should prompt to work on open tasks (before final allow)
-    if let Some(result) = check_auto_work_tasks(config, &transcript_info) {
-        return Ok(result);
-    }
-
+    // All checks passed - allow stop
     Ok(StopHookResult::allow().with_explanation(config.explain_stops, "no modifying tools used"))
 }
 
@@ -3608,5 +3859,64 @@ mod tests {
             "Expected 'Requested Tasks Incomplete' message but got: {:?}",
             result.messages
         );
+    }
+
+    #[test]
+    fn test_check_validation_required_no_command() {
+        // Test that check_validation_required returns None when needs_validation is true
+        // but no quality_check_command is configured
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_command: None, // No command configured
+            ..Default::default()
+        };
+
+        // Set the validation marker
+        session::set_needs_validation(dir.path()).unwrap();
+
+        let runner = MockCommandRunner::new();
+        let result = check_validation_required(&config, &runner).unwrap();
+        assert!(result.is_none(), "Expected None when no quality_check_command configured");
+    }
+
+    #[test]
+    fn test_check_quality_gate_enabled_no_command() {
+        // Test that check_quality_gate returns None when quality_check_enabled is true
+        // but no quality_check_command is configured
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_enabled: true,
+            quality_check_command: None, // No command configured
+            ..Default::default()
+        };
+
+        let runner = MockCommandRunner::new();
+        let result = check_quality_gate(&config, &runner).unwrap();
+        assert!(result.is_none(), "Expected None when no quality_check_command configured");
+    }
+
+    #[test]
+    fn test_check_quality_gate_passes() {
+        // Test that check_quality_gate returns None when quality check passes
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_enabled: true,
+            quality_check_command: Some("echo 'ok'".to_string()),
+            ..Default::default()
+        };
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "sh",
+            &["-c", "echo 'ok'"],
+            CommandOutput { exit_code: 0, stdout: "ok\n".to_string(), stderr: String::new() },
+        );
+
+        let result = check_quality_gate(&config, &runner).unwrap();
+        assert!(result.is_none(), "Expected None when quality check passes");
+        runner.verify();
     }
 }
