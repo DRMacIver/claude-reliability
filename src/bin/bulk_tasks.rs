@@ -22,6 +22,8 @@ fn run(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     let output = match cmd {
         "create" => serde_json::to_string_pretty(&bulk::create_from_json(&store, &input)?)?,
         "add-deps" => serde_json::to_string_pretty(&bulk::add_deps_from_json(&store, &input)?)?,
+        "list" => serde_json::to_string_pretty(&bulk::list_from_json(&store, &input)?)?,
+        "search" => serde_json::to_string_pretty(&bulk::search_from_json(&store, &input)?)?,
         other => {
             eprintln!("Unknown command: {other}");
             bulk::print_usage();

@@ -23,32 +23,43 @@ use std::sync::Arc;
 /// Instructions for the MCP server, shown to agents using this server.
 const INSTRUCTIONS: &str = r#"Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, how-to guides, and questions requiring user input.
 
-## Bulk Task Creation
+## Bulk Task Operations
 
-When creating multiple tasks at once (3+), use the bulk-tasks binary instead of calling create_task repeatedly:
+When working with multiple tasks, use the bulk-tasks binary for better performance:
 
+### Create multiple tasks (3+)
 ```bash
 ~/.claude-reliability/bin/bulk-tasks create <<'EOF'
 {
   "tasks": [
     {"id": "t1", "title": "First task", "description": "...", "priority": 1},
-    {"id": "t2", "title": "Second task", "description": "...", "priority": 2, "depends_on": ["t1"]},
-    {"id": "t3", "title": "Third task", "description": "...", "priority": 2, "depends_on": ["t1", "t2"]}
+    {"id": "t2", "title": "Second task", "priority": 2, "depends_on": ["t1"]},
+    {"id": "t3", "title": "Third task", "priority": 2, "depends_on": ["t1", "t2"]}
   ]
 }
 EOF
 ```
+The `id` fields are temporary identifiers for setting up dependencies. Actual IDs are returned in output.
 
-The `id` fields are temporary identifiers used only for setting up dependencies within the same batch. The actual task IDs are returned in the output.
-
-To add dependencies to existing tasks:
+### Add dependencies to existing tasks
 ```bash
 ~/.claude-reliability/bin/bulk-tasks add-deps <<'EOF'
-{
-  "dependencies": [
-    {"task_id": "actual-task-id-1", "depends_on": "actual-task-id-2"}
-  ]
-}
+{"dependencies": [{"task": "task-id-1", "depends_on": "task-id-2"}]}
+EOF
+```
+
+### List tasks with filtering
+```bash
+~/.claude-reliability/bin/bulk-tasks list <<'EOF'
+{"status": "open", "priority": 1, "ready_only": true}
+EOF
+```
+All fields optional. Empty `{}` returns all tasks.
+
+### Search tasks
+```bash
+~/.claude-reliability/bin/bulk-tasks search <<'EOF'
+{"query": "search term"}
 EOF
 ```
 
