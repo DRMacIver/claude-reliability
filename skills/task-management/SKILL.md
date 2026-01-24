@@ -3,9 +3,29 @@ name: Task Management
 description: "This skill should be used when starting complex multi-step work, when breaking down work into smaller pieces, or when needing to track progress on tasks. Provides guidance on creating fine-grained tasks with proper dependencies."
 ---
 
-# Creating Tasks Effectively
+# Task Management Guide
 
-## Philosophy
+## Finding Work: what_should_i_work_on
+
+When you need to pick a task to work on, use the `what_should_i_work_on` tool. It automatically:
+- Finds the highest priority unblocked tasks
+- Randomly picks one to avoid always doing the same type of work
+- Shows the task details so you can start immediately
+
+**Use this instead of manually scanning the task list.**
+
+```
+# Start a work session
+what_should_i_work_on()
+# -> Returns a suggested task with full details
+
+# Then mark it in progress
+work_on(task_id="...")
+```
+
+## Creating Tasks Effectively
+
+### Philosophy
 
 **Tasks are cheap and exist to help you.** Don't be afraid to create many small, fine-grained tasks. Breaking work into small pieces helps you:
 - Track progress clearly
@@ -97,9 +117,30 @@ create_task("Write integration tests")
 4. **Mark blockers with questions** - `create_question` and `link_task_to_question`
 5. **Close tasks promptly** - Don't leave completed work as open
 
+## Bulk Task Creation
+
+When creating 3+ tasks at once, use the bulk-tasks binary for better performance:
+
+```bash
+~/.claude-reliability/bin/bulk-tasks create <<'EOF'
+{
+  "tasks": [
+    {"id": "t1", "title": "First task", "description": "...", "priority": 1},
+    {"id": "t2", "title": "Second task", "priority": 2, "depends_on": ["t1"]},
+    {"id": "t3", "title": "Third task", "priority": 2, "depends_on": ["t1", "t2"]}
+  ]
+}
+EOF
+```
+
+The `id` fields are temporary for setting up dependencies. Real IDs are returned.
+
 ## Quick Reference
 
 ```
+# Find work to do
+what_should_i_work_on()
+
 # Create task
 create_task(title="...", description="...", priority=2)
 
@@ -114,4 +155,7 @@ add_note(task_id="...", content="...")
 
 # Mark complete
 update_task(id="...", status="complete")
+
+# List open tasks
+list_tasks(status="open", ready_only=true)
 ```
