@@ -60,7 +60,7 @@ When ending a work session, complete ALL steps below. Work is NOT complete until
 1. **Run quality gates** (if code changed) - `just check`
 2. **Push to remote**:
    ```bash
-   git pull --rebase
+   git pull  # Use merge, not rebase (auto-release causes rebase issues)
    git push
    git status  # MUST show "up to date with origin"
    ```
