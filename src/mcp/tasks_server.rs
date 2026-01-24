@@ -7,6 +7,8 @@
 // making pass-by-value necessary for all tool handler functions.
 #![allow(clippy::needless_pass_by_value)]
 
+use crate::beads_sync;
+use crate::command::RealCommandRunner;
 use crate::session;
 use crate::tasks::{
     HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
@@ -580,6 +582,9 @@ impl TasksServer {
             .transpose()
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
+        // Check if we're marking this task as complete - we may need to close a beads issue
+        let is_completing = status == Some(Status::Complete);
+
         let update = TaskUpdate {
             title: input.title,
             description: input.description,
@@ -596,6 +601,15 @@ impl TasksServer {
 
         match task {
             Some(task) => {
+                // If completing a task with a beads marker, close the beads issue
+                if is_completing {
+                    if let Some(beads_id) = beads_sync::extract_beads_id(&task.description) {
+                        let runner = RealCommandRunner::new();
+                        // Silently attempt to close - don't fail the task update if this fails
+                        let _ = beads_sync::close_beads_issue(&runner, &self.base_dir, beads_id);
+                    }
+                }
+
                 let deps = self.store.get_dependencies(&task.id).unwrap_or_default();
                 let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
                 let output = TaskOutput::from_task(&task, deps, guidance);
