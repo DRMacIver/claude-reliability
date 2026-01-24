@@ -1,7 +1,7 @@
 {
   "name": "claude-reliability",
   "description": "Reliability hooks for Claude Code - prevents common mistakes and enforces quality standards",
-  "version": "26.124.2",
+  "version": "26.124.3",
   "author": {
     "name": "David R. MacIver",
     "email": "david@drmaciver.com"
