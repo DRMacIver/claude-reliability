@@ -7,6 +7,7 @@
 // making pass-by-value necessary for all tool handler functions.
 #![allow(clippy::needless_pass_by_value)]
 
+use crate::session;
 use crate::tasks::{
     HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
 };
@@ -17,7 +18,7 @@ use rmcp::tool;
 use rmcp::Error as McpError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Instructions for the MCP server, shown to agents using this server.
@@ -70,17 +71,22 @@ Priority values: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
 #[derive(Clone)]
 pub struct TasksServer {
     store: Arc<SqliteTaskStore>,
+    /// Base directory for session state (problem mode, etc.)
+    base_dir: PathBuf,
 }
 
 impl TasksServer {
     /// Create a new tasks server with the given database path.
+    ///
+    /// Uses the current working directory as the base directory for session state.
     ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be initialized.
     pub fn new(db_path: &Path) -> crate::error::Result<Self> {
         let store = SqliteTaskStore::new(db_path)?;
-        Ok(Self { store: Arc::new(store) })
+        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Ok(Self { store: Arc::new(store), base_dir })
     }
 
     /// Create a new tasks server for the given project directory.
@@ -92,7 +98,8 @@ impl TasksServer {
     /// Returns an error if the database cannot be initialized.
     pub fn for_project(project_dir: &Path) -> crate::error::Result<Self> {
         let store = SqliteTaskStore::for_project(project_dir)?;
-        Ok(Self { store: Arc::new(store) })
+        let base_dir = project_dir.to_path_buf();
+        Ok(Self { store: Arc::new(store), base_dir })
     }
 }
 
@@ -350,6 +357,13 @@ pub struct WorkOnInput {
 pub struct RequestTasksInput {
     /// Task IDs to mark as requested.
     pub task_ids: Vec<String>,
+}
+
+/// Input for signaling a problem that requires user intervention.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SignalProblemInput {
+    /// A description of the problem that requires user input.
+    pub reason: String,
 }
 
 // Output types - defined at module level to avoid items_after_statements
@@ -1293,6 +1307,29 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Signal that you've encountered a problem requiring user intervention.
+    ///
+    /// Use this when you've hit a blocker that you cannot resolve on your own.
+    /// After calling this, explain the problem clearly, then stop. On your next
+    /// stop attempt, you will be allowed to exit.
+    #[tool(
+        description = "Signal that you've encountered a problem requiring user intervention. Call this when you're stuck on something that needs user input, then explain the problem and stop."
+    )]
+    fn signal_problem(
+        &self,
+        #[tool(aggr)] input: SignalProblemInput,
+    ) -> Result<CallToolResult, McpError> {
+        session::enter_problem_mode(&self.base_dir)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Problem mode activated. Reason recorded: {}\n\n\
+             Please explain the problem clearly to the user, then stop. \
+             Your next stop attempt will be permitted.",
+            input.reason
+        ))]))
     }
 }
 
