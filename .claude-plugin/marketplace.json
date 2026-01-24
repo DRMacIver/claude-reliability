@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Reliability tools for Claude Code",
-    "version": "26.124.5"
+    "version": "26.124.6"
   },
   "plugins": [
     {
@@ -16,7 +16,7 @@
         "repo": "DRMacIver/claude-reliability"
       },
       "description": "Reliability hooks for Claude Code - prevents common mistakes, enforces quality standards, blocks --no-verify, and runs automated code review",
-      "version": "26.124.5",
+      "version": "26.124.6",
       "author": {
         "name": "David R. MacIver"
       },
