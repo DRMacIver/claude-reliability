@@ -25,6 +25,30 @@ pub const PROBLEM_NEEDS_USER: &str = "I have run into a problem I can't solve wi
 /// Time window for considering user as "recently active" (minutes).
 pub const USER_RECENCY_MINUTES: u32 = 5;
 
+/// Accumulator for tracking which checks have been run and their results.
+#[derive(Debug, Default)]
+struct ChecksLog {
+    entries: Vec<String>,
+}
+
+impl ChecksLog {
+    /// Log a check that passed (returned None, continuing to next check).
+    fn pass(&mut self, check_name: &str, detail: &str) {
+        self.entries.push(format!("  {check_name}: {detail}"));
+    }
+
+    /// Create a result with the accumulated log entries and add formatted log to messages.
+    fn into_result(self, mut result: StopHookResult) -> StopHookResult {
+        result.checks_log = self.entries;
+        // Add formatted checks log to messages for display
+        let formatted = result.format_checks_log();
+        if !formatted.is_empty() {
+            result.messages.insert(0, formatted);
+        }
+        result
+    }
+}
+
 /// Format a timestamp as a human-readable "time ago" string.
 fn format_time_ago(time: DateTime<Utc>) -> String {
     let now = Utc::now();
@@ -89,17 +113,31 @@ pub struct StopHookResult {
     pub messages: Vec<String>,
     /// Optional response to inject (from sub-agent).
     pub inject_response: Option<String>,
+    /// Log of all checks that were run and their results.
+    pub checks_log: Vec<String>,
 }
 
 impl StopHookResult {
     /// Create an "allow" result.
     pub const fn allow() -> Self {
-        Self { allow_stop: true, exit_code: 0, messages: Vec::new(), inject_response: None }
+        Self {
+            allow_stop: true,
+            exit_code: 0,
+            messages: Vec::new(),
+            inject_response: None,
+            checks_log: Vec::new(),
+        }
     }
 
     /// Create a "block" result.
     pub const fn block() -> Self {
-        Self { allow_stop: false, exit_code: 2, messages: Vec::new(), inject_response: None }
+        Self {
+            allow_stop: false,
+            exit_code: 2,
+            messages: Vec::new(),
+            inject_response: None,
+            checks_log: Vec::new(),
+        }
     }
 
     /// Add a message to display.
@@ -132,6 +170,15 @@ impl StopHookResult {
         } else {
             self
         }
+    }
+
+    /// Format the checks log as a displayable string.
+    fn format_checks_log(&self) -> String {
+        if self.checks_log.is_empty() {
+            return String::new();
+        }
+        let header = if self.allow_stop { "Stop allowed:" } else { "Stop blocked:" };
+        format!("{}\n{}", header, self.checks_log.join("\n"))
     }
 }
 
@@ -507,131 +554,124 @@ pub fn run_stop_hook(
     // Result. I think every error path through here can just be allowed to
     // panic.
 
-    // FIXME: I think the way we are reporting stop reasons doesn't make
-    // much sense. The reason an agent is allowed to stop is in some sense
-    // almost always "There was no reason not to stop it". Fast path
-    // checks can give a concrete reason, but after that it's a series of
-    // checks which are either passed or skipped. I think we should structure
-    // the output more like.
-    //
-    // > Stop allowed:
-    // >   check_api_error_loop: pass
-    // >   check_problem_mode_exit: agent reports problem, early stop
-    //
-    // or
-    //
-    // > Stop rejected:
-    // >
-    // >   check_api_error_loop: pass
-    // >   check_problem_mode_exit: pass
-    // >   [...]
-    // >   check_validation_required: no validation required, no modifying changes
-    // >   check_requested_tasks_block: outstanding requested tasks remain, stop rejected
-    //
-    // So there is a clear log of all checks that were actually run, shown to the user whenever
-    // the stop hook runs, not just when it's allowed.
-
     // Parse transcript if available
     let transcript_info = input
         .transcript_path
         .as_ref()
         .and_then(|p| transcript::parse_transcript(Path::new(p)).ok())
         .unwrap_or_default();
+
+    // Track all checks that are run
+    let mut log = ChecksLog::default();
+
     // =========================================================================
     // Tier 1: Fast Exit Checks
     // =========================================================================
+
     // Always stop immediately in API error loops
     if let Some(r) = check_api_error_loop(&transcript_info, config) {
-        return Ok(r);
+        log.pass("api_error_loop", "detected, allowing stop");
+        return Ok(log.into_result(r));
     }
+    log.pass("api_error_loop", "no errors");
 
     // The agent has previously said it has run into an insurmountable problem
     // and was asked to explain it. Now it has.
     if let Some(r) = check_problem_mode_exit(config)? {
-        return Ok(r);
+        log.pass("problem_mode_exit", "in problem mode, allowing stop");
+        return Ok(log.into_result(r));
     }
+    log.pass("problem_mode_exit", "not in problem mode");
 
     // The agent has not yet done any work, and has asked a clarifying question,
     // which should be allowed automatically.
     if let Some(r) = check_simple_qa_fast_path(&transcript_info, config) {
-        return Ok(r);
+        log.pass("simple_qa_fast_path", "simple Q&A, allowing stop");
+        return Ok(log.into_result(r));
     }
+    log.pass("simple_qa_fast_path", "not simple Q&A");
 
-    // The agent has asked a question. Decide now whether to permit it. Some
-    // questions will be auto-answered by the hook, some will be delegated to
-    // a sub-agent.
+    // The agent has asked a question. Decide now whether to permit it.
     if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config)? {
-        return Ok(r);
+        let action = if r.allow_stop { "allowing stop" } else { "blocking" };
+        log.pass("interactive_question", action);
+        return Ok(log.into_result(r));
     }
+    log.pass("interactive_question", "no interactive question");
 
-    // If the agent has asked if it should commit or push, we return fast with
-    // a block telling it that yes it should.
+    // If the agent has asked if it should commit or push, auto-confirm.
     if let Some(r) = check_commit_push_auto_confirm(&transcript_info, config) {
-        return Ok(r);
+        log.pass("commit_push_auto_confirm", "auto-confirming commit/push");
+        return Ok(log.into_result(r));
     }
+    log.pass("commit_push_auto_confirm", "no commit/push question");
 
     // =========================================================================
     // Tier 2: Validation Checks
     // =========================================================================
 
-    // If any changes have been made, the validation step (just check) needs
-    // to be run.
+    // If any changes have been made, the validation step needs to be run.
     if let Some(r) = check_validation_required(config, runner)? {
-        return Ok(r);
+        log.pass("validation_required", "validation failed, blocking");
+        return Ok(log.into_result(r));
     }
+    log.pass("validation_required", "passed or not needed");
 
     // =========================================================================
     // Tier 3: Bypass Phrase Handling
     // =========================================================================
 
-    // The agent says it has run into a problem and it needs to stop. Block it
-    // but ask it to explain in detail what the problem is and then it Can
-    // stop.
-    //
-    // FIXME: I think we should replace this with an emergency stop
-    // operation on the MCP server.
+    // The agent says it has run into a problem and needs to stop.
     if let Some(r) = check_problem_phrase(&transcript_info, config)? {
-        return Ok(r);
+        log.pass("problem_phrase", "problem phrase detected, entering problem mode");
+        return Ok(log.into_result(r));
     }
+    log.pass("problem_phrase", "no problem phrase");
 
-    // There are oustanding requested tasks, so the agent is not allowed to stop.
+    // There are outstanding requested tasks, so the agent is not allowed to stop.
     if let Some(r) = check_requested_tasks_block(&transcript_info, config) {
-        return Ok(r);
+        log.pass("requested_tasks", "incomplete requested tasks, blocking");
+        return Ok(log.into_result(r));
     }
+    log.pass("requested_tasks", "no incomplete requested tasks");
 
-    // There are outstanding tasks and the user hasn't been around for a
-    // while, so the agent is prompted to work on tasks rather than stopping.
-    // This is enabled by default but can be disabled via config.
+    // Prompt agent to work on open tasks if user has been idle.
     if let Some(r) = check_auto_work_tasks_block(config, &transcript_info) {
-        return Ok(r);
+        log.pass("auto_work_tasks", "prompting to work on tasks");
+        return Ok(log.into_result(r));
     }
+    log.pass("auto_work_tasks", "no auto-work prompt");
 
     // Cannot exit with uncommitted changes.
     if let Some(r) = check_uncommitted_changes_block(config, runner, &transcript_info, sub_agent)? {
-        return Ok(r);
+        log.pass("uncommitted_changes", "uncommitted changes, blocking");
+        return Ok(log.into_result(r));
     }
+    log.pass("uncommitted_changes", "no uncommitted changes");
 
     // The model has previously been asked to reflect, and now it has.
     if let Some(r) = check_reflection_marker_allow(config)? {
-        return Ok(r);
+        log.pass("reflection_marker", "reflection complete, allowing stop");
+        return Ok(log.into_result(r));
     }
-    // The model is asking a question that has not already been auto-answered.
-    // This is allowed to skip reflection.
-    if let Some(r) = check_question_skip_reflection(&transcript_info, config) {
-        return Ok(r);
-    }
+    log.pass("reflection_marker", "no reflection marker");
 
-    // The agent is allowed to stop, probably, but is given one last prompt to
-    // ask if it's really sure it's done everything requested.
-    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
-        return Ok(r);
+    // The model is asking a question - skip reflection.
+    if let Some(r) = check_question_skip_reflection(&transcript_info, config) {
+        log.pass("question_skip_reflection", "question asked, skipping reflection");
+        return Ok(log.into_result(r));
     }
+    log.pass("question_skip_reflection", "not a question");
+
+    // Prompt for reflection before allowing stop.
+    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
+        log.pass("reflection_prompt", "prompting for reflection");
+        return Ok(log.into_result(r));
+    }
+    log.pass("reflection_prompt", "no reflection needed");
 
     // All checks passed - allow stop
-    // FIXME: This explanation seems like nonsense? But that's largely redundant
-    // with my suggested changes above. If you get to this point you have a fully
-    // log of checks performed.
-    Ok(StopHookResult::allow().with_explanation(config.explain_stops, "no modifying tools used"))
+    Ok(log.into_result(StopHookResult::allow()))
 }
 
 /// Check if we should prompt the agent to work on open tasks.
@@ -1255,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_explain_stops_adds_explanation_message() {
+    fn test_checks_log_included_in_messages() {
         let dir = tempfile::TempDir::new().unwrap();
         let runner = mock_clean_git();
         let sub_agent = MockSubAgent::new();
@@ -1268,28 +1308,30 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
-        // Should include an explanation message
-        let has_explanation = result.messages.iter().any(|m| m.starts_with("[Stop permitted:"));
-        assert!(has_explanation, "Expected explanation message, got: {:?}", result.messages);
+        // Should include the checks log
+        let has_checks_log = result.messages.iter().any(|m| m.starts_with("Stop allowed:"));
+        assert!(has_checks_log, "Expected checks log, got: {:?}", result.messages);
+        // Should have individual check entries
+        assert!(!result.checks_log.is_empty(), "Checks log should not be empty");
     }
 
     #[test]
-    fn test_explain_stops_disabled_no_message() {
+    fn test_checks_log_always_included() {
         let dir = tempfile::TempDir::new().unwrap();
         let runner = mock_clean_git();
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
         let config = StopHookConfig {
             base_dir: Some(dir.path().to_path_buf()),
-            explain_stops: false,
+            explain_stops: false, // Even when false, checks log should be included
             ..Default::default()
         };
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
-        // Should NOT include an explanation message
-        let has_explanation = result.messages.iter().any(|m| m.starts_with("[Stop permitted:"));
-        assert!(!has_explanation, "Unexpected explanation message: {:?}", result.messages);
+        // Checks log should always be included, regardless of explain_stops
+        let has_checks_log = result.messages.iter().any(|m| m.starts_with("Stop allowed:"));
+        assert!(has_checks_log, "Checks log should always be included: {:?}", result.messages);
     }
 
     fn mock_uncommitted_changes() -> MockCommandRunner {
@@ -1460,6 +1502,30 @@ mod tests {
     fn test_stop_hook_result_with_explanation_disabled() {
         let result = StopHookResult::allow().with_explanation(false, "test reason");
         assert!(result.messages.is_empty());
+    }
+
+    #[test]
+    fn test_format_checks_log_empty() {
+        let result = StopHookResult::allow();
+        assert!(result.format_checks_log().is_empty());
+    }
+
+    #[test]
+    fn test_format_checks_log_with_entries() {
+        let mut result = StopHookResult::allow();
+        result.checks_log = vec!["  check1: passed".to_string(), "  check2: passed".to_string()];
+        let formatted = result.format_checks_log();
+        assert!(formatted.starts_with("Stop allowed:"));
+        assert!(formatted.contains("check1: passed"));
+        assert!(formatted.contains("check2: passed"));
+    }
+
+    #[test]
+    fn test_format_checks_log_blocked() {
+        let mut result = StopHookResult::block();
+        result.checks_log = vec!["  check1: failed".to_string()];
+        let formatted = result.format_checks_log();
+        assert!(formatted.starts_with("Stop blocked:"));
     }
 
     #[test]

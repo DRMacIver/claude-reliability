@@ -1143,7 +1143,7 @@ mod tests {
             serde_json::from_str(&output.stdout[0]).expect("Output should be valid JSON");
         assert!(json.get("systemMessage").is_some(), "JSON should contain systemMessage field");
         let message = json["systemMessage"].as_str().unwrap();
-        assert!(message.contains("[Stop permitted:"), "should contain stop explanation");
+        assert!(message.contains("Stop allowed:"), "should contain checks log");
     }
 
     #[test]
