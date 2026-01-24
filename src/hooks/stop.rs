@@ -531,10 +531,11 @@ fn check_reflection_prompt(
 }
 
 /// Check if we should prompt to work on open tasks (final check before allow).
+/// Returns (result, reason) where reason explains the outcome.
 fn check_auto_work_tasks_block(
     config: &StopHookConfig,
     transcript_info: &TranscriptInfo,
-) -> Option<StopHookResult> {
+) -> (Option<StopHookResult>, &'static str) {
     check_auto_work_tasks(config, transcript_info)
 }
 
@@ -658,11 +659,13 @@ pub fn run_stop_hook(
     log.pass("requested_tasks", "no incomplete requested tasks");
 
     // Prompt agent to work on open tasks if user has been idle.
-    if let Some(r) = check_auto_work_tasks_block(config, &transcript_info) {
-        log.pass("auto_work_tasks", "prompting to work on tasks");
+    let (auto_work_result, auto_work_reason) =
+        check_auto_work_tasks_block(config, &transcript_info);
+    if let Some(r) = auto_work_result {
+        log.pass("auto_work_tasks", auto_work_reason);
         return Ok(log.into_result(r));
     }
-    log.pass("auto_work_tasks", "no auto-work prompt");
+    log.pass("auto_work_tasks", auto_work_reason);
 
     // Cannot exit with uncommitted changes.
     if let Some(r) = check_uncommitted_changes_block(config, runner, &transcript_info, sub_agent)? {
@@ -703,14 +706,15 @@ pub fn run_stop_hook(
 /// 2. There are open, ready tasks in the database
 /// 3. User has been idle for at least `auto_work_idle_minutes`
 ///
-/// Returns Some(block result) if agent should work on tasks, None otherwise.
+/// Returns (Some(block result), reason) if agent should work on tasks,
+/// (None, reason) otherwise explaining why auto-work didn't trigger.
 fn check_auto_work_tasks(
     config: &StopHookConfig,
     transcript_info: &TranscriptInfo,
-) -> Option<StopHookResult> {
+) -> (Option<StopHookResult>, &'static str) {
     // Skip if auto-work is disabled
     if !config.auto_work_on_tasks {
-        return None;
+        return (None, "auto-work disabled");
     }
 
     // Check user idle time
@@ -722,7 +726,7 @@ fn check_auto_work_tasks(
     }); // If no timestamp, treat as very idle
 
     if user_idle_minutes < config.auto_work_idle_minutes {
-        return None;
+        return (None, "user active recently");
     }
 
     // Check for open tasks
@@ -730,7 +734,7 @@ fn check_auto_work_tasks(
     let ready_task_count = tasks::count_ready_tasks(base_dir);
 
     if ready_task_count == 0 {
-        return None;
+        return (None, "no ready tasks");
     }
 
     // User is idle and there are tasks - prompt to work on them
@@ -741,7 +745,7 @@ fn check_auto_work_tasks(
     let message = templates::render("messages/stop/auto_work_tasks.tera", &ctx)
         .expect("auto_work_tasks.tera template should always render");
 
-    Some(StopHookResult::block().with_message(message))
+    (Some(StopHookResult::block().with_message(message)), "prompting to work on tasks")
 }
 
 /// Check if there are incomplete requested tasks that block stopping.
@@ -1558,8 +1562,9 @@ mod tests {
         let config = StopHookConfig { auto_work_on_tasks: false, ..Default::default() };
         let transcript = TranscriptInfo::default();
 
-        let result = check_auto_work_tasks(&config, &transcript);
+        let (result, reason) = check_auto_work_tasks(&config, &transcript);
         assert!(result.is_none());
+        assert_eq!(reason, "auto-work disabled");
     }
 
     #[test]
@@ -1576,8 +1581,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = check_auto_work_tasks(&config, &transcript);
+        let (result, reason) = check_auto_work_tasks(&config, &transcript);
         assert!(result.is_none()); // User is active, shouldn't block
+        assert_eq!(reason, "user active recently");
     }
 
     #[test]
@@ -1598,8 +1604,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = check_auto_work_tasks(&config, &transcript);
+        let (result, reason) = check_auto_work_tasks(&config, &transcript);
         assert!(result.is_none()); // No tasks, shouldn't block
+        assert_eq!(reason, "no ready tasks");
     }
 
     #[test]
@@ -1627,8 +1634,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = check_auto_work_tasks(&config, &transcript);
+        let (result, reason) = check_auto_work_tasks(&config, &transcript);
         assert!(result.is_some()); // Has tasks and user is idle - should block
+        assert_eq!(reason, "prompting to work on tasks");
         let result = result.unwrap();
         assert!(!result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
@@ -1658,8 +1666,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = check_auto_work_tasks(&config, &transcript);
+        let (result, reason) = check_auto_work_tasks(&config, &transcript);
         assert!(result.is_some()); // No timestamp = very idle, should block
+        assert_eq!(reason, "prompting to work on tasks");
     }
 
     #[test]
