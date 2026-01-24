@@ -208,18 +208,22 @@ fn show_file_list(result: &mut StopHookResult, files: &[String], max_files: usiz
 ///
 /// When problem mode is active (from a previous "I have run into a problem" phrase),
 /// we exit the mode and allow the stop unconditionally.
-fn check_problem_mode_exit(config: &StopHookConfig) -> Result<Option<StopHookResult>> {
+///
+/// # Panics
+///
+/// Panics if exiting problem mode fails (database error).
+fn check_problem_mode_exit(config: &StopHookConfig) -> Option<StopHookResult> {
     if session::is_problem_mode_active(config.base_dir()) {
-        session::exit_problem_mode(config.base_dir())?;
+        session::exit_problem_mode(config.base_dir()).expect("failed to exit problem mode");
         let message = templates::render("messages/stop/problem_mode_exit.tera", &Context::new())
             .expect("problem_mode_exit.tera template should always render");
-        return Ok(Some(
+        return Some(
             StopHookResult::allow()
                 .with_message(message)
                 .with_explanation(config.explain_stops, "problem mode was active"),
-        ));
+        );
     }
-    Ok(None)
+    None
 }
 
 /// Check for API error loop and allow exit to prevent infinite loops.
@@ -292,6 +296,10 @@ fn check_commit_push_auto_confirm(
 ///
 /// If modifying tools were used since last user message or validation,
 /// run the validation command and block if it fails.
+///
+/// # Errors
+///
+/// Returns an error if running the validation command fails.
 fn check_validation_required(
     config: &StopHookConfig,
     runner: &dyn CommandRunner,
@@ -333,7 +341,7 @@ fn check_validation_required(
     }
 
     // Validation passed - clear the marker
-    session::clear_needs_validation(config.base_dir())?;
+    session::clear_needs_validation(config.base_dir()).expect("failed to clear validation marker");
     Ok(None)
 }
 
@@ -345,23 +353,25 @@ fn check_validation_required(
 ///
 /// When the agent says they've hit a problem they can't solve, enter problem mode
 /// which blocks all tool use until the next stop.
+///
+/// # Panics
+///
+/// Panics if entering problem mode fails (database error).
 fn check_problem_phrase(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
-) -> Result<Option<StopHookResult>> {
-    let Some(ref output) = transcript_info.last_assistant_output else {
-        return Ok(None);
-    };
+) -> Option<StopHookResult> {
+    let output = transcript_info.last_assistant_output.as_ref()?;
 
     if output.contains(PROBLEM_NEEDS_USER) {
         // Enter problem mode - this blocks all tool use until next stop
-        session::enter_problem_mode(config.base_dir())?;
+        session::enter_problem_mode(config.base_dir()).expect("failed to enter problem mode");
         let message =
             templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
                 .expect("problem_mode_activated.tera template should always render");
-        return Ok(Some(StopHookResult::block().with_message(message)));
+        return Some(StopHookResult::block().with_message(message));
     }
-    Ok(None)
+    None
 }
 
 /// Check for incomplete requested tasks that block stopping.
@@ -383,6 +393,10 @@ fn check_requested_tasks_block(
 // =============================================================================
 
 /// Check for uncommitted changes and block if present.
+///
+/// # Errors
+///
+/// Returns an error if git commands fail or if handling uncommitted changes fails.
 fn check_uncommitted_changes_block(
     config: &StopHookConfig,
     runner: &dyn CommandRunner,
@@ -426,7 +440,7 @@ fn check_interactive_question_block(
     transcript_info: &TranscriptInfo,
     sub_agent: &dyn SubAgent,
     config: &StopHookConfig,
-) -> Result<Option<StopHookResult>> {
+) -> Option<StopHookResult> {
     check_interactive_question(transcript_info, sub_agent, config)
 }
 
@@ -438,27 +452,31 @@ fn check_interactive_question_block(
 ///
 /// If the agent got the reflection prompt and is stopping again, allow it.
 /// Also checks for incomplete requested tasks before allowing.
-fn check_reflection_marker_allow(config: &StopHookConfig) -> Result<Option<StopHookResult>> {
+///
+/// # Panics
+///
+/// Panics if clearing the reflect marker fails (database error).
+fn check_reflection_marker_allow(config: &StopHookConfig) -> Option<StopHookResult> {
     let base_dir = config.base_dir();
     if !session::has_reflect_marker(base_dir) {
-        return Ok(None);
+        return None;
     }
 
     // Agent already got the reflection prompt and is stopping again - allow it
-    session::clear_reflect_marker(base_dir)?;
+    session::clear_reflect_marker(base_dir).expect("failed to clear reflect marker");
 
     // Check for incomplete requested tasks before allowing stop (work was done)
     if let Some(result) = check_incomplete_requested_tasks(config) {
-        return Ok(Some(result));
+        return Some(result);
     }
 
     // Note: check_auto_work_tasks already ran before this in run_stop_hook,
     // so we don't need to check it again here.
 
-    Ok(Some(
+    Some(
         StopHookResult::allow()
             .with_explanation(config.explain_stops, "reflection already prompted on first stop"),
-    ))
+    )
 }
 
 /// Skip reflection if agent is asking a question (waiting for user input).
@@ -481,17 +499,21 @@ fn check_question_skip_reflection(
 }
 
 /// Prompt for reflection on first stop if modifying tools were used.
+///
+/// # Panics
+///
+/// Panics if setting the reflect marker fails (database error).
 fn check_reflection_prompt(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
-) -> Result<Option<StopHookResult>> {
+) -> Option<StopHookResult> {
     if !transcript_info.has_modifying_tool_use {
-        return Ok(None);
+        return None;
     }
 
     // Modifying tools were used, prompt for reflection
-    session::set_reflect_marker(config.base_dir())?;
-    Ok(Some(
+    session::set_reflect_marker(config.base_dir()).expect("failed to set reflect marker");
+    Some(
         StopHookResult::block()
             .with_message("# Task Completion Check")
             .with_message("")
@@ -505,7 +527,7 @@ fn check_reflection_prompt(
             .with_message("If you HAVE completed the task:")
             .with_message("  - Provide a clear, concise summary of what was done for the user")
             .with_message("  - Then stop again to exit"),
-    ))
+    )
 }
 
 /// Check if we should prompt to work on open tasks (final check before allow).
@@ -577,7 +599,7 @@ pub fn run_stop_hook(
 
     // The agent has previously said it has run into an insurmountable problem
     // and was asked to explain it. Now it has.
-    if let Some(r) = check_problem_mode_exit(config)? {
+    if let Some(r) = check_problem_mode_exit(config) {
         log.pass("problem_mode_exit", "in problem mode, allowing stop");
         return Ok(log.into_result(r));
     }
@@ -592,7 +614,7 @@ pub fn run_stop_hook(
     log.pass("simple_qa_fast_path", "not simple Q&A");
 
     // The agent has asked a question. Decide now whether to permit it.
-    if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config)? {
+    if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config) {
         let action = if r.allow_stop { "allowing stop" } else { "blocking" };
         log.pass("interactive_question", action);
         return Ok(log.into_result(r));
@@ -622,7 +644,7 @@ pub fn run_stop_hook(
     // =========================================================================
 
     // The agent says it has run into a problem and needs to stop.
-    if let Some(r) = check_problem_phrase(&transcript_info, config)? {
+    if let Some(r) = check_problem_phrase(&transcript_info, config) {
         log.pass("problem_phrase", "problem phrase detected, entering problem mode");
         return Ok(log.into_result(r));
     }
@@ -650,7 +672,7 @@ pub fn run_stop_hook(
     log.pass("uncommitted_changes", "no uncommitted changes");
 
     // The model has previously been asked to reflect, and now it has.
-    if let Some(r) = check_reflection_marker_allow(config)? {
+    if let Some(r) = check_reflection_marker_allow(config) {
         log.pass("reflection_marker", "reflection complete, allowing stop");
         return Ok(log.into_result(r));
     }
@@ -664,7 +686,7 @@ pub fn run_stop_hook(
     log.pass("question_skip_reflection", "not a question");
 
     // Prompt for reflection before allowing stop.
-    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
+    if let Some(r) = check_reflection_prompt(&transcript_info, config) {
         log.pass("reflection_prompt", "prompting for reflection");
         return Ok(log.into_result(r));
     }
@@ -915,23 +937,25 @@ fn handle_uncommitted_changes(
 }
 
 /// Check for interactive question handling.
+///
+/// # Panics
+///
+/// Panics if the sub-agent fails to make a decision.
 fn check_interactive_question(
     transcript_info: &TranscriptInfo,
     sub_agent: &dyn SubAgent,
     config: &StopHookConfig,
-) -> Result<Option<StopHookResult>> {
-    let Some(ref output) = transcript_info.last_assistant_output else {
-        return Ok(None);
-    };
+) -> Option<StopHookResult> {
+    let output = transcript_info.last_assistant_output.as_ref()?;
 
     // Check if it looks like a question
     if !looks_like_question(output) {
-        return Ok(None);
+        return None;
     }
 
     // Check if user is recently active
     if !transcript::is_user_recently_active(transcript_info, USER_RECENCY_MINUTES) {
-        return Ok(None);
+        return None;
     }
 
     // Truncate for context
@@ -939,11 +963,11 @@ fn check_interactive_question(
 
     // Fast path: Auto-answer "should I continue?" questions
     if is_continue_question(truncated_output) {
-        return Ok(Some(
+        return Some(
             StopHookResult::block()
                 .with_message("# Fast path: Auto-answering continue question")
                 .with_inject("Yes, please continue."),
-        ));
+        );
     }
 
     // Build question context for sub-agent
@@ -955,7 +979,8 @@ fn check_interactive_question(
     };
 
     // Run sub-agent decision
-    let decision = sub_agent.decide_on_question(&question_context)?;
+    let decision =
+        sub_agent.decide_on_question(&question_context).expect("sub-agent failed to make decision");
 
     match decision {
         SubAgentDecision::AllowStop(reason) => {
@@ -968,9 +993,9 @@ fn check_interactive_question(
             }
             let explanation = reason.unwrap_or_else(|| "agent asking question".to_string());
             result = result.with_explanation(config.explain_stops, explanation);
-            Ok(Some(result))
+            Some(result)
         }
-        SubAgentDecision::Answer(answer) => Ok(Some(
+        SubAgentDecision::Answer(answer) => Some(
             StopHookResult::block()
                 .with_message("# Sub-agent Response")
                 .with_message("")
@@ -979,8 +1004,8 @@ fn check_interactive_question(
                 .with_message("---")
                 .with_message("Continuing work...")
                 .with_inject(answer),
-        )),
-        SubAgentDecision::Continue => Ok(None),
+        ),
+        SubAgentDecision::Continue => None,
     }
 }
 
@@ -1964,8 +1989,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_none());
     }
 
@@ -1984,8 +2008,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_none());
     }
 
@@ -2006,8 +2029,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_none());
     }
 
@@ -2027,8 +2049,7 @@ mod tests {
         let sub_agent = MockSubAgent::new();
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(!result.allow_stop);
@@ -2057,8 +2078,7 @@ mod tests {
         )));
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.allow_stop);
@@ -2087,8 +2107,7 @@ mod tests {
         sub_agent.expect_question_decision(SubAgentDecision::Answer("Use approach A".to_string()));
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(!result.allow_stop);
@@ -2114,8 +2133,7 @@ mod tests {
         sub_agent.expect_question_decision(SubAgentDecision::Continue);
 
         let result =
-            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default())
-                .unwrap();
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_none());
     }
 
