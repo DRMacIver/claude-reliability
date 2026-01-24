@@ -12,7 +12,7 @@
   "commands": "./commands/",
   "skills": "./skills/",
   "mcpServers": {
-    "tasks": {
+    "work": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
       "args": []
     }

@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Instructions for the MCP server, shown to agents using this server.
-const INSTRUCTIONS: &str = r#"Task management server. Use these tools to create, update, list, and manage tasks with dependencies, notes, how-to guides, and questions requiring user input.
+const INSTRUCTIONS: &str = r#"Work tracking server. Use these tools to create, update, list, and manage work items (tasks) with dependencies, notes, how-to guides, and questions requiring user input.
 
 ## Bulk Task Operations
 
