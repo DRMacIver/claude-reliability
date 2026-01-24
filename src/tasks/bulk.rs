@@ -160,6 +160,12 @@ pub struct ListInput {
     /// Only show tasks that are ready to work on (not blocked).
     #[serde(default)]
     pub ready_only: bool,
+    /// Maximum number of tasks to return.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Number of tasks to skip before returning results.
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// A task in the list output.
@@ -397,7 +403,14 @@ pub fn list_tasks(store: &dyn TaskStore, input: &ListInput) -> Result<ListOutput
         .transpose()
         .map_err(|e| crate::error::Error::Task(e.to_string().into()))?;
 
-    let filter = TaskFilter { status, priority, max_priority, ready_only: input.ready_only };
+    let filter = TaskFilter {
+        status,
+        priority,
+        max_priority,
+        ready_only: input.ready_only,
+        limit: input.limit,
+        offset: input.offset,
+    };
 
     let tasks = store.list_tasks(filter)?;
     let outputs: Vec<TaskOutput> = tasks

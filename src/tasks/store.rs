@@ -203,6 +203,10 @@ pub struct TaskFilter {
     pub max_priority: Option<Priority>,
     /// Include only tasks that are not blocked.
     pub ready_only: bool,
+    /// Maximum number of tasks to return.
+    pub limit: Option<usize>,
+    /// Number of tasks to skip before returning results.
+    pub offset: Option<usize>,
 }
 
 /// Error when a circular dependency would be created.
@@ -913,10 +917,19 @@ impl TaskStore for SqliteTaskStore {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
+        // Build LIMIT/OFFSET clause
+        let limit_clause = match (filter.limit, filter.offset) {
+            (Some(limit), Some(offset)) => format!("LIMIT {limit} OFFSET {offset}"),
+            (Some(limit), None) => format!("LIMIT {limit}"),
+            (None, Some(offset)) => format!("LIMIT -1 OFFSET {offset}"), // SQLite requires LIMIT with OFFSET
+            (None, None) => String::new(),
+        };
+
         let sql = format!(
             "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks {where_clause}
-             ORDER BY priority ASC, created_at ASC"
+             ORDER BY priority ASC, created_at ASC
+             {limit_clause}"
         );
 
         let params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(AsRef::as_ref).collect();
@@ -2072,6 +2085,43 @@ mod tests {
             .unwrap();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.priority <= Priority::High));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_list_tasks_with_paging() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        // Create 5 tasks
+        for i in 1..=5 {
+            store.create_task(&format!("Task {i}"), "", Priority::Medium).unwrap();
+        }
+
+        // Test limit only
+        let tasks = store.list_tasks(TaskFilter { limit: Some(2), ..Default::default() }).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "Task 1");
+        assert_eq!(tasks[1].title, "Task 2");
+
+        // Test offset only
+        let tasks = store.list_tasks(TaskFilter { offset: Some(2), ..Default::default() }).unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].title, "Task 3");
+
+        // Test limit and offset together
+        let tasks = store
+            .list_tasks(TaskFilter { limit: Some(2), offset: Some(1), ..Default::default() })
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "Task 2");
+        assert_eq!(tasks[1].title, "Task 3");
+
+        // Test offset beyond results
+        let tasks =
+            store.list_tasks(TaskFilter { offset: Some(10), ..Default::default() }).unwrap();
+        assert_eq!(tasks.len(), 0);
 
         disable_deterministic_ids();
     }

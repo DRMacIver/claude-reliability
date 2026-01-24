@@ -165,6 +165,10 @@ pub struct ListTasksInput {
     /// Only show tasks that are ready to work on (optional).
     #[serde(default)]
     pub ready_only: bool,
+    /// Maximum number of tasks to return (optional).
+    pub limit: Option<usize>,
+    /// Number of tasks to skip before returning results (optional).
+    pub offset: Option<usize>,
 }
 
 /// Input for adding a dependency.
@@ -668,7 +672,14 @@ impl TasksServer {
             .transpose()
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        let filter = TaskFilter { status, priority, max_priority, ready_only: input.ready_only };
+        let filter = TaskFilter {
+            status,
+            priority,
+            max_priority,
+            ready_only: input.ready_only,
+            limit: input.limit,
+            offset: input.offset,
+        };
 
         let tasks = self
             .store
