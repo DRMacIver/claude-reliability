@@ -24,44 +24,44 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Instructions for the MCP server, shown to agents using this server.
-const INSTRUCTIONS: &str = r#"Work tracking server. Use these tools to create, update, list, and manage work items (tasks) with dependencies, notes, how-to guides, and questions requiring user input.
+const INSTRUCTIONS: &str = r#"Work tracking server. Use these tools to create, update, list, and manage work items with dependencies, notes, how-to guides, and questions requiring user input.
 
-## Bulk Task Operations
+## Bulk Operations
 
-When working with multiple tasks, use the bulk-tasks binary for better performance:
+When working with multiple work items, use the bulk-tasks binary for better performance:
 
-### Create multiple tasks (3+)
+### Create multiple work items (3+)
 ```bash
-~/.claude-reliability/bin/bulk-tasks create <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/bin/bulk-tasks create <<'EOF'
 {
   "tasks": [
-    {"id": "t1", "title": "First task", "description": "...", "priority": 1},
-    {"id": "t2", "title": "Second task", "priority": 2, "depends_on": ["t1"]},
-    {"id": "t3", "title": "Third task", "priority": 2, "depends_on": ["t1", "t2"]}
+    {"id": "t1", "title": "First item", "description": "...", "priority": 1},
+    {"id": "t2", "title": "Second item", "priority": 2, "depends_on": ["t1"]},
+    {"id": "t3", "title": "Third item", "priority": 2, "depends_on": ["t1", "t2"]}
   ]
 }
 EOF
 ```
 The `id` fields are temporary identifiers for setting up dependencies. Actual IDs are returned in output.
 
-### Add dependencies to existing tasks
+### Add dependencies to existing work items
 ```bash
-~/.claude-reliability/bin/bulk-tasks add-deps <<'EOF'
-{"dependencies": [{"task": "task-id-1", "depends_on": "task-id-2"}]}
+${CLAUDE_PLUGIN_ROOT}/bin/bulk-tasks add-deps <<'EOF'
+{"dependencies": [{"task": "item-id-1", "depends_on": "item-id-2"}]}
 EOF
 ```
 
-### List tasks with filtering
+### List work items with filtering
 ```bash
-~/.claude-reliability/bin/bulk-tasks list <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/bin/bulk-tasks list <<'EOF'
 {"status": "open", "priority": 1, "ready_only": true}
 EOF
 ```
-All fields optional. Empty `{}` returns all tasks.
+All fields optional. Empty `{}` returns all work items.
 
-### Search tasks
+### Search work items
 ```bash
-~/.claude-reliability/bin/bulk-tasks search <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/bin/bulk-tasks search <<'EOF'
 {"query": "search term"}
 EOF
 ```
@@ -70,17 +70,17 @@ Priority values: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
 
 ## How-To Guides
 
-How-to guides capture reusable procedures that can be linked to tasks. When you retrieve a task with `get_task`, linked how-tos are included with their full instructions.
+How-to guides capture reusable procedures that can be linked to work items. When you retrieve a work item with `get_task`, linked how-tos are included with their full instructions.
 
 **When to create a how-to:**
 - When you discover a procedure that could be reused (e.g., "How to run tests", "How to deploy")
-- When a task requires specific steps that should be documented
+- When a work item requires specific steps that should be documented
 - When the user asks to "document how to do X" or "create a guide for Y"
 
-**Linking how-tos to tasks:**
-- Use `link_task_to_howto` to associate guidance with a task
-- When you fetch the task later, the full how-to instructions appear automatically
-- Multiple tasks can share the same how-to guide
+**Linking how-tos to work items:**
+- Use `link_task_to_howto` to associate guidance with a work item
+- When you fetch the work item later, the full how-to instructions appear automatically
+- Multiple work items can share the same how-to guide
 "#;
 
 /// MCP server for task management.
@@ -121,12 +121,12 @@ impl TasksServer {
 
 // Tool input schemas
 
-/// Input for creating a task.
+/// Input for creating a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateTaskInput {
-    /// Task title (required).
+    /// Work item title (required).
     pub title: String,
-    /// Task description.
+    /// Work item description.
     #[serde(default)]
     pub description: String,
     /// Priority: 0=critical, 1=high, 2=medium (default), 3=low, 4=backlog.
@@ -138,17 +138,17 @@ const fn default_priority() -> u8 {
     2
 }
 
-/// Input for getting a task.
+/// Input for getting a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetTaskInput {
-    /// Task ID.
+    /// Work item ID.
     pub id: String,
 }
 
-/// Input for updating a task.
+/// Input for updating a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateTaskInput {
-    /// Task ID.
+    /// Work item ID.
     pub id: String,
     /// New title (optional).
     pub title: Option<String>,
@@ -160,14 +160,14 @@ pub struct UpdateTaskInput {
     pub status: Option<String>,
 }
 
-/// Input for deleting a task.
+/// Input for deleting a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeleteTaskInput {
-    /// Task ID.
+    /// Work item ID.
     pub id: String,
 }
 
-/// Input for listing tasks.
+/// Input for listing work items.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListTasksInput {
     /// Filter by status (optional).
@@ -176,37 +176,37 @@ pub struct ListTasksInput {
     pub priority: Option<u8>,
     /// Filter by maximum priority (optional).
     pub max_priority: Option<u8>,
-    /// Only show tasks that are ready to work on (optional).
+    /// Only show work items that are ready to work on (optional).
     #[serde(default)]
     pub ready_only: bool,
-    /// Maximum number of tasks to return (optional).
+    /// Maximum number of work items to return (optional).
     pub limit: Option<usize>,
-    /// Number of tasks to skip before returning results (optional).
+    /// Number of work items to skip before returning results (optional).
     pub offset: Option<usize>,
 }
 
 /// Input for adding a dependency.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddDependencyInput {
-    /// Task ID that will have the dependency.
+    /// Work item ID that will have the dependency.
     pub task_id: String,
-    /// Task ID that must be completed first.
+    /// Work item ID that must be completed first.
     pub depends_on: String,
 }
 
 /// Input for removing a dependency.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveDependencyInput {
-    /// Task ID that has the dependency.
+    /// Work item ID that has the dependency.
     pub task_id: String,
-    /// Task ID to remove as dependency.
+    /// Work item ID to remove as dependency.
     pub depends_on: String,
 }
 
 /// Input for adding a note.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddNoteInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
     /// Note content.
     pub content: String,
@@ -215,11 +215,11 @@ pub struct AddNoteInput {
 /// Input for getting notes.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetNotesInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
 }
 
-/// Input for searching tasks.
+/// Input for searching work items.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchTasksInput {
     /// Search query.
@@ -229,7 +229,7 @@ pub struct SearchTasksInput {
 /// Input for getting audit log.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetAuditLogInput {
-    /// Filter by task ID (optional).
+    /// Filter by work item ID (optional).
     pub task_id: Option<String>,
     /// Limit number of entries (optional).
     pub limit: Option<usize>,
@@ -240,7 +240,7 @@ pub struct GetAuditLogInput {
 pub struct CreateHowToInput {
     /// How-to title (required).
     pub title: String,
-    /// Instructions for how to perform the task.
+    /// Instructions for how to perform the work.
     #[serde(default)]
     pub instructions: String,
 }
@@ -277,19 +277,19 @@ pub struct SearchHowTosInput {
     pub query: String,
 }
 
-/// Input for linking a task to a how-to.
+/// Input for linking a work item to a how-to.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LinkTaskToHowToInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
     /// How-to ID.
     pub howto_id: String,
 }
 
-/// Input for unlinking a task from a how-to.
+/// Input for unlinking a work item from a how-to.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UnlinkTaskFromHowToInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
     /// How-to ID.
     pub howto_id: String,
@@ -340,42 +340,42 @@ pub struct SearchQuestionsInput {
     pub query: String,
 }
 
-/// Input for linking a task to a question.
+/// Input for linking a work item to a question.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LinkTaskToQuestionInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
     /// Question ID.
     pub question_id: String,
 }
 
-/// Input for unlinking a task from a question.
+/// Input for unlinking a work item from a question.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UnlinkTaskFromQuestionInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
     /// Question ID.
     pub question_id: String,
 }
 
-/// Input for getting blocking questions for a task.
+/// Input for getting blocking questions for a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetBlockingQuestionsInput {
-    /// Task ID.
+    /// Work item ID.
     pub task_id: String,
 }
 
-/// Input for starting work on a task.
+/// Input for starting work on a work item.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkOnInput {
-    /// Task ID to start working on.
+    /// Work item ID to start working on.
     pub task_id: String,
 }
 
-/// Input for requesting specific tasks.
+/// Input for requesting specific work items.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RequestTasksInput {
-    /// Task IDs to mark as requested.
+    /// Work item IDs to mark as requested.
     pub task_ids: Vec<String>,
 }
 
@@ -388,7 +388,7 @@ pub struct SignalProblemInput {
 
 // Output types - defined at module level to avoid items_after_statements
 
-/// Task output representation.
+/// Work item output representation.
 #[derive(Debug, Serialize)]
 struct TaskOutput {
     id: String,
@@ -432,7 +432,7 @@ struct NoteOutput {
     created_at: String,
 }
 
-/// Note output with task ID for serialization.
+/// Note output with work item ID for serialization.
 #[derive(Debug, Serialize)]
 struct NoteWithTaskOutput {
     id: i64,
@@ -441,23 +441,23 @@ struct NoteWithTaskOutput {
     created_at: String,
 }
 
-/// Full task with notes and how-tos for `get_task` response.
+/// Full work item with notes and how-tos for `get_task` response.
 #[derive(Debug, Serialize)]
 struct FullTaskOutput {
     #[serde(flatten)]
     task: TaskOutput,
     notes: Vec<NoteOutput>,
-    /// Full how-to guides linked to this task (not just IDs).
+    /// Full how-to guides linked to this work item (not just IDs).
     howtos: Vec<HowToOutput>,
 }
 
-/// Task suggestion for `what_should_i_work_on` response.
+/// Work item suggestion for `what_should_i_work_on` response.
 #[derive(Debug, Serialize)]
 struct TaskSuggestion {
     #[serde(flatten)]
     task: TaskOutput,
     notes: Vec<NoteOutput>,
-    /// Full how-to guides linked to this task.
+    /// Full how-to guides linked to this work item.
     howtos: Vec<HowToOutput>,
     message: String,
 }
@@ -524,8 +524,8 @@ const fn priority_label(priority: Priority) -> &'static str {
 
 #[tool(tool_box)]
 impl TasksServer {
-    /// Create a new task.
-    #[tool(description = "Create a new task with title, description, and priority")]
+    /// Create a new work item.
+    #[tool(description = "Create a new work item with title, description, and priority")]
     fn create_task(
         &self,
         #[tool(aggr)] input: CreateTaskInput,
@@ -547,8 +547,8 @@ impl TasksServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Get a task by ID.
-    #[tool(description = "Get a task by its ID, including dependencies, notes, and guidance")]
+    /// Get a work item by ID.
+    #[tool(description = "Get a work item by its ID, including dependencies, notes, and guidance")]
     fn get_task(&self, #[tool(aggr)] input: GetTaskInput) -> Result<CallToolResult, McpError> {
         let task = self
             .store
@@ -588,14 +588,14 @@ impl TasksServer {
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Task not found: {}",
+                "Work item not found: {}",
                 input.id
             ))])),
         }
     }
 
-    /// Update a task's fields.
-    #[tool(description = "Update a task's title, description, priority, or status")]
+    /// Update a work item's fields.
+    #[tool(description = "Update a work item's title, description, priority, or status")]
     fn update_task(
         &self,
         #[tool(aggr)] input: UpdateTaskInput,
@@ -650,14 +650,14 @@ impl TasksServer {
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Task not found: {}",
+                "Work item not found: {}",
                 input.id
             ))])),
         }
     }
 
-    /// Delete a task.
-    #[tool(description = "Delete a task by its ID")]
+    /// Delete a work item.
+    #[tool(description = "Delete a work item by its ID")]
     fn delete_task(
         &self,
         #[tool(aggr)] input: DeleteTaskInput,
@@ -668,17 +668,22 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if deleted {
-            Ok(CallToolResult::success(vec![Content::text(format!("Task deleted: {}", input.id))]))
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Work item deleted: {}",
+                input.id
+            ))]))
         } else {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Task not found: {}",
+                "Work item not found: {}",
                 input.id
             ))]))
         }
     }
 
-    /// List tasks with optional filters.
-    #[tool(description = "List tasks, optionally filtered by status, priority, or ready state")]
+    /// List work items with optional filters.
+    #[tool(
+        description = "List work items, optionally filtered by status, priority, or ready state"
+    )]
     fn list_tasks(&self, #[tool(aggr)] input: ListTasksInput) -> Result<CallToolResult, McpError> {
         let status = input
             .status
@@ -729,7 +734,7 @@ impl TasksServer {
     }
 
     /// Add a dependency between tasks.
-    #[tool(description = "Add a dependency (task_id depends on depends_on task)")]
+    #[tool(description = "Add a dependency (first work item depends on second work item)")]
     fn add_dependency(
         &self,
         #[tool(aggr)] input: AddDependencyInput,
@@ -745,7 +750,7 @@ impl TasksServer {
     }
 
     /// Remove a dependency between tasks.
-    #[tool(description = "Remove a dependency between tasks")]
+    #[tool(description = "Remove a dependency between work items")]
     fn remove_dependency(
         &self,
         #[tool(aggr)] input: RemoveDependencyInput,
@@ -766,7 +771,7 @@ impl TasksServer {
     }
 
     /// Add a note to a task.
-    #[tool(description = "Add a note to a task")]
+    #[tool(description = "Add a note to a work item")]
     fn add_note(&self, #[tool(aggr)] input: AddNoteInput) -> Result<CallToolResult, McpError> {
         let note = self
             .store
@@ -787,7 +792,7 @@ impl TasksServer {
     }
 
     /// Get all notes for a task.
-    #[tool(description = "Get all notes attached to a task")]
+    #[tool(description = "Get all notes attached to a work item")]
     fn get_notes(&self, #[tool(aggr)] input: GetNotesInput) -> Result<CallToolResult, McpError> {
         let notes = self
             .store
@@ -806,7 +811,7 @@ impl TasksServer {
     }
 
     /// Search tasks by text.
-    #[tool(description = "Full-text search across task titles, descriptions, and notes")]
+    #[tool(description = "Full-text search across work item titles, descriptions, and notes")]
     fn search_tasks(
         &self,
         #[tool(aggr)] input: SearchTasksInput,
@@ -832,7 +837,7 @@ impl TasksServer {
     }
 
     /// Get audit log entries.
-    #[tool(description = "Get the audit log, optionally filtered by task ID")]
+    #[tool(description = "Get the audit log, optionally filtered by work item ID")]
     fn get_audit_log(
         &self,
         #[tool(aggr)] input: GetAuditLogInput,
@@ -849,7 +854,7 @@ impl TasksServer {
     }
 
     /// Get a random task to work on from the highest priority ready tasks.
-    #[tool(description = "Pick a random task from the highest priority unblocked tasks")]
+    #[tool(description = "Pick a random work item from the highest priority unblocked items")]
     fn what_should_i_work_on(&self) -> Result<CallToolResult, McpError> {
         let task =
             self.store.pick_task().map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -880,7 +885,7 @@ impl TasksServer {
                         .collect(),
                     howtos,
                     message: format!(
-                        "Suggested task: {} (priority: {})",
+                        "Suggested work item: {} (priority: {})",
                         task.title,
                         priority_label(task.priority)
                     ),
@@ -892,7 +897,7 @@ impl TasksServer {
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(
-                "No tasks available to work on. All tasks are either complete, blocked, or the task list is empty.".to_string(),
+                "No work items available. All items are either complete, blocked, or the list is empty.".to_string(),
             )])),
         }
     }
@@ -1026,7 +1031,7 @@ impl TasksServer {
     }
 
     /// Link a task to a how-to guide.
-    #[tool(description = "Link a task to a how-to guide for guidance")]
+    #[tool(description = "Link a work item to a how-to guide for guidance")]
     fn link_task_to_howto(
         &self,
         #[tool(aggr)] input: LinkTaskToHowToInput,
@@ -1036,13 +1041,13 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Linked task {} to how-to {}",
+            "Linked work item {} to how-to {}",
             input.task_id, input.howto_id
         ))]))
     }
 
     /// Unlink a task from a how-to guide.
-    #[tool(description = "Remove a guidance link between a task and how-to")]
+    #[tool(description = "Remove a guidance link between a work item and how-to")]
     fn unlink_task_from_howto(
         &self,
         #[tool(aggr)] input: UnlinkTaskFromHowToInput,
@@ -1054,19 +1059,19 @@ impl TasksServer {
 
         if removed {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Unlinked task {} from how-to {}",
+                "Unlinked work item {} from how-to {}",
                 input.task_id, input.howto_id
             ))]))
         } else {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "No link found between task {} and how-to {}",
+                "No link found between work item {} and how-to {}",
                 input.task_id, input.howto_id
             ))]))
         }
     }
 
     /// Create a new question that may block tasks.
-    #[tool(description = "Create a question requiring user input that can block tasks")]
+    #[tool(description = "Create a question requiring user input that can block work items")]
     fn create_question(
         &self,
         #[tool(aggr)] input: CreateQuestionInput,
@@ -1197,7 +1202,7 @@ impl TasksServer {
 
     /// Link a task to a question (task blocked until question is answered).
     #[tool(
-        description = "Link a task to a question - task will be blocked until the question is answered"
+        description = "Link a work item to a question - item will be blocked until the question is answered"
     )]
     fn link_task_to_question(
         &self,
@@ -1208,13 +1213,13 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Linked task {} to question {} - task is blocked until question is answered",
+            "Linked work item {} to question {} - item is blocked until question is answered",
             input.task_id, input.question_id
         ))]))
     }
 
     /// Unlink a task from a question.
-    #[tool(description = "Remove a blocking link between a task and a question")]
+    #[tool(description = "Remove a blocking link between a work item and a question")]
     fn unlink_task_from_question(
         &self,
         #[tool(aggr)] input: UnlinkTaskFromQuestionInput,
@@ -1226,19 +1231,19 @@ impl TasksServer {
 
         if removed {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Unlinked task {} from question {}",
+                "Unlinked work item {} from question {}",
                 input.task_id, input.question_id
             ))]))
         } else {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "No link found between task {} and question {}",
+                "No link found between work item {} and question {}",
                 input.task_id, input.question_id
             ))]))
         }
     }
 
     /// Get blocking questions for a task.
-    #[tool(description = "Get all unanswered questions that are blocking a specific task")]
+    #[tool(description = "Get all unanswered questions that are blocking a specific work item")]
     fn get_blocking_questions(
         &self,
         #[tool(aggr)] input: GetBlockingQuestionsInput,
@@ -1258,7 +1263,7 @@ impl TasksServer {
 
     /// Get all tasks blocked by unanswered questions.
     #[tool(
-        description = "Get all tasks that are blocked by unanswered questions (and not blocked by dependencies)"
+        description = "Get all work items that are blocked by unanswered questions (and not blocked by dependencies)"
     )]
     fn get_question_blocked_tasks(&self) -> Result<CallToolResult, McpError> {
         let tasks = self
@@ -1282,7 +1287,7 @@ impl TasksServer {
 
     /// Start working on a task (sets `in_progress` to true).
     #[tool(
-        description = "Mark a task as in-progress. Use this before making any code changes to track what you're working on."
+        description = "Mark a work item as in-progress. Use this before making any code changes to track what you're working on."
     )]
     fn work_on(&self, #[tool(aggr)] input: WorkOnInput) -> Result<CallToolResult, McpError> {
         let update = TaskUpdate { in_progress: Some(true), ..Default::default() };
@@ -1303,7 +1308,7 @@ impl TasksServer {
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Task not found: {}",
+                "Work item not found: {}",
                 input.task_id
             ))])),
         }
@@ -1311,7 +1316,7 @@ impl TasksServer {
 
     /// Mark specific tasks as requested by the user.
     #[tool(
-        description = "Mark tasks as requested by the user. Requested tasks must be completed before the agent can stop."
+        description = "Mark work items as requested by the user. Requested items must be completed before the agent can stop."
     )]
     fn request_tasks(
         &self,
@@ -1324,13 +1329,13 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Marked {updated} task(s) as requested."
+            "Marked {updated} work item(s) as requested."
         ))]))
     }
 
     /// Mark all open tasks as requested and enable request mode.
     #[tool(
-        description = "Mark all open tasks as requested and enable request mode. New tasks will also be automatically requested until the agent successfully stops."
+        description = "Mark all open work items as requested and enable request mode. New items will also be automatically requested until the agent successfully stops."
     )]
     fn request_all_open(&self) -> Result<CallToolResult, McpError> {
         let updated = self
@@ -1339,13 +1344,13 @@ impl TasksServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Marked {updated} task(s) as requested. Request mode enabled - new tasks will be automatically requested."
+            "Marked {updated} work item(s) as requested. Request mode enabled - new items will be automatically requested."
         ))]))
     }
 
     /// Get all incomplete requested tasks (tasks that must be completed before stopping).
     #[tool(
-        description = "Get all incomplete requested tasks. These are tasks the user has requested that must be completed (or blocked on a question) before the agent can stop."
+        description = "Get all incomplete requested work items. These are items the user has requested that must be completed (or blocked on a question) before the agent can stop."
     )]
     fn get_incomplete_requested_tasks(&self) -> Result<CallToolResult, McpError> {
         let tasks = self
@@ -1355,7 +1360,7 @@ impl TasksServer {
 
         if tasks.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No incomplete requested tasks. The agent may stop when ready.".to_string(),
+                "No incomplete requested work items. The agent may stop when ready.".to_string(),
             )]));
         }
 

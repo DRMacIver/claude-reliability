@@ -77,19 +77,24 @@ pub fn sync_beads_to_tasks(runner: &dyn CommandRunner, base_dir: &Path) -> Resul
     // Get open issues from beads
     let output = runner.run("bd", &["list", "--status=open", "--format=json"], None)?;
     if !output.success() {
-        // Beads command failed - maybe no issues
-        return Ok(SyncResult::default());
+        // Beads command failed - report the error
+        return Err(crate::error::Error::CommandFailed {
+            command: "bd list --status=open --format=json".to_string(),
+            exit_code: output.exit_code,
+            stderr: output.stderr,
+        });
     }
 
     // Also get in_progress issues
     let in_progress_output =
         runner.run("bd", &["list", "--status=in_progress", "--format=json"], None)?;
 
-    // Parse issues
-    let mut issues: Vec<BeadsIssue> = serde_json::from_str(&output.stdout).unwrap_or_default();
+    // Parse issues - report parsing errors instead of silently ignoring
+    // The JSON error from serde_json is automatically converted via the From impl
+    let mut issues: Vec<BeadsIssue> = serde_json::from_str(&output.stdout)?;
+
     if in_progress_output.success() {
-        let in_progress: Vec<BeadsIssue> =
-            serde_json::from_str(&in_progress_output.stdout).unwrap_or_default();
+        let in_progress: Vec<BeadsIssue> = serde_json::from_str(&in_progress_output.stdout)?;
         issues.extend(in_progress);
     }
 
@@ -352,8 +357,41 @@ mod tests {
             CommandOutput { exit_code: 1, stdout: String::new(), stderr: "error".to_string() },
         );
 
-        let result = sync_beads_to_tasks(&runner, dir.path()).unwrap();
-        assert_eq!(result.created, 0);
+        // Now returns an error instead of silently succeeding
+        let result = sync_beads_to_tasks(&runner, dir.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bd list"));
+        assert!(err.contains("exit code 1"));
+    }
+
+    #[test]
+    fn test_sync_handles_invalid_json() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".beads")).unwrap();
+
+        let mut runner = MockCommandRunner::new();
+        runner.set_available("bd");
+        runner.expect(
+            "bd",
+            &["list", "--status=open", "--format=json"],
+            CommandOutput {
+                exit_code: 0,
+                stdout: "not valid json".to_string(),
+                stderr: String::new(),
+            },
+        );
+        runner.expect(
+            "bd",
+            &["list", "--status=in_progress", "--format=json"],
+            CommandOutput { exit_code: 0, stdout: "[]".to_string(), stderr: String::new() },
+        );
+
+        // Now returns an error instead of silently returning empty result
+        let result = sync_beads_to_tasks(&runner, dir.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("JSON"));
     }
 
     #[test]

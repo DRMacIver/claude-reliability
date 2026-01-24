@@ -1,20 +1,20 @@
-{# Message shown when there are open tasks and user is idle.
+{# Message shown when there are open work items and user is idle.
 
 Variables:
-  - task_count: Number of ready tasks
+  - task_count: Number of ready work items
   - idle_minutes: Minutes since user was last active
 #}
-# Open Tasks Available
+# Open Work Items Available
 
-There {% if task_count == 1 %}is 1 task{% else %}are {{ task_count }} tasks{% endif %} ready to work on.
+There {% if task_count == 1 %}is 1 work item{% else %}are {{ task_count }} work items{% endif %} ready to work on.
 
-The user hasn't been active for {{ idle_minutes }} minutes. Rather than stopping, please continue working on the available tasks.
+The user hasn't been active for {{ idle_minutes }} minutes. Rather than stopping, please continue working on the available items.
 
 ## What to do
 
 1. Use `list_tasks` to see what needs to be done
-2. Pick a task and use `work_on` to start working on it
-3. Complete the task and mark it as done
-4. Continue with other tasks or stop when you're blocked
+2. Pick a work item and use `work_on` to start working on it
+3. Complete the work item and mark it as done
+4. Continue with other items or stop when you're blocked
 
-If you genuinely need user input, use the `create_question` tool to ask and link it to the relevant task.
+If you genuinely need user input, use the `create_question` tool to ask and link it to the relevant work item.

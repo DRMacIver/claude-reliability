@@ -12,19 +12,19 @@ This means:
 
 You have several tools to help you succeed:
 
-- **Task system**: Track what you're working on and what's left to do. **For non-trivial work, break it down into tasks first** - this helps you stay organized, maintain context across the work, and ensures nothing gets forgotten. When you receive a large or multi-step request, create tasks to track the individual pieces before diving in.
+- **Work tracking system**: Track what you're working on and what's left to do. **For non-trivial work, break it down into work items first** - this helps you stay organized, maintain context across the work, and ensures nothing gets forgotten. When you receive a large or multi-step request, create work items to track the individual pieces before diving in.
 - **Quality checks**: Catch issues early so you can fix them properly.
-- **How-to guides**: Reference guides for common tasks. Consult these when you're unsure, and update them when you learn something useful.
+- **How-to guides**: Reference guides for common procedures. Consult these when you're unsure, and update them when you learn something useful.
 
-## Capturing Tasks
+## Capturing Work Items
 
-**Never let user requests get lost.** When the user mentions something - a bug, a feature request, a problem to fix - capture it immediately as a task using the task system. This is especially important when:
+**Never let user requests get lost.** When the user mentions something - a bug, a feature request, a problem to fix - capture it immediately as a work item using the work tracking system. This is especially important when:
 
 - The user mentions something unrelated to what you're currently working on
 - The user gives feedback that implies future work
 - You notice something that needs fixing while working on something else
 
-Don't assume you'll remember it later. Context may be compacted. Create the task first, then decide whether to work on it now or continue with your current work.
+Don't assume you'll remember it later. Context may be compacted. Create the work item first, then decide whether to work on it now or continue with your current work.
 
 ## The Key Principle
 

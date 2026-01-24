@@ -1,20 +1,20 @@
-{# Message shown when Write/Edit is blocked due to no in-progress task.
+{# Message shown when Write/Edit is blocked due to no in-progress work item.
 
 Variables: none
 #}
-# Quick Setup: Start a Task
+# Quick Setup: Start a Work Item
 
-Before making code changes, please set up a task to track what you're working on. This helps maintain context and keeps work organized.
+Before making code changes, please set up a work item to track what you're working on. This helps maintain context and keeps work organized.
 
 **Quick start:**
 
 ```
-# If a relevant task already exists:
-work_on(task_id="<task-id>")
+# If a relevant work item already exists:
+work_on(task_id="<item-id>")
 
 # Or create a new one:
 create_task(title="Brief description of what you're doing", description="...")
-work_on(task_id="<returned-task-id>")
+work_on(task_id="<returned-item-id>")
 ```
 
 This only takes a moment and helps you (and future sessions) stay oriented.

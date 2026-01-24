@@ -122,7 +122,7 @@ create_task("Write integration tests")
 When creating 3+ tasks at once, use the bulk-tasks binary for better performance:
 
 ```bash
-~/.claude-reliability/bin/bulk-tasks create <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/bin/bulk-tasks create <<'EOF'
 {
   "tasks": [
     {"id": "t1", "title": "First task", "description": "...", "priority": 1},

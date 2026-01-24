@@ -63,14 +63,14 @@ pub fn run_user_prompt_submit_hook(
     Ok(UserPromptSubmitOutput::default())
 }
 
-/// Generate the post-compaction message to prompt task recovery.
+/// Generate the post-compaction message to prompt work item recovery.
 fn post_compaction_message(input: &UserPromptSubmitInput) -> String {
     let mut msg = String::from(
-        "# Post-Compaction Task Check\n\n\
-         Context was just compacted. Please verify that no user-requested tasks were lost:\n\n\
+        "# Post-Compaction Work Item Check\n\n\
+         Context was just compacted. Please verify that no user-requested work items were lost:\n\n\
          1. Review the compaction summary above for any user requests or mentioned issues\n\
-         2. Check the task database using `list_tasks` to see current tracked tasks\n\
-         3. If you notice any user requests that aren't tracked, create tasks for them immediately\n\n\
+         2. Check the work item database using `list_tasks` to see current tracked items\n\
+         3. If you notice any user requests that aren't tracked, create work items for them immediately\n\n\
          This ensures nothing the user mentioned gets forgotten due to context compaction.",
     );
 
@@ -157,7 +157,7 @@ mod tests {
 
         assert!(output.system_message.is_some());
         let msg = output.system_message.unwrap();
-        assert!(msg.contains("Post-Compaction Task Check"));
+        assert!(msg.contains("Post-Compaction Work Item Check"));
         assert!(msg.contains("list_tasks"));
     }
 

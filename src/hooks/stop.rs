@@ -1639,7 +1639,7 @@ mod tests {
         assert_eq!(reason, "prompting to work on tasks");
         let result = result.unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+        assert!(result.messages.iter().any(|m| m.contains("Open Work Items")));
     }
 
     #[test]
@@ -1722,7 +1722,7 @@ mod tests {
 
         // Should block to work on tasks
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+        assert!(result.messages.iter().any(|m| m.contains("Open Work Items")));
     }
 
     #[test]
@@ -1775,7 +1775,7 @@ mod tests {
 
         // Should block to work on tasks (no modifying tools = would normally allow, but tasks exist)
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Open Tasks")));
+        assert!(result.messages.iter().any(|m| m.contains("Open Work Items")));
     }
 
     #[test]

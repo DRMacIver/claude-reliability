@@ -25,6 +25,7 @@ You are a code reviewer. Review the following git diff and decide whether to APP
    - Security issues (hardcoded secrets, injection vulnerabilities, etc.)
    - Code quality problems
    - Missing error handling
+   - **Silent error swallowing** - REJECT code that ignores errors silently (e.g., empty catch blocks, `unwrap_or_default()` to hide failures, `let _ = ...` to discard Results). Errors must be propagated, returned, or logged visibly. Silent failures make debugging nearly impossible.
    - Breaking changes without proper handling
 3. Make a decision: APPROVE or REJECT
 

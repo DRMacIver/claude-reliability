@@ -4,8 +4,8 @@
 //! dispatching to appropriate handlers based on tool name.
 
 use crate::hooks::{
-    run_code_review_hook, run_problem_mode_hook, run_protect_config_hook, run_require_task_hook,
-    run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
+    plan_tasks, run_code_review_hook, run_problem_mode_hook, run_protect_config_hook,
+    run_require_task_hook, run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
 };
 use crate::subagent::RealSubAgent;
 use crate::templates;
@@ -93,6 +93,12 @@ pub fn run_pre_tool_use_with_sub_agent(
             check_hook!(run_validation_hook(input, base_dir));
         }
 
+        "ExitPlanMode" => {
+            // Create tasks for the plan being approved
+            // This runs at PreToolUse because PostToolUse doesn't fire for ExitPlanMode
+            handle_exit_plan_mode(base_dir, None);
+        }
+
         _ => {
             // No additional hooks for other tools
         }
@@ -100,6 +106,23 @@ pub fn run_pre_tool_use_with_sub_agent(
 
     // All hooks passed
     PreToolUseOutput::allow(None)
+}
+
+/// Handle `ExitPlanMode` by creating tasks from the plan file.
+///
+/// # Arguments
+/// * `base_dir` - The project base directory for the task store
+/// * `plans_dir_override` - Optional override for the plans directory (for testing)
+fn handle_exit_plan_mode(base_dir: &Path, plans_dir_override: Option<&Path>) {
+    let result = plans_dir_override.map_or_else(
+        || plan_tasks::create_plan_tasks_from_recent(base_dir),
+        |dir| plan_tasks::create_plan_tasks_from_dir(dir, base_dir),
+    );
+
+    if let Err(e) = result {
+        // Log but don't block - plan approval should continue
+        eprintln!("Warning: Failed to create plan tasks: {e}");
+    }
 }
 
 /// Check for --no-verify flag in git commands.
@@ -347,5 +370,80 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Code review required"));
+    }
+
+    #[test]
+    fn test_exit_plan_mode_allowed() {
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        // Set up the task store (needed for potential task creation)
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        let input = HookInput {
+            tool_name: Some("ExitPlanMode".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+
+        // ExitPlanMode should always be allowed (task creation failures are logged, not blocking)
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+    }
+
+    #[test]
+    fn test_handle_exit_plan_mode_with_plan_file() {
+        use crate::tasks::{SqliteTaskStore, TaskFilter, TaskStore};
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let dir = TempDir::new().unwrap();
+        let plans_dir = dir.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        // Create a plan file
+        let plan_file = plans_dir.join("test-plan.md");
+        std::fs::write(&plan_file, "# Test Plan").unwrap();
+
+        // Set explicit mtime
+        let now = SystemTime::now();
+        std::fs::File::open(&plan_file)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(now - Duration::from_secs(10)))
+            .unwrap();
+
+        // Set up task store
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // This should create tasks (success path)
+        handle_exit_plan_mode(dir.path(), Some(&plans_dir));
+
+        // Verify tasks were created
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn test_handle_exit_plan_mode_empty_plans_dir() {
+        use crate::tasks::{SqliteTaskStore, TaskFilter, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let plans_dir = dir.path().join("empty_plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        // Set up task store
+        let db_path = crate::paths::project_db_path(dir.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // This should log a warning (error path) but not panic
+        handle_exit_plan_mode(dir.path(), Some(&plans_dir));
+
+        // Verify no tasks were created
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 0);
     }
 }

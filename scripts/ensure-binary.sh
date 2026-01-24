@@ -220,6 +220,15 @@ build_from_source() {
                 chmod +x "$mcp_target"
             fi
 
+            # Copy bulk-tasks to the plugin's bin directory (version-scoped)
+            local bulk_binary="${PLUGIN_ROOT}/target/release/bulk_tasks"
+            local plugin_bin="${PLUGIN_ROOT}/bin"
+            if [[ -x "$bulk_binary" ]]; then
+                mkdir -p "$plugin_bin"
+                cp "$bulk_binary" "${plugin_bin}/bulk-tasks"
+                chmod +x "${plugin_bin}/bulk-tasks"
+            fi
+
             return 0
         fi
     fi

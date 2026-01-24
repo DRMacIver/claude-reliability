@@ -85,6 +85,14 @@ This section provides guidance to the automated code reviewer.
 - Are edge cases handled appropriately?
 - What could go wrong? (boundary conditions, null/empty inputs, error states)
 
+**Error Handling (CRITICAL):**
+- **REJECT** code that silently swallows errors - this is never acceptable
+- Errors must either be propagated, returned, or logged in a visible way
+- Using `unwrap_or_default()`, empty catch blocks, or `let _ = ...` to ignore errors is a bug
+- If an error is truly recoverable, there must be a clear reason documented
+- "Log and continue" is only acceptable when the log message is guaranteed to be visible
+- When code fails silently, debugging becomes nearly impossible - fail noisily
+
 **Code Quality:**
 - Clear, readable code with appropriate naming
 - Proper error handling for critical paths
@@ -135,6 +143,7 @@ This section provides guidance to the automated code reviewer.
 - Security vulnerabilities (hardcoded secrets, injection risks)
 - Clear bugs or logic errors
 - Missing error handling for critical paths
+- **Code that silently swallows errors** - empty catch blocks, `unwrap_or_default()` to hide failures, `let _ = ...` to discard Results. Silent failures make debugging impossible.
 - Breaking changes without proper handling
 - Tests that can never fail or don't test meaningful behavior
 
