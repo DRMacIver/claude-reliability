@@ -141,6 +141,7 @@ download_binary() {
 }
 
 # Build from source using cargo
+# Builds both cli and mcp binaries for consistency
 build_from_source() {
     local target_path="$1"
 
@@ -156,12 +157,22 @@ build_from_source() {
 
     echo "Building ${BINARY_NAME} from source..." >&2
 
-    if cargo build --release --features mcp --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
+    # Build with both cli and mcp features to get both binaries
+    if cargo build --release --features cli,mcp --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
         local built_binary="${PLUGIN_ROOT}/target/release/${BINARY_NAME}"
         if [[ -x "$built_binary" ]]; then
             mkdir -p "$(dirname "$target_path")"
             cp "$built_binary" "$target_path"
             chmod +x "$target_path"
+
+            # Also cache the CLI binary if it was built
+            local cli_binary="${PLUGIN_ROOT}/target/release/claude-reliability"
+            local cli_target="${CACHE_DIR}/bin/claude-reliability"
+            if [[ -x "$cli_binary" ]]; then
+                cp "$cli_binary" "$cli_target"
+                chmod +x "$cli_target"
+            fi
+
             return 0
         fi
     fi
