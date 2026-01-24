@@ -67,6 +67,20 @@ EOF
 ```
 
 Priority values: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
+
+## How-To Guides
+
+How-to guides capture reusable procedures that can be linked to tasks. When you retrieve a task with `get_task`, linked how-tos are included with their full instructions.
+
+**When to create a how-to:**
+- When you discover a procedure that could be reused (e.g., "How to run tests", "How to deploy")
+- When a task requires specific steps that should be documented
+- When the user asks to "document how to do X" or "create a guide for Y"
+
+**Linking how-tos to tasks:**
+- Use `link_task_to_howto` to associate guidance with a task
+- When you fetch the task later, the full how-to instructions appear automatically
+- Multiple tasks can share the same how-to guide
 "#;
 
 /// MCP server for task management.
@@ -427,12 +441,14 @@ struct NoteWithTaskOutput {
     created_at: String,
 }
 
-/// Full task with notes for `get_task` response.
+/// Full task with notes and how-tos for `get_task` response.
 #[derive(Debug, Serialize)]
 struct FullTaskOutput {
     #[serde(flatten)]
     task: TaskOutput,
     notes: Vec<NoteOutput>,
+    /// Full how-to guides linked to this task (not just IDs).
+    howtos: Vec<HowToOutput>,
 }
 
 /// Task suggestion for `what_should_i_work_on` response.
@@ -441,6 +457,8 @@ struct TaskSuggestion {
     #[serde(flatten)]
     task: TaskOutput,
     notes: Vec<NoteOutput>,
+    /// Full how-to guides linked to this task.
+    howtos: Vec<HowToOutput>,
     message: String,
 }
 
@@ -543,6 +561,14 @@ impl TasksServer {
                 let notes = self.store.get_notes(&task.id).unwrap_or_default();
                 let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
 
+                // Fetch full how-to content for each linked how-to
+                let howtos: Vec<HowToOutput> = guidance
+                    .iter()
+                    .filter_map(|id| {
+                        self.store.get_howto(id).ok().flatten().map(|h| HowToOutput::from_howto(&h))
+                    })
+                    .collect();
+
                 let output = FullTaskOutput {
                     task: TaskOutput::from_task(&task, deps, guidance),
                     notes: notes
@@ -553,6 +579,7 @@ impl TasksServer {
                             created_at: n.created_at,
                         })
                         .collect(),
+                    howtos,
                 };
 
                 let json = serde_json::to_string_pretty(&output)
@@ -833,12 +860,25 @@ impl TasksServer {
                 let notes = self.store.get_notes(&task.id).unwrap_or_default();
                 let guidance = self.store.get_task_guidance(&task.id).unwrap_or_default();
 
+                // Fetch full how-to content for each linked how-to
+                let howtos: Vec<HowToOutput> = guidance
+                    .iter()
+                    .filter_map(|id| {
+                        self.store
+                            .get_howto(id)
+                            .ok()
+                            .flatten()
+                            .map(|h| HowToOutput::from_howto(&h))
+                    })
+                    .collect();
+
                 let output = TaskSuggestion {
                     task: TaskOutput::from_task(&task, deps, guidance),
                     notes: notes
                         .into_iter()
                         .map(|n| NoteOutput { id: n.id, content: n.content, created_at: n.created_at })
                         .collect(),
+                    howtos,
                     message: format!(
                         "Suggested task: {} (priority: {})",
                         task.title,
