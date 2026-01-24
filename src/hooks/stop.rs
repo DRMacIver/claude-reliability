@@ -303,26 +303,6 @@ fn check_validation_required(
     Ok(None)
 }
 
-/// Check if git repo is clean and allow immediate exit.
-///
-/// Fast path: if no git changes, allow immediate exit.
-fn check_clean_repo_fast_path(
-    config: &StopHookConfig,
-    runner: &dyn CommandRunner,
-) -> Result<Option<StopHookResult>> {
-    if !config.git_repo {
-        return Ok(None);
-    }
-
-    let git_status = git::check_uncommitted_changes(runner)?;
-    if !git_status.uncommitted.has_changes() && !git_status.ahead_of_remote {
-        return Ok(Some(
-            StopHookResult::allow().with_explanation(config.explain_stops, "clean git repo"),
-        ));
-    }
-    Ok(None)
-}
-
 // =============================================================================
 // Tier 3: Bypass Phrase Handling
 // =============================================================================
@@ -668,11 +648,14 @@ fn check_auto_work_tasks_block(
 /// # Check Order
 ///
 /// 1. **Tier 1 - Fast exits**: Problem mode, API errors, simple Q&A, auto-confirm commit/push
-/// 2. **Tier 2 - Validation**: Run quality checks, clean repo fast path
+/// 2. **Tier 2 - Validation**: Run quality checks if configured
 /// 3. **Tier 3 - Bypass phrases**: Problem phrase, requested tasks, completion phrase
-/// 4. **Tier 4 - Git state**: Uncommitted changes, unpushed commits
+/// 4. **Tier 4 - Git state**: Uncommitted changes block, unpushed commits check
 /// 5. **Tier 5 - Interactive**: Question handling with sub-agent
 /// 6. **Tier 6 - Quality & reflection**: Quality gate, reflection prompts, auto-work tasks
+///
+/// Note: A clean git repo is never a reason to allow stopping - it just means
+/// git-related blocking conditions don't apply. All other checks still run.
 ///
 /// # Errors
 ///
@@ -716,9 +699,6 @@ pub fn run_stop_hook(
     // Tier 2: Validation Checks
     // =========================================================================
     if let Some(r) = check_validation_required(config, runner)? {
-        return Ok(r);
-    }
-    if let Some(r) = check_clean_repo_fast_path(config, runner)? {
         return Ok(r);
     }
 
@@ -1187,6 +1167,209 @@ mod tests {
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
         assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_run_stop_hook_blocks_with_incomplete_requested_tasks_and_modifying_tools() {
+        // Critical test: with modifying tools used and incomplete requested tasks,
+        // stop must be blocked regardless of git status.
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory and create a requested task
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Critical task", "Must complete", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Mock a clean git repo (no changes, not ahead of remote)
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+
+        // Create a transcript with modifying tool use - THIS IS KEY
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I made some changes."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            base_dir: Some(base.to_path_buf()),
+            git_repo: true,
+            explain_stops: true,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // MUST block because there's an incomplete requested task
+        assert!(
+            !result.allow_stop,
+            "Expected stop to be BLOCKED with incomplete requested tasks, but it was allowed. \
+             Messages: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
+            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_run_stop_hook_allows_without_modifying_tools() {
+        // Without modifying tools, stop is allowed even with requested tasks
+        // (agent hasn't started working yet)
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory and create a requested task
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Task", "Description", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Mock a clean git repo
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput::default(); // No transcript = no modifying tools
+        let config = StopHookConfig {
+            base_dir: Some(base.to_path_buf()),
+            git_repo: true,
+            explain_stops: true,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow because no modifying tools were used
+        assert!(
+            result.allow_stop,
+            "Expected stop to be allowed without modifying tools. Messages: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_run_stop_hook_allows_with_completed_requested_tasks_and_modifying_tools() {
+        // After completing a requested task, should allow exit even with modifying tools
+        use crate::tasks::{Priority, SqliteTaskStore, Status, TaskStore, TaskUpdate};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set reflection marker since modifying tools trigger reflection on first stop
+        session::set_reflect_marker(base).unwrap();
+
+        // Set up database directory and create a requested task, then complete it
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Task", "Description", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        // Mock a clean git repo
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+
+        // Create a transcript with modifying tool use
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Done!"}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            base_dir: Some(base.to_path_buf()),
+            git_repo: true,
+            explain_stops: true,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow because task is completed
+        assert!(
+            result.allow_stop,
+            "Expected stop to be allowed with completed task. Messages: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_run_stop_hook_allows_with_question_blocked_requested_tasks() {
+        // If a requested task is blocked by an unanswered question, allow exit
+        // (user needs to answer before work can continue)
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set reflection marker since modifying tools trigger reflection on first stop
+        session::set_reflect_marker(base).unwrap();
+
+        // Set up database directory and create a requested task blocked by question
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Task", "Description", Priority::High).unwrap();
+        let question = store.create_question("What should I do?").unwrap();
+        store.link_task_to_question(&task.id, &question.id).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        // Mock a clean git repo
+        let runner = mock_clean_git();
+        let sub_agent = MockSubAgent::new();
+
+        // Create a transcript with modifying tool use
+        let transcript_content = r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"role": "user", "content": "Do the task"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "I need to ask a question."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            base_dir: Some(base.to_path_buf()),
+            git_repo: true,
+            explain_stops: true,
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow because task is blocked on a question
+        assert!(
+            result.allow_stop,
+            "Expected stop to be allowed with question-blocked task. Messages: {:?}",
+            result.messages
+        );
     }
 
     #[test]
@@ -1790,25 +1973,14 @@ mod tests {
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
 
-        // First check_uncommitted_changes (fast path check)
-        runner.expect("git", &["diff", "--stat"], has_changes.clone());
-        runner.expect("git", &["diff", "--name-only"], file_list.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // Second check_uncommitted_changes (main check)
+        // check_uncommitted_changes - detects changes
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // Quality check command
+        // Quality check command (runs inside handle_uncommitted_changes)
         runner.expect(
             "sh",
             &["-c", "just check"],
@@ -2166,12 +2338,20 @@ mod tests {
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
         let zero_commits =
             CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+        let quality_pass = CommandOutput {
+            exit_code: 0,
+            stdout: "all checks pass\n".to_string(),
+            stderr: String::new(),
+        };
 
-        // check_uncommitted_changes (fast path) - clean
+        // check_uncommitted_changes - clean repo (no changes, not ahead)
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        // Quality check runs (clean repo doesn't skip it anymore)
+        runner.expect("sh", &["-c", "just check"], quality_pass);
 
         let sub_agent = MockSubAgent::new();
         let input = crate::hooks::HookInput::default();
@@ -2183,7 +2363,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Clean repo, so fast path returns early without running quality checks
+        // Quality checks run and pass, stop is allowed
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
         assert!(result.allow_stop);
     }
@@ -2193,37 +2373,24 @@ mod tests {
         use tempfile::TempDir;
 
         // Test quality check failure
-        // This requires: ahead of remote (skip fast path),
-        // require_push=false, quality check enabled and fails
         let dir = TempDir::new().unwrap();
         let mut runner = MockCommandRunner::new();
 
         let empty_success =
             CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        // Ahead of remote by 1 commit (skips fast path)
-        let one_commit =
-            CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
         let quality_fail = CommandOutput {
             exit_code: 1,
             stdout: String::new(),
             stderr: "lint failed\n".to_string(),
         };
 
-        // check_uncommitted_changes (fast path check) - no uncommitted but ahead
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit.clone());
-
-        // Second check_uncommitted_changes
+        // check_uncommitted_changes - clean repo
         runner.expect("git", &["diff", "--stat"], empty_success.clone());
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
         // Quality check fails
         runner.expect("sh", &["-c", "just check"], quality_fail);
@@ -2234,7 +2401,6 @@ mod tests {
             git_repo: true,
             quality_check_enabled: true,
             quality_check_command: Some("just check".to_string()),
-            require_push: false, // Don't block on unpushed commits
             base_dir: Some(dir.path().to_path_buf()),
             explain_stops: false,
             ..Default::default()
@@ -2547,25 +2713,14 @@ mod tests {
             stderr: String::new(),
         };
 
-        // First check_uncommitted_changes (fast path check)
-        runner.expect("git", &["diff", "--stat"], has_changes.clone());
-        runner.expect("git", &["diff", "--name-only"], file_list.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            empty_success.clone(),
-        );
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
-
-        // Second check_uncommitted_changes (main check)
+        // check_uncommitted_changes - detects changes
         runner.expect("git", &["diff", "--stat"], has_changes);
         runner.expect("git", &["diff", "--name-only"], file_list);
         runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
         runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
         runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
 
-        // Quality check passes
+        // Quality check passes (runs inside handle_uncommitted_changes)
         runner.expect("sh", &["-c", "just check"], quality_pass);
 
         let sub_agent = MockSubAgent::new();
@@ -3073,12 +3228,16 @@ mod tests {
 
     #[test]
     fn test_simple_question_with_modifications_no_fast_path() {
-        // When there are modifications, should NOT use the fast path
+        // When there are modifications, the first stop prompts reflection.
+        // On second stop (with reflection marker set), it should allow.
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
+        // Set reflection marker (simulating second stop after reflection prompt)
+        session::set_reflect_marker(base).unwrap();
+
         let mut runner = MockCommandRunner::new();
-        // Will need git status checks since fast path doesn't apply
+        // Will need git status checks
         runner.expect(
             "git",
             &["diff", "--stat"],
@@ -3123,7 +3282,7 @@ mod tests {
 
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
 
-        // Should still allow (git is clean) but via the normal path, not fast path
+        // Should allow after reflection (git is clean, marker was set)
         assert!(result.allow_stop);
     }
 
@@ -3441,6 +3600,9 @@ mod tests {
         // If modifications were made after the last user message, don't use fast path
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
+
+        // Set reflection marker since modifying tools trigger reflection on first stop
+        session::set_reflect_marker(base).unwrap();
 
         let mut runner = MockCommandRunner::new();
         // Will need git status checks since fast path doesn't apply
