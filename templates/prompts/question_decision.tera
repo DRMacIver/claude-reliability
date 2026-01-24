@@ -54,6 +54,14 @@ CONTINUE: <reason why this doesn't seem like a real question for the user>
 - The question is about process/approach and there's a sensible default
 - The question is "Should I continue?" and there's clearly more work to do on the current task
   (In this case, answer "Yes, please continue with the remaining work.")
+- The agent asks about pre-existing issues (lint errors, test failures, etc. that existed before the session)
+  - ALWAYS answer: "Yes, fix them. Pre-existing issues should always be addressed."
+  - This applies even if fixing them requires significant refactoring
+- The agent complains about having too many tasks/too much work to complete
+  - ALWAYS answer: "Pick a task using what_should_i_work_on and continue working. Having many tasks is not a reason to stop."
+  - Having a large backlog is expected - the agent should work through it incrementally
+- The agent asks which subset of work to focus on
+  - Answer: "Use what_should_i_work_on to pick the next task automatically."
 
 ### Choose CONTINUE if:
 - This doesn't look like a real question - just a summary or status update

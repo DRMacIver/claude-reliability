@@ -164,10 +164,7 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                 }
             }
             "user" => {
-                // Reset modifying tool use tracking when we see a user message
-                info.has_modifying_tool_use_since_user = false;
-
-                // Check if this is a compaction event (not a real user message)
+                // Check if this is a compaction event or system-reminder-only (not a real user message)
                 let is_compaction = entry.message.as_ref().is_some_and(|m| {
                     if let MessageContent::Text(text) = &m.content {
                         is_compaction_message(text)
@@ -175,6 +172,20 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
                         false
                     }
                 });
+
+                let is_system_reminder = entry.message.as_ref().is_some_and(|m| {
+                    if let MessageContent::Text(text) = &m.content {
+                        is_system_reminder_only(text)
+                    } else {
+                        false
+                    }
+                });
+
+                // Only reset modifying tool use tracking for genuine user messages
+                // Don't reset for compaction events or system reminders
+                if !is_compaction && !is_system_reminder {
+                    info.has_modifying_tool_use_since_user = false;
+                }
 
                 // Capture user message content
                 if let Some(message) = &entry.message {
@@ -247,6 +258,45 @@ fn is_api_error_text(entry: &TranscriptEntry) -> bool {
 /// but should not be counted for user activity tracking.
 fn is_compaction_message(text: &str) -> bool {
     text.starts_with("This session is being continued from a previous conversation")
+}
+
+/// Check if a message is purely a system reminder with no actual user content.
+///
+/// System reminders are injected by the system and wrapped in `<system-reminder>` tags.
+/// Messages that are ONLY system reminders (no other content) should not reset
+/// the `has_modifying_tool_use_since_user` flag or be considered as user questions.
+fn is_system_reminder_only(text: &str) -> bool {
+    let trimmed = text.trim();
+    // Check if it starts with system-reminder tag and has no content outside of tags
+    if !trimmed.starts_with("<system-reminder>") {
+        return false;
+    }
+    // Remove all system-reminder blocks and check if anything meaningful remains
+    let without_reminders = remove_system_reminder_blocks(trimmed);
+    without_reminders.trim().is_empty()
+}
+
+/// Remove all `<system-reminder>...</system-reminder>` blocks from text.
+fn remove_system_reminder_blocks(text: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<system-reminder>") {
+        // Add text before the tag
+        result.push_str(&remaining[..start]);
+
+        // Find the closing tag
+        let after_start = &remaining[start..];
+        if let Some(end) = after_start.find("</system-reminder>") {
+            remaining = &after_start[end + "</system-reminder>".len()..];
+        } else {
+            // No closing tag, treat rest as part of reminder (discard it)
+            return result;
+        }
+    }
+    // Add any remaining text after last reminder block
+    result.push_str(remaining);
+    result
 }
 
 /// Parse an ISO 8601 timestamp.
@@ -941,5 +991,90 @@ also not json
         // Timestamp should be from "Second real message" (12:00)
         let ts = info.last_user_message_time.unwrap();
         assert_eq!(ts.hour(), 12);
+    }
+
+    #[test]
+    fn test_is_system_reminder_only_true() {
+        assert!(is_system_reminder_only("<system-reminder>Some reminder text</system-reminder>"));
+        assert!(is_system_reminder_only(
+            "<system-reminder>First</system-reminder>\n<system-reminder>Second</system-reminder>"
+        ));
+        assert!(is_system_reminder_only("  <system-reminder>With whitespace</system-reminder>  "));
+    }
+
+    #[test]
+    fn test_is_system_reminder_only_false() {
+        // Regular user messages
+        assert!(!is_system_reminder_only("Hello, how are you?"));
+        assert!(!is_system_reminder_only("What is the status?"));
+
+        // Message with reminder AND user content
+        assert!(!is_system_reminder_only(
+            "<system-reminder>Reminder</system-reminder>\nActual user question?"
+        ));
+        assert!(!is_system_reminder_only(
+            "User content <system-reminder>Reminder</system-reminder>"
+        ));
+
+        // Doesn't start with system-reminder
+        assert!(!is_system_reminder_only("Regular text <system-reminder>R</system-reminder>"));
+    }
+
+    #[test]
+    fn test_remove_system_reminder_blocks() {
+        assert_eq!(remove_system_reminder_blocks("<system-reminder>R</system-reminder>"), "");
+        assert_eq!(
+            remove_system_reminder_blocks("before<system-reminder>R</system-reminder>after"),
+            "beforeafter"
+        );
+        assert_eq!(
+            remove_system_reminder_blocks(
+                "<system-reminder>A</system-reminder>middle<system-reminder>B</system-reminder>"
+            ),
+            "middle"
+        );
+        // No reminder tags
+        assert_eq!(remove_system_reminder_blocks("plain text"), "plain text");
+        // Malformed (unclosed) tag - treat rest as reminder
+        assert_eq!(
+            remove_system_reminder_blocks("before<system-reminder>unclosed content"),
+            "before"
+        );
+    }
+
+    #[test]
+    fn test_system_reminder_does_not_reset_modifying_flag() {
+        // Work session with modifications, then system reminder
+        let content = r#"{"type": "user", "message": {"role": "user", "content": "Create a file"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "id": "1"}]}}
+{"type": "user", "message": {"role": "user", "content": "<system-reminder>Task reminder</system-reminder>"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Done"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+
+        // The system reminder should NOT have reset the modifying flag
+        assert!(
+            info.has_modifying_tool_use_since_user,
+            "System reminder should not reset has_modifying_tool_use_since_user"
+        );
+    }
+
+    #[test]
+    fn test_real_user_message_resets_modifying_flag() {
+        // Work session with modifications, then real user question
+        let content = r#"{"type": "user", "message": {"role": "user", "content": "Create a file"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "id": "1"}]}}
+{"type": "user", "message": {"role": "user", "content": "What did you create?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "A file"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+
+        // The real user message SHOULD have reset the modifying flag
+        assert!(
+            !info.has_modifying_tool_use_since_user,
+            "Real user message should reset has_modifying_tool_use_since_user"
+        );
     }
 }
