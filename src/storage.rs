@@ -20,8 +20,6 @@ pub mod markers {
     pub const NEEDS_VALIDATION: &str = "needs_validation";
     /// Agent should reflect on work before stopping.
     pub const MUST_REFLECT: &str = "must_reflect";
-    /// Questions have been shown for reflection.
-    pub const QUESTIONS_SHOWN: &str = "questions_shown";
 }
 
 /// SQLite-based state store.
@@ -241,7 +239,6 @@ mod tests {
         assert!(!markers::PROBLEM_MODE.is_empty());
         assert!(!markers::NEEDS_VALIDATION.is_empty());
         assert!(!markers::MUST_REFLECT.is_empty());
-        assert!(!markers::QUESTIONS_SHOWN.is_empty());
     }
 
     #[test]

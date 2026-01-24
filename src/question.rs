@@ -56,7 +56,9 @@ pub fn is_continue_question(text: &str) -> bool {
     CONTINUE_QUESTION_PATTERNS.iter().any(|re| re.is_match(text))
 }
 
-/// Truncate text to approximately the given length, trying to break at word boundaries.
+/// Truncate text to the given length by taking the last `max_chars` characters.
+///
+/// Returns the full text if it's already within the limit.
 pub fn truncate_for_context(text: &str, max_chars: usize) -> &str {
     if text.len() <= max_chars {
         return text;

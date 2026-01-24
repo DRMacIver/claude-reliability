@@ -175,30 +175,6 @@ pub fn clear_reflect_marker_with_store(store: &dyn StateStore) -> Result<()> {
     store.clear_marker(markers::MUST_REFLECT)
 }
 
-/// Check if the `questions_shown` marker exists.
-#[must_use]
-pub fn has_questions_shown_marker(base_dir: &Path) -> bool {
-    get_store(base_dir).map(|s| s.has_marker(markers::QUESTIONS_SHOWN)).unwrap_or(false)
-}
-
-/// Set the `questions_shown` marker.
-///
-/// # Errors
-///
-/// Returns an error if the database operation fails.
-pub fn set_questions_shown_marker(base_dir: &Path) -> Result<()> {
-    get_store(base_dir)?.set_marker(markers::QUESTIONS_SHOWN)
-}
-
-/// Clear the `questions_shown` marker.
-///
-/// # Errors
-///
-/// Returns an error if the database operation fails.
-pub fn clear_questions_shown_marker(base_dir: &Path) -> Result<()> {
-    get_store(base_dir)?.clear_marker(markers::QUESTIONS_SHOWN)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,41 +405,5 @@ mod tests {
         // Legacy files should be removed
         assert!(!base.join(".claude/problem-mode.local").exists());
         assert!(!base.join(".claude/needs-validation.local").exists());
-    }
-
-    #[test]
-    fn test_questions_shown_marker_lifecycle() {
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Initially no marker
-        assert!(!has_questions_shown_marker(base));
-
-        // Set marker
-        set_questions_shown_marker(base).unwrap();
-        assert!(has_questions_shown_marker(base));
-
-        // Clear marker
-        clear_questions_shown_marker(base).unwrap();
-        assert!(!has_questions_shown_marker(base));
-    }
-
-    #[test]
-    fn test_questions_shown_marker_no_database() {
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // No database exists - should return false without error
-        assert!(!has_questions_shown_marker(base));
-    }
-
-    #[test]
-    fn test_questions_shown_marker_clear_when_not_set() {
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Clear when not set - should succeed
-        clear_questions_shown_marker(base).unwrap();
-        assert!(!has_questions_shown_marker(base));
     }
 }

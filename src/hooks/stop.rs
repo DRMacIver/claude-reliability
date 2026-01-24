@@ -16,13 +16,8 @@ use crate::templates;
 use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
 use crate::transcript::{self, is_simple_question, TranscriptInfo};
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tera::Context;
-
-/// Magic string that allows stopping when work is complete but human input is required.
-pub const HUMAN_INPUT_REQUIRED: &str =
-    "I have completed all work that I can and require human input to proceed.";
 
 /// Magic string that allows stopping when encountering an unsolvable problem.
 pub const PROBLEM_NEEDS_USER: &str = "I have run into a problem I can't solve without user input.";
@@ -205,7 +200,7 @@ fn check_api_error_loop(
 ///
 /// If the last user message is a simple question and no modifications were made
 /// since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
-/// This allows the agent to ask clarifying questions even if tasks are requested.
+/// The agent can answer however it wants (long answers, follow-up questions, etc.)
 fn check_simple_qa_fast_path(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
@@ -213,18 +208,10 @@ fn check_simple_qa_fast_path(
     if !transcript_info.has_modifying_tool_use_since_user {
         if let Some(ref last_user_msg) = transcript_info.last_user_message {
             if is_simple_question(last_user_msg) {
-                if let Some(ref last_output) = transcript_info.last_assistant_output {
-                    // Check if the output looks like a simple answer (not asking a question,
-                    // and short enough that it's not a work summary)
-                    let is_simple_answer =
-                        !last_output.trim().ends_with('?') && last_output.lines().count() < 10;
-                    if is_simple_answer {
-                        return Some(StopHookResult::allow().with_explanation(
-                            config.explain_stops,
-                            "simple Q&A with no modifications since question",
-                        ));
-                    }
-                }
+                return Some(StopHookResult::allow().with_explanation(
+                    config.explain_stops,
+                    "simple Q&A with no modifications since question",
+                ));
             }
         }
     }
@@ -344,132 +331,6 @@ fn check_requested_tasks_block(
     check_incomplete_requested_tasks(config)
 }
 
-/// Check for "work complete" phrase and handle completion logic.
-///
-/// This handles the complex completion flow including:
-/// - Checking for remaining ready tasks
-/// - Checking for tasks blocked by unanswered questions
-/// - Allowing bypass when all work is truly complete
-fn check_completion_phrase(
-    transcript_info: &TranscriptInfo,
-    config: &StopHookConfig,
-) -> Result<Option<StopHookResult>> {
-    let Some(ref output) = transcript_info.last_assistant_output else {
-        return Ok(None);
-    };
-
-    if !output.contains(HUMAN_INPUT_REQUIRED) {
-        return Ok(None);
-    }
-
-    // Check if there are remaining tasks that can be worked on
-    let tasks_count = tasks::count_ready_tasks(config.base_dir());
-
-    if tasks_count > 0 {
-        let mut result = StopHookResult::block()
-            .with_message("# Exit Phrase Rejected")
-            .with_message("")
-            .with_message(format!("There are {tasks_count} task(s) ready to work on."))
-            .with_message("")
-            .with_message("Please work on the remaining tasks before exiting.");
-
-        // Add task suggestion if available
-        if let Some((id, title)) = tasks::suggest_task(config.base_dir()) {
-            result = result
-                .with_message("")
-                .with_message(format!("Suggestion: Work on task \"{id}: {title}\" next."));
-        }
-
-        result = result
-            .with_message("")
-            .with_message("If you've hit a blocker you can't resolve, use this phrase instead:")
-            .with_message("")
-            .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
-
-        return Ok(Some(result));
-    }
-
-    // Check for tasks blocked by unanswered questions
-    let question_blocked = tasks::get_question_blocked_tasks(config.base_dir());
-    if !question_blocked.is_empty() {
-        // There are tasks blocked by questions
-        let has_shown_questions = session::has_questions_shown_marker(config.base_dir());
-
-        if !has_shown_questions {
-            // First time: show questions and ask agent to reflect
-            session::set_questions_shown_marker(config.base_dir())?;
-
-            let mut result = StopHookResult::block()
-                .with_message("# Questions Require Reflection")
-                .with_message("")
-                .with_message("The following tasks are blocked by unanswered questions:")
-                .with_message("");
-
-            for (task_id, task_title, questions) in &question_blocked {
-                result = result.with_message(format!("## Task: {task_id} - {task_title}"));
-                for q in questions {
-                    result = result.with_message(format!("  - [{}] {}", q.id, q.text));
-                }
-                result = result.with_message("");
-            }
-
-            result = result
-                .with_message("Before asking the user, please reflect on these questions:")
-                .with_message(
-                    "- Can you now answer any of these questions yourself based on your work so far?",
-                )
-                .with_message("- Have you gained context that makes the answer clear?")
-                .with_message("")
-                .with_message(
-                    "If you can answer a question, use the `answer_question` tool to record your answer.",
-                )
-                .with_message("If you truly cannot answer, you may try to exit again.");
-
-            return Ok(Some(result));
-        }
-
-        // Second time: allow stop and present questions to user
-        session::clear_questions_shown_marker(config.base_dir())?;
-
-        // Collect unique questions across all blocked tasks
-        let mut seen_questions = HashSet::new();
-        let mut unique_questions = Vec::new();
-        for (_, _, questions) in &question_blocked {
-            for q in questions {
-                if seen_questions.insert(q.id.clone()) {
-                    unique_questions.push(q);
-                }
-            }
-        }
-
-        let mut result = StopHookResult::allow()
-            .with_explanation(
-                config.explain_stops,
-                "all unblocked work complete, questions for user",
-            )
-            .with_message("# Questions for User")
-            .with_message("")
-            .with_message("The following questions need user input to unblock remaining tasks:")
-            .with_message("");
-
-        for q in unique_questions {
-            result = result.with_message(format!("- [{}] {}", q.id, q.text));
-        }
-
-        result = result
-            .with_message("")
-            .with_message("Please answer these questions to unblock the remaining work.");
-
-        return Ok(Some(result));
-    }
-
-    // Bypass allowed - work is complete
-    Ok(Some(
-        StopHookResult::allow()
-            .with_explanation(config.explain_stops, "human input required phrase used"),
-    ))
-}
-
 // =============================================================================
 // Tier 4: Git State Checks
 // =============================================================================
@@ -523,44 +384,14 @@ fn check_interactive_question_block(
 }
 
 // =============================================================================
-// Tier 6: Quality & Reflection Checks
+// Tier 6: Reflection Checks
 // =============================================================================
-
-/// Run quality checks if enabled and block on failure.
-fn check_quality_gate(
-    config: &StopHookConfig,
-    runner: &dyn CommandRunner,
-) -> Result<Option<StopHookResult>> {
-    if !config.quality_check_enabled {
-        return Ok(None);
-    }
-
-    let Some(ref cmd) = config.quality_check_command else {
-        return Ok(None);
-    };
-
-    let output = runner.run("sh", &["-c", cmd], None)?;
-    if !output.success() {
-        return Ok(Some(
-            StopHookResult::block()
-                .with_message("# Quality Check Issues")
-                .with_message("")
-                .with_message("Quality checks found issues that need your attention. Fixing these (whether you introduced them or not) helps maintain a healthy codebase.")
-                .with_message("")
-                .with_message(truncate_output(&output.combined_output(), 50)),
-        ));
-    }
-    Ok(None)
-}
 
 /// Check if reflection was already prompted and allow stop.
 ///
 /// If the agent got the reflection prompt and is stopping again, allow it.
 /// Also checks for incomplete requested tasks before allowing.
-fn check_reflection_marker_allow(
-    config: &StopHookConfig,
-    transcript_info: &TranscriptInfo,
-) -> Result<Option<StopHookResult>> {
+fn check_reflection_marker_allow(config: &StopHookConfig) -> Result<Option<StopHookResult>> {
     let base_dir = config.base_dir();
     if !session::has_reflect_marker(base_dir) {
         return Ok(None);
@@ -574,10 +405,8 @@ fn check_reflection_marker_allow(
         return Ok(Some(result));
     }
 
-    // Check if we should prompt to work on open tasks before allowing stop
-    if let Some(result) = check_auto_work_tasks(config, transcript_info) {
-        return Ok(Some(result));
-    }
+    // Note: check_auto_work_tasks already ran before this in run_stop_hook,
+    // so we don't need to check it again here.
 
     Ok(Some(
         StopHookResult::allow()
@@ -672,25 +501,71 @@ pub fn run_stop_hook(
     runner: &dyn CommandRunner,
     sub_agent: &dyn SubAgent,
 ) -> Result<StopHookResult> {
+    // FIXME: The return types of the functions this is broken up into
+    // need some work. Option<Result> and Result<Option> are both to be
+    // avoided where possible. Define some custom enums? Or just stop using
+    // Result. I think every error path through here can just be allowed to
+    // panic.
+
+    // FIXME: I think the way we are reporting stop reasons doesn't make
+    // much sense. The reason an agent is allowed to stop is in some sense
+    // almost always "There was no reason not to stop it". Fast path
+    // checks can give a concrete reason, but after that it's a series of
+    // checks which are either passed or skipped. I think we should structure
+    // the output more like.
+    //
+    // > Stop allowed:
+    // >   check_api_error_loop: pass
+    // >   check_problem_mode_exit: agent reports problem, early stop
+    //
+    // or
+    //
+    // > Stop rejected:
+    // >
+    // >   check_api_error_loop: pass
+    // >   check_problem_mode_exit: pass
+    // >   [...]
+    // >   check_validation_required: no validation required, no modifying changes
+    // >   check_requested_tasks_block: outstanding requested tasks remain, stop rejected
+    //
+    // So there is a clear log of all checks that were actually run, shown to the user whenever
+    // the stop hook runs, not just when it's allowed.
+
     // Parse transcript if available
     let transcript_info = input
         .transcript_path
         .as_ref()
         .and_then(|p| transcript::parse_transcript(Path::new(p)).ok())
         .unwrap_or_default();
-
     // =========================================================================
     // Tier 1: Fast Exit Checks
     // =========================================================================
-    if let Some(r) = check_problem_mode_exit(config)? {
-        return Ok(r);
-    }
+    // Always stop immediately in API error loops
     if let Some(r) = check_api_error_loop(&transcript_info, config) {
         return Ok(r);
     }
+
+    // The agent has previously said it has run into an insurmountable problem
+    // and was asked to explain it. Now it has.
+    if let Some(r) = check_problem_mode_exit(config)? {
+        return Ok(r);
+    }
+
+    // The agent has not yet done any work, and has asked a clarifying question,
+    // which should be allowed automatically.
     if let Some(r) = check_simple_qa_fast_path(&transcript_info, config) {
         return Ok(r);
     }
+
+    // The agent has asked a question. Decide now whether to permit it. Some
+    // questions will be auto-answered by the hook, some will be delegated to
+    // a sub-agent.
+    if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config)? {
+        return Ok(r);
+    }
+
+    // If the agent has asked if it should commit or push, we return fast with
+    // a block telling it that yes it should.
     if let Some(r) = check_commit_push_auto_confirm(&transcript_info, config) {
         return Ok(r);
     }
@@ -698,6 +573,9 @@ pub fn run_stop_hook(
     // =========================================================================
     // Tier 2: Validation Checks
     // =========================================================================
+
+    // If any changes have been made, the validation step (just check) needs
+    // to be run.
     if let Some(r) = check_validation_required(config, runner)? {
         return Ok(r);
     }
@@ -705,50 +583,54 @@ pub fn run_stop_hook(
     // =========================================================================
     // Tier 3: Bypass Phrase Handling
     // =========================================================================
+
+    // The agent says it has run into a problem and it needs to stop. Block it
+    // but ask it to explain in detail what the problem is and then it Can
+    // stop.
+    //
+    // FIXME: I think we should replace this with an emergency stop
+    // operation on the MCP server.
     if let Some(r) = check_problem_phrase(&transcript_info, config)? {
         return Ok(r);
     }
+
+    // There are oustanding requested tasks, so the agent is not allowed to stop.
     if let Some(r) = check_requested_tasks_block(&transcript_info, config) {
         return Ok(r);
     }
-    if let Some(r) = check_completion_phrase(&transcript_info, config)? {
-        return Ok(r);
-    }
 
-    // =========================================================================
-    // Tier 4: Git State Checks
-    // =========================================================================
-    if let Some(r) = check_uncommitted_changes_block(config, runner, &transcript_info, sub_agent)? {
-        return Ok(r);
-    }
-
-    // =========================================================================
-    // Tier 5: Interactive Handling
-    // =========================================================================
-    if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config)? {
-        return Ok(r);
-    }
-
-    // =========================================================================
-    // Tier 6: Quality & Reflection Checks
-    // =========================================================================
-    if let Some(r) = check_quality_gate(config, runner)? {
-        return Ok(r);
-    }
-    if let Some(r) = check_reflection_marker_allow(config, &transcript_info)? {
-        return Ok(r);
-    }
-    if let Some(r) = check_question_skip_reflection(&transcript_info, config) {
-        return Ok(r);
-    }
-    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
-        return Ok(r);
-    }
+    // There are outstanding tasks and the user hasn't been around for a
+    // while, so the agent is prompted to work on tasks rather than stopping.
+    // This is enabled by default but can be disabled via config.
     if let Some(r) = check_auto_work_tasks_block(config, &transcript_info) {
         return Ok(r);
     }
 
+    // Cannot exit with uncommitted changes.
+    if let Some(r) = check_uncommitted_changes_block(config, runner, &transcript_info, sub_agent)? {
+        return Ok(r);
+    }
+
+    // The model has previously been asked to reflect, and now it has.
+    if let Some(r) = check_reflection_marker_allow(config)? {
+        return Ok(r);
+    }
+    // The model is asking a question that has not already been auto-answered.
+    // This is allowed to skip reflection.
+    if let Some(r) = check_question_skip_reflection(&transcript_info, config) {
+        return Ok(r);
+    }
+
+    // The agent is allowed to stop, probably, but is given one last prompt to
+    // ask if it's really sure it's done everything requested.
+    if let Some(r) = check_reflection_prompt(&transcript_info, config)? {
+        return Ok(r);
+    }
+
     // All checks passed - allow stop
+    // FIXME: This explanation seems like nonsense? But that's largely redundant
+    // with my suggested changes above. If you get to this point you have a fully
+    // log of checks performed.
     Ok(StopHookResult::allow().with_explanation(config.explain_stops, "no modifying tools used"))
 }
 
@@ -1812,11 +1694,6 @@ mod tests {
     }
 
     #[test]
-    fn test_human_input_required_constant() {
-        assert!(HUMAN_INPUT_REQUIRED.contains("human input"));
-    }
-
-    #[test]
     fn test_problem_needs_user_constant() {
         assert!(PROBLEM_NEEDS_USER.contains("problem"));
         assert!(PROBLEM_NEEDS_USER.contains("user input"));
@@ -2240,175 +2117,6 @@ mod tests {
         assert!(result.messages.iter().any(|m| m.contains("Problem Mode")));
         // Verify problem mode marker was created
         assert!(crate::session::is_problem_mode_active(dir.path()));
-    }
-
-    #[test]
-    fn test_bypass_human_input_phrase_allows_exit() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-        let runner = mock_with_uncommitted_for_bypass();
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config =
-            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-    }
-
-    #[test]
-    fn test_bypass_human_input_blocked_with_open_tasks_shows_suggestion() {
-        use crate::paths;
-        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create task database at the correct path
-        let db_path = paths::project_db_path(base);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let store = SqliteTaskStore::new(&db_path).unwrap();
-        store.create_task("Fix important bug", "Description", Priority::High).unwrap();
-
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-
-        let mut runner = MockCommandRunner::new();
-
-        let has_changes = CommandOutput {
-            exit_code: 0,
-            stdout: " file.rs | 10 ++++++++++\n".to_string(),
-            stderr: String::new(),
-        };
-        let file_list =
-            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-
-        // check_uncommitted_changes (fast path) - returns changes so we continue
-        runner.expect("git", &["diff", "--stat"], has_changes);
-        runner.expect("git", &["diff", "--name-only"], file_list);
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config = StopHookConfig {
-            git_repo: true,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Exit Phrase Rejected")));
-        assert!(result.messages.iter().any(|m| m.contains("1 task(s) ready to work on")));
-        // Check for task suggestion
-        assert!(
-            result.messages.iter().any(|m| m.contains("Suggestion: Work on task")),
-            "Expected task suggestion in messages: {:?}",
-            result.messages
-        );
-        assert!(
-            result.messages.iter().any(|m| m.contains("Fix important bug")),
-            "Expected task title in suggestion: {:?}",
-            result.messages
-        );
-    }
-
-    #[test]
-    fn test_quality_check_passes() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let quality_pass = CommandOutput {
-            exit_code: 0,
-            stdout: "all checks pass\n".to_string(),
-            stderr: String::new(),
-        };
-
-        // check_uncommitted_changes - clean repo (no changes, not ahead)
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // Quality check runs (clean repo doesn't skip it anymore)
-        runner.expect("sh", &["-c", "just check"], quality_pass);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(dir.path().to_path_buf()),
-            ..Default::default()
-        };
-
-        // Quality checks run and pass, stop is allowed
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-    }
-
-    #[test]
-    fn test_quality_check_fails() {
-        use tempfile::TempDir;
-
-        // Test quality check failure
-        let dir = TempDir::new().unwrap();
-        let mut runner = MockCommandRunner::new();
-
-        let empty_success =
-            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
-        let zero_commits =
-            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
-        let quality_fail = CommandOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "lint failed\n".to_string(),
-        };
-
-        // check_uncommitted_changes - clean repo
-        runner.expect("git", &["diff", "--stat"], empty_success.clone());
-        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
-        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
-        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
-
-        // Quality check fails
-        runner.expect("sh", &["-c", "just check"], quality_fail);
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput::default();
-        let config = StopHookConfig {
-            git_repo: true,
-            quality_check_enabled: true,
-            quality_check_command: Some("just check".to_string()),
-            base_dir: Some(dir.path().to_path_buf()),
-            explain_stops: false,
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Quality")));
     }
 
     #[test]
@@ -3399,163 +3107,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bypass_human_input_blocked_with_question_blocked_tasks_first_time() {
-        use crate::paths;
-        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create task database at the correct path
-        let db_path = paths::project_db_path(base);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let store = SqliteTaskStore::new(&db_path).unwrap();
-
-        // Create a task blocked by a question
-        let task = store.create_task("Implement feature", "Description", Priority::High).unwrap();
-        let question = store.create_question("What should the API return?").unwrap();
-        store.link_task_to_question(&task.id, &question.id).unwrap();
-
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-
-        let runner = MockCommandRunner::new();
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config = StopHookConfig {
-            git_repo: false,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        // First attempt - should block and ask for reflection
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(!result.allow_stop);
-        assert!(
-            result.messages.iter().any(|m| m.contains("Questions Require Reflection")),
-            "Expected reflection message in: {:?}",
-            result.messages
-        );
-        assert!(
-            result.messages.iter().any(|m| m.contains("What should the API return?")),
-            "Expected question text in messages: {:?}",
-            result.messages
-        );
-        assert!(
-            result.messages.iter().any(|m| m.contains("reflect on these questions")),
-            "Expected reflection instruction in messages: {:?}",
-            result.messages
-        );
-    }
-
-    #[test]
-    fn test_bypass_human_input_allowed_with_question_blocked_tasks_second_time() {
-        use crate::paths;
-        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create task database at the correct path
-        let db_path = paths::project_db_path(base);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let store = SqliteTaskStore::new(&db_path).unwrap();
-
-        // Create a task blocked by a question
-        let task = store.create_task("Implement feature", "Description", Priority::High).unwrap();
-        let question = store.create_question("What should the API return?").unwrap();
-        store.link_task_to_question(&task.id, &question.id).unwrap();
-
-        // Set the marker to simulate second attempt
-        session::set_questions_shown_marker(base).unwrap();
-
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-
-        let runner = MockCommandRunner::new();
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config = StopHookConfig {
-            git_repo: false,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        // Second attempt - should allow and present questions
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-        assert!(
-            result.messages.iter().any(|m| m.contains("Questions for User")),
-            "Expected user questions in messages: {:?}",
-            result.messages
-        );
-        assert!(
-            result.messages.iter().any(|m| m.contains("What should the API return?")),
-            "Expected question text in messages: {:?}",
-            result.messages
-        );
-
-        // Marker should be cleared
-        assert!(!session::has_questions_shown_marker(base));
-    }
-
-    #[test]
-    fn test_question_blocked_tasks_deduplicates_questions() {
-        use crate::paths;
-        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path();
-
-        // Create task database at the correct path
-        let db_path = paths::project_db_path(base);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        let store = SqliteTaskStore::new(&db_path).unwrap();
-
-        // Create multiple tasks blocked by the same question
-        let task1 = store.create_task("Task 1", "", Priority::High).unwrap();
-        let task2 = store.create_task("Task 2", "", Priority::High).unwrap();
-        let question = store.create_question("Shared question?").unwrap();
-        store.link_task_to_question(&task1.id, &question.id).unwrap();
-        store.link_task_to_question(&task2.id, &question.id).unwrap();
-
-        // Set the marker to simulate second attempt
-        session::set_questions_shown_marker(base).unwrap();
-
-        let transcript_file = create_transcript_with_output(HUMAN_INPUT_REQUIRED);
-
-        let runner = MockCommandRunner::new();
-
-        let sub_agent = MockSubAgent::new();
-        let input = crate::hooks::HookInput {
-            transcript_path: Some(transcript_file.path().to_string_lossy().to_string()),
-            ..Default::default()
-        };
-        let config = StopHookConfig {
-            git_repo: false,
-            base_dir: Some(base.to_path_buf()),
-            ..Default::default()
-        };
-
-        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        assert!(result.allow_stop);
-
-        // The question should only appear once (deduplicated)
-        let question_count =
-            result.messages.iter().filter(|m| m.contains("Shared question?")).count();
-        assert_eq!(question_count, 1, "Question should only appear once: {:?}", result.messages);
-    }
-
-    #[test]
     fn test_followup_question_fast_path_allows_stop() {
         // When the user asks a follow-up question after a work session,
         // if no modifications were made since the last user message, allow stop
@@ -4040,45 +3591,5 @@ mod tests {
         let runner = MockCommandRunner::new();
         let result = check_validation_required(&config, &runner).unwrap();
         assert!(result.is_none(), "Expected None when no quality_check_command configured");
-    }
-
-    #[test]
-    fn test_check_quality_gate_enabled_no_command() {
-        // Test that check_quality_gate returns None when quality_check_enabled is true
-        // but no quality_check_command is configured
-        let dir = TempDir::new().unwrap();
-        let config = StopHookConfig {
-            base_dir: Some(dir.path().to_path_buf()),
-            quality_check_enabled: true,
-            quality_check_command: None, // No command configured
-            ..Default::default()
-        };
-
-        let runner = MockCommandRunner::new();
-        let result = check_quality_gate(&config, &runner).unwrap();
-        assert!(result.is_none(), "Expected None when no quality_check_command configured");
-    }
-
-    #[test]
-    fn test_check_quality_gate_passes() {
-        // Test that check_quality_gate returns None when quality check passes
-        let dir = TempDir::new().unwrap();
-        let config = StopHookConfig {
-            base_dir: Some(dir.path().to_path_buf()),
-            quality_check_enabled: true,
-            quality_check_command: Some("echo 'ok'".to_string()),
-            ..Default::default()
-        };
-
-        let mut runner = MockCommandRunner::new();
-        runner.expect(
-            "sh",
-            &["-c", "echo 'ok'"],
-            CommandOutput { exit_code: 0, stdout: "ok\n".to_string(), stderr: String::new() },
-        );
-
-        let result = check_quality_gate(&config, &runner).unwrap();
-        assert!(result.is_none(), "Expected None when quality check passes");
-        runner.verify();
     }
 }

@@ -36,18 +36,12 @@ digraph StopHookStateMachine {
     CheckGitClean [label="Check git status:\nno uncommitted changes?\nnot ahead of remote?"];
     FastPathExit [label="Fast Path:\nClean state"];
 
-    // 6. Bypass Phrase Checks
-    CheckBypassPhrases [label="Check last_output for:\n- HUMAN_INPUT_REQUIRED\n- PROBLEM_NEEDS_USER"];
+    // 6. Bypass Phrase Check
+    CheckBypassPhrases [label="Check last_output for:\nPROBLEM_NEEDS_USER"];
 
     // Problem phrase path
     ProblemPhraseDetected [label="Problem Phrase\nDetected"];
     EnterProblemMode [label="Enter Problem Mode\n(block all tools)"];
-
-    // Complete phrase path
-    CompletePhraseDetected [label="Complete Phrase\nDetected"];
-    CheckReadyIssues [label="Check tasks:\nopen task count?"];
-    ExitPhraseRejected [label="Exit Phrase Rejected\n(open tasks remain)"];
-    BypassAllowed [label="Bypass Allowed"];
 
     // 7. Uncommitted Changes Check
     CheckUncommitted [label="Check git:\nuncommitted changes?"];
@@ -133,20 +127,12 @@ digraph StopHookStateMachine {
     CheckGitClean -> CheckBypassPhrases [label="dirty or not git"];
     FastPathExit -> AllowStop;
 
-    // 6. Bypass Phrases
+    // 6. Bypass Phrase
     CheckBypassPhrases -> ProblemPhraseDetected [label="PROBLEM_NEEDS_USER"];
-    CheckBypassPhrases -> CompletePhraseDetected [label="HUMAN_INPUT_REQUIRED"];
     CheckBypassPhrases -> CheckUncommitted [label="no bypass"];
 
     ProblemPhraseDetected -> EnterProblemMode;
     EnterProblemMode -> BlockStop [label="tools blocked"];
-
-    CompletePhraseDetected -> CheckReadyIssues [label="tasks available"];
-    CompletePhraseDetected -> BypassAllowed [label="no tasks"];
-    CheckReadyIssues -> ExitPhraseRejected [label="open > 0"];
-    CheckReadyIssues -> BypassAllowed [label="open == 0"];
-    ExitPhraseRejected -> BlockStop;
-    BypassAllowed -> AllowStop;
 
     // 7. Uncommitted Changes
     CheckUncommitted -> MarkHadChanges [label="yes", lhead=cluster_uncommitted];
