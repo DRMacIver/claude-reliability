@@ -254,40 +254,31 @@ mod tests {
         let plans_dir = temp_dir.path().join("plans");
         std::fs::create_dir_all(&plans_dir).unwrap();
 
-        // Create three files and set explicit modification times
-        // This ensures we exercise all match branches regardless of readdir order
-        let file_a = plans_dir.join("a-plan.md");
-        let file_b = plans_dir.join("b-plan.md");
-        let file_c = plans_dir.join("c-plan.md");
-
-        std::fs::write(&file_a, "# Plan A").unwrap();
-        std::fs::write(&file_b, "# Plan B").unwrap();
-        std::fs::write(&file_c, "# Plan C").unwrap();
-
-        // Set explicit modification times: file_b is newest
+        // Create many files with strictly increasing timestamps.
+        // This ensures the "update most_recent" branch (line 46) is hit
+        // regardless of directory iteration order, since statistically
+        // it's extremely unlikely the newest file is iterated first.
         let now = SystemTime::now();
-        let oldest = now - Duration::from_secs(300);
-        let middle = now - Duration::from_secs(200);
-        let newest = now - Duration::from_secs(100);
+        let mut newest_file = None;
 
-        std::fs::File::open(&file_a)
-            .unwrap()
-            .set_times(FileTimes::new().set_modified(oldest))
-            .unwrap();
-        std::fs::File::open(&file_b)
-            .unwrap()
-            .set_times(FileTimes::new().set_modified(newest))
-            .unwrap();
-        std::fs::File::open(&file_c)
-            .unwrap()
-            .set_times(FileTimes::new().set_modified(middle))
-            .unwrap();
+        for i in 0..10 {
+            let file = plans_dir.join(format!("plan-{i:02}.md"));
+            std::fs::write(&file, format!("# Plan {i}")).unwrap();
 
-        // With 3 files and distinct times, regardless of readdir order,
-        // we will hit the `_ => {}` branch at least once when a file
-        // is checked after a newer file was already found
+            // Each file is newer than the previous (i * 10 seconds ago)
+            let modified = now - Duration::from_secs((10 - i) * 100);
+            std::fs::File::open(&file)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+
+            if i == 9 {
+                newest_file = Some(file);
+            }
+        }
+
         let result = find_most_recent_plan_file_in_dir(&plans_dir);
-        assert_eq!(result, Some(file_b)); // file_b is newest
+        assert_eq!(result, newest_file);
     }
 
     #[test]
@@ -334,5 +325,50 @@ mod tests {
         let result = create_plan_tasks_from_recent(dir.path());
         // May succeed or fail depending on whether ~/.claude/plans exists
         let _ = result;
+    }
+
+    #[test]
+    fn test_create_plan_tasks_from_dir_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let plans_dir = temp_dir.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        // Create a plan file
+        let plan_file = plans_dir.join("test-plan.md");
+        std::fs::write(&plan_file, "# Test Plan\n\n- Step 1\n- Step 2").unwrap();
+
+        // Setup the database
+        let base_dir = temp_dir.path().join("project");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        setup_db(&base_dir);
+
+        // Create tasks from the plans directory
+        let result = create_plan_tasks_from_dir(&plans_dir, &base_dir);
+        assert!(result.is_ok(), "Failed to create plan tasks: {result:?}");
+
+        // Verify tasks were created
+        let store = SqliteTaskStore::for_project(&base_dir).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 2);
+
+        let breakdown = tasks.iter().find(|t| t.title.contains("Break up")).unwrap();
+        let implement = tasks.iter().find(|t| t.title.contains("Implement")).unwrap();
+        assert!(breakdown.title.contains("test-plan"));
+        assert!(implement.title.contains("test-plan"));
+    }
+
+    #[test]
+    fn test_create_plan_tasks_from_dir_no_plans() {
+        let temp_dir = TempDir::new().unwrap();
+        let plans_dir = temp_dir.path().join("empty-plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        let base_dir = temp_dir.path().join("project");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        setup_db(&base_dir);
+
+        let result = create_plan_tasks_from_dir(&plans_dir, &base_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No plan files found"));
     }
 }
