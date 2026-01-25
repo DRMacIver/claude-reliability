@@ -8,6 +8,7 @@ pub mod command;
 pub mod config;
 pub mod error;
 pub mod git;
+pub mod hook_logging;
 pub mod hooks;
 pub mod mcp;
 pub mod paths;

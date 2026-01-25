@@ -45,6 +45,18 @@ impl Command {
             Self::Stop | Self::PreToolUse | Self::PostToolUse | Self::UserPromptSubmit => true,
         }
     }
+
+    /// Returns the hook type name for logging, or None for non-hook commands.
+    #[must_use]
+    pub const fn hook_type(self) -> Option<&'static str> {
+        match self {
+            Self::Stop => Some("stop"),
+            Self::UserPromptSubmit => Some("user-prompt-submit"),
+            Self::PreToolUse => Some("pre-tool-use"),
+            Self::PostToolUse => Some("post-tool-use"),
+            Self::Version | Self::EnsureConfig | Self::EnsureGitignore | Self::Intro => None,
+        }
+    }
 }
 
 /// Result of parsing CLI arguments.
@@ -192,6 +204,11 @@ pub fn run(args: &[String], stdin: &str) -> CliOutput {
 }
 
 fn run_command(cmd: Command, stdin: &str) -> (ExitCode, Vec<String>) {
+    // Log hook events for debugging when enabled
+    if let Some(hook_type) = cmd.hook_type() {
+        crate::hook_logging::log_hook_event(hook_type, stdin);
+    }
+
     match cmd {
         Command::Version => {
             (ExitCode::SUCCESS, vec![format!("claude-reliability v{}", crate::VERSION)])
@@ -488,6 +505,21 @@ mod tests {
         assert!(Command::PreToolUse.needs_stdin());
         assert!(Command::PostToolUse.needs_stdin());
         assert!(Command::UserPromptSubmit.needs_stdin());
+    }
+
+    #[test]
+    fn test_command_hook_type() {
+        // Hook commands return their type name
+        assert_eq!(Command::Stop.hook_type(), Some("stop"));
+        assert_eq!(Command::UserPromptSubmit.hook_type(), Some("user-prompt-submit"));
+        assert_eq!(Command::PreToolUse.hook_type(), Some("pre-tool-use"));
+        assert_eq!(Command::PostToolUse.hook_type(), Some("post-tool-use"));
+
+        // Non-hook commands return None
+        assert_eq!(Command::Version.hook_type(), None);
+        assert_eq!(Command::EnsureConfig.hook_type(), None);
+        assert_eq!(Command::EnsureGitignore.hook_type(), None);
+        assert_eq!(Command::Intro.hook_type(), None);
     }
 
     #[test]

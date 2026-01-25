@@ -69,6 +69,11 @@ pub struct ProjectConfig {
         skip_serializing_if = "is_default_idle_minutes"
     )]
     pub auto_work_idle_minutes: u32,
+
+    /// Whether to log all hook events as JSONL for debugging.
+    /// When true, every hook invocation is appended to `.claude-reliability/hook-events.jsonl`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug_hook_logging: bool,
 }
 
 /// Default value for `require_push` - true by default.
@@ -102,6 +107,7 @@ impl Default for ProjectConfig {
             explain_stops: false,
             auto_work_on_tasks: true,
             auto_work_idle_minutes: 15,
+            debug_hook_logging: false,
         }
     }
 }
@@ -185,6 +191,7 @@ impl ProjectConfig {
             explain_stops: false,
             auto_work_on_tasks: default_auto_work_on_tasks(),
             auto_work_idle_minutes: default_auto_work_idle_minutes(),
+            debug_hook_logging: false,
         }
     }
 
@@ -1794,5 +1801,57 @@ explain_stops: true
         let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
         assert!(config.auto_work_on_tasks); // Defaults to true
         assert_eq!(config.auto_work_idle_minutes, 15); // Defaults to 15
+    }
+
+    #[test]
+    fn test_debug_hook_logging_default_false() {
+        let config = ProjectConfig::default();
+        assert!(!config.debug_hook_logging);
+    }
+
+    #[test]
+    fn test_debug_hook_logging_not_serialized_when_false() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { debug_hook_logging: false, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        assert!(!content.contains("debug_hook_logging"));
+    }
+
+    #[test]
+    fn test_debug_hook_logging_serialized_when_true() {
+        let dir = TempDir::new().unwrap();
+
+        let config = ProjectConfig { debug_hook_logging: true, ..Default::default() };
+        config.save_to(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(CONFIG_FILE_PATH)).unwrap();
+        assert!(content.contains("debug_hook_logging: true"));
+    }
+
+    #[test]
+    fn test_debug_hook_logging_loaded_from_yaml() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        std::fs::write(&config_path, "git_repo: false\ndebug_hook_logging: true\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(config.debug_hook_logging);
+    }
+
+    #[test]
+    fn test_debug_hook_logging_defaults_to_false_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join(CONFIG_FILE_PATH);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
+
+        let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
+        assert!(!config.debug_hook_logging);
     }
 }
