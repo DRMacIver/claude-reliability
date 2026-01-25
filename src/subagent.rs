@@ -6,7 +6,6 @@ use crate::traits::{
     CommandRunner, CreateQuestionContext, CreateQuestionDecision, EmergencyStopContext,
     EmergencyStopDecision, QuestionContext, SubAgent, SubAgentDecision,
 };
-use std::path::Path;
 use std::time::Duration;
 use tera::Context;
 
@@ -22,9 +21,18 @@ const EMERGENCY_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Timeout for `create_question` decisions (60 seconds).
 const CREATE_QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Directory to run sub-agents in to avoid picking up project hooks.
-/// Using /tmp ensures no project-specific settings or hooks are loaded.
-const SUBAGENT_CWD: &str = "/tmp";
+/// Subdirectory name for running sub-agents to avoid picking up project hooks.
+const SUBAGENT_SUBDIR: &str = "claude-reliability-subagents";
+
+/// Get the directory to run sub-agents in.
+/// Creates a dedicated subdirectory under the system temp dir.
+fn get_subagent_cwd() -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(SUBAGENT_SUBDIR);
+    // Create the directory if it doesn't exist (ignore errors - we'll fail later if it matters)
+    let _ = std::fs::create_dir_all(&path);
+    path
+}
 
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
@@ -69,7 +77,7 @@ impl SubAgent for RealSubAgent<'_> {
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(QUESTION_DECISION_TIMEOUT),
-            Path::new(SUBAGENT_CWD),
+            &get_subagent_cwd(),
         )?;
 
         if !output.success() {
@@ -124,7 +132,7 @@ impl SubAgent for RealSubAgent<'_> {
                 "Read,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(git show*)",
             ],
             Some(CODE_REVIEW_TIMEOUT),
-            Path::new(SUBAGENT_CWD),
+            &get_subagent_cwd(),
         )?;
 
         if !output.success() {
@@ -184,7 +192,7 @@ impl SubAgent for RealSubAgent<'_> {
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(EMERGENCY_STOP_TIMEOUT),
-            Path::new(SUBAGENT_CWD),
+            &get_subagent_cwd(),
         )?;
 
         if !output.success() {
@@ -230,7 +238,7 @@ impl SubAgent for RealSubAgent<'_> {
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(CREATE_QUESTION_TIMEOUT),
-            Path::new(SUBAGENT_CWD),
+            &get_subagent_cwd(),
         )?;
 
         if !output.success() {
