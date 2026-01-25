@@ -338,6 +338,214 @@ impl StateStore for FailingSetMarkerStore {
     }
 }
 
+/// A mock task store where all write operations fail with a configurable error.
+///
+/// Used to test error handling paths in code that creates or modifies tasks.
+#[cfg(test)]
+pub struct FailingTaskStore {
+    error_message: String,
+}
+
+#[cfg(test)]
+impl FailingTaskStore {
+    /// Create a new failing task store with the specified error message.
+    pub fn new(error_message: impl Into<String>) -> Self {
+        Self { error_message: error_message.into() }
+    }
+}
+
+#[cfg(test)]
+impl crate::tasks::TaskStore for FailingTaskStore {
+    fn create_task(
+        &self,
+        _title: &str,
+        _description: &str,
+        _priority: crate::tasks::Priority,
+    ) -> Result<crate::tasks::Task> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn get_task(&self, _id: &str) -> Result<Option<crate::tasks::Task>> {
+        Ok(None)
+    }
+
+    fn update_task(
+        &self,
+        _id: &str,
+        _update: crate::tasks::TaskUpdate,
+    ) -> Result<Option<crate::tasks::Task>> {
+        Ok(None)
+    }
+
+    fn delete_task(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn list_tasks(&self, _filter: crate::tasks::TaskFilter) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+
+    fn add_dependency(&self, _task_id: &str, _depends_on: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_dependency(&self, _task_id: &str, _depends_on: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn get_dependencies(&self, _task_id: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    fn get_dependents(&self, _task_id: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    fn add_note(&self, _task_id: &str, _content: &str) -> Result<crate::tasks::Note> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn get_notes(&self, _task_id: &str) -> Result<Vec<crate::tasks::Note>> {
+        Ok(vec![])
+    }
+
+    fn delete_note(&self, _note_id: i64) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn search_tasks(&self, _query: &str) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+
+    fn get_audit_log(
+        &self,
+        _task_id: Option<&str>,
+        _limit: Option<usize>,
+    ) -> Result<Vec<crate::tasks::AuditEntry>> {
+        Ok(vec![])
+    }
+
+    fn get_ready_tasks(&self) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+
+    fn pick_task(&self) -> Result<Option<crate::tasks::Task>> {
+        Ok(None)
+    }
+
+    fn create_howto(&self, _title: &str, _instructions: &str) -> Result<crate::tasks::HowTo> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn get_howto(&self, _id: &str) -> Result<Option<crate::tasks::HowTo>> {
+        Ok(None)
+    }
+
+    fn update_howto(
+        &self,
+        _id: &str,
+        _update: crate::tasks::HowToUpdate,
+    ) -> Result<Option<crate::tasks::HowTo>> {
+        Ok(None)
+    }
+
+    fn delete_howto(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn list_howtos(&self) -> Result<Vec<crate::tasks::HowTo>> {
+        Ok(vec![])
+    }
+
+    fn search_howtos(&self, _query: &str) -> Result<Vec<crate::tasks::HowTo>> {
+        Ok(vec![])
+    }
+
+    fn link_task_to_howto(&self, _task_id: &str, _howto_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn unlink_task_from_howto(&self, _task_id: &str, _howto_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn get_task_guidance(&self, _task_id: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    fn create_question(&self, _text: &str) -> Result<crate::tasks::Question> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn get_question(&self, _id: &str) -> Result<Option<crate::tasks::Question>> {
+        Ok(None)
+    }
+
+    fn answer_question(&self, _id: &str, _answer: &str) -> Result<Option<crate::tasks::Question>> {
+        Ok(None)
+    }
+
+    fn delete_question(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn list_questions(&self, _unanswered_only: bool) -> Result<Vec<crate::tasks::Question>> {
+        Ok(vec![])
+    }
+
+    fn search_questions(&self, _query: &str) -> Result<Vec<crate::tasks::Question>> {
+        Ok(vec![])
+    }
+
+    fn link_task_to_question(&self, _task_id: &str, _question_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn unlink_task_from_question(&self, _task_id: &str, _question_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn get_task_questions(&self, _task_id: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    fn get_blocking_questions(&self, _task_id: &str) -> Result<Vec<crate::tasks::Question>> {
+        Ok(vec![])
+    }
+
+    fn get_question_blocked_tasks(&self) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+
+    fn has_in_progress_task(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn get_in_progress_tasks(&self) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+
+    fn request_tasks(&self, _task_ids: &[&str]) -> Result<usize> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn request_all_open(&self) -> Result<usize> {
+        Ok(0)
+    }
+
+    fn is_request_mode_active(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn clear_request_mode(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn get_incomplete_requested_tasks(&self) -> Result<Vec<crate::tasks::Task>> {
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +684,71 @@ mod tests {
         assert!(!store.has_marker("test"));
         assert!(store.set_marker("test").is_err());
         store.clear_marker("test").unwrap();
+    }
+
+    #[test]
+    fn test_failing_task_store() {
+        use crate::tasks::{Priority, TaskStore};
+
+        let store = FailingTaskStore::new("test error");
+
+        // Write operations should fail
+        assert!(store.create_task("title", "desc", Priority::Medium).is_err());
+        assert!(store.add_note("id", "note").is_err());
+        assert!(store.create_howto("title", "instructions").is_err());
+        assert!(store.create_question("text").is_err());
+        assert!(store.request_tasks(&["id"]).is_err());
+
+        // Read operations should return empty/None/false
+        assert!(store.get_task("id").unwrap().is_none());
+        assert!(store.update_task("id", crate::tasks::TaskUpdate::default()).unwrap().is_none());
+        assert!(!store.delete_task("id").unwrap());
+        assert!(store.list_tasks(crate::tasks::TaskFilter::default()).unwrap().is_empty());
+        assert!(store.get_ready_tasks().unwrap().is_empty());
+        assert!(store.pick_task().unwrap().is_none());
+        assert!(!store.has_in_progress_task().unwrap());
+        assert!(store.get_in_progress_tasks().unwrap().is_empty());
+
+        // Dependencies
+        store.add_dependency("a", "b").unwrap();
+        assert!(!store.remove_dependency("a", "b").unwrap());
+        assert!(store.get_dependencies("a").unwrap().is_empty());
+        assert!(store.get_dependents("a").unwrap().is_empty());
+
+        // Notes
+        assert!(store.get_notes("id").unwrap().is_empty());
+        assert!(!store.delete_note(1).unwrap());
+
+        // Search & audit
+        assert!(store.search_tasks("q").unwrap().is_empty());
+        assert!(store.get_audit_log(None, None).unwrap().is_empty());
+
+        // How-tos
+        assert!(store.get_howto("id").unwrap().is_none());
+        assert!(store.update_howto("id", crate::tasks::HowToUpdate::default()).unwrap().is_none());
+        assert!(!store.delete_howto("id").unwrap());
+        assert!(store.list_howtos().unwrap().is_empty());
+        assert!(store.search_howtos("q").unwrap().is_empty());
+        store.link_task_to_howto("a", "b").unwrap();
+        assert!(!store.unlink_task_from_howto("a", "b").unwrap());
+        assert!(store.get_task_guidance("id").unwrap().is_empty());
+
+        // Questions
+        assert!(store.get_question("id").unwrap().is_none());
+        assert!(store.answer_question("id", "a").unwrap().is_none());
+        assert!(!store.delete_question("id").unwrap());
+        assert!(store.list_questions(false).unwrap().is_empty());
+        assert!(store.search_questions("q").unwrap().is_empty());
+        store.link_task_to_question("a", "b").unwrap();
+        assert!(!store.unlink_task_from_question("a", "b").unwrap());
+        assert!(store.get_task_questions("id").unwrap().is_empty());
+        assert!(store.get_blocking_questions("id").unwrap().is_empty());
+        assert!(store.get_question_blocked_tasks().unwrap().is_empty());
+
+        // Request mode
+        assert_eq!(store.request_all_open().unwrap(), 0);
+        assert!(!store.is_request_mode_active().unwrap());
+        store.clear_request_mode().unwrap();
+        assert!(store.get_incomplete_requested_tasks().unwrap().is_empty());
     }
 }
