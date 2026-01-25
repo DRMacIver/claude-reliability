@@ -1,4 +1,4 @@
 git_repo: true
 code_review_section: '## Code Review'
 require_push: false
-debug_hook_logging: true
+debug_logging: true

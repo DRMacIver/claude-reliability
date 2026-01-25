@@ -1,12 +1,13 @@
 //! Real sub-agent implementation using the Claude CLI.
 
 use crate::error::Result;
+use crate::subagent_logging::log_subagent_event;
 use crate::templates;
 use crate::traits::{
     CommandRunner, CreateQuestionContext, CreateQuestionDecision, EmergencyStopContext,
     EmergencyStopDecision, QuestionContext, SubAgent, SubAgentDecision,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tera::Context;
 
 /// Timeout for sub-agent question decisions (60 seconds).
@@ -72,6 +73,8 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/question_decision.tera", &ctx)
             .expect("question_decision.tera template should always render");
 
+        let start = Instant::now();
+
         // Run in a neutral directory to avoid picking up project hooks
         let output = self.runner.run_in_dir(
             self.claude_cmd(),
@@ -80,12 +83,24 @@ impl SubAgent for RealSubAgent<'_> {
             &get_subagent_cwd(),
         )?;
 
+        #[allow(clippy::cast_possible_truncation)] // Duration in ms won't overflow u64
+        let duration_ms = start.elapsed().as_millis() as u64;
+
         if !output.success() {
+            log_subagent_event(
+                "question_decision",
+                &prompt,
+                Some(&output.stderr),
+                false,
+                Some(duration_ms),
+            );
             // If Claude fails, default to Continue
             return Ok(SubAgentDecision::Continue);
         }
 
         let response = output.stdout.trim();
+
+        log_subagent_event("question_decision", &prompt, Some(response), true, Some(duration_ms));
 
         // Parse the response format (if-let-else chain is more readable here)
         #[allow(clippy::option_if_let_else)]
@@ -118,6 +133,8 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/code_review.tera", &ctx)
             .expect("code_review.tera template should always render");
 
+        let start = Instant::now();
+
         // Run in a neutral directory to avoid picking up project hooks
         let output = self.runner.run_in_dir(
             self.claude_cmd(),
@@ -135,7 +152,17 @@ impl SubAgent for RealSubAgent<'_> {
             &get_subagent_cwd(),
         )?;
 
+        #[allow(clippy::cast_possible_truncation)] // Duration in ms won't overflow u64
+        let duration_ms = start.elapsed().as_millis() as u64;
+
         if !output.success() {
+            log_subagent_event(
+                "code_review",
+                &prompt,
+                Some(&output.stderr),
+                false,
+                Some(duration_ms),
+            );
             // If Claude fails, default to approve with warning
             return Ok((
                 true,
@@ -148,6 +175,8 @@ impl SubAgent for RealSubAgent<'_> {
 
         // Try to parse the JSON response
         let response = output.stdout.trim();
+
+        log_subagent_event("code_review", &prompt, Some(response), true, Some(duration_ms));
 
         // Try to find JSON in the output
         if let Some(json_match) = extract_json_object(response) {
@@ -187,6 +216,8 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/emergency_stop_decision.tera", &ctx)
             .expect("emergency_stop_decision.tera template should always render");
 
+        let start = Instant::now();
+
         // Run in a neutral directory to avoid picking up project hooks
         let output = self.runner.run_in_dir(
             self.claude_cmd(),
@@ -195,12 +226,24 @@ impl SubAgent for RealSubAgent<'_> {
             &get_subagent_cwd(),
         )?;
 
+        #[allow(clippy::cast_possible_truncation)] // Duration in ms won't overflow u64
+        let duration_ms = start.elapsed().as_millis() as u64;
+
         if !output.success() {
+            log_subagent_event(
+                "emergency_stop",
+                &prompt,
+                Some(&output.stderr),
+                false,
+                Some(duration_ms),
+            );
             // If Claude fails, default to Accept (conservative — let agent stop)
             return Ok(EmergencyStopDecision::Accept(None));
         }
 
         let response = output.stdout.trim();
+
+        log_subagent_event("emergency_stop", &prompt, Some(response), true, Some(duration_ms));
 
         response.strip_prefix("ACCEPT:").map_or_else(
             || {
@@ -233,6 +276,8 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/create_question_decision.tera", &ctx)
             .expect("create_question_decision.tera template should always render");
 
+        let start = Instant::now();
+
         // Run in a neutral directory to avoid picking up project hooks
         let output = self.runner.run_in_dir(
             self.claude_cmd(),
@@ -241,12 +286,24 @@ impl SubAgent for RealSubAgent<'_> {
             &get_subagent_cwd(),
         )?;
 
+        #[allow(clippy::cast_possible_truncation)] // Duration in ms won't overflow u64
+        let duration_ms = start.elapsed().as_millis() as u64;
+
         if !output.success() {
+            log_subagent_event(
+                "create_question",
+                &prompt,
+                Some(&output.stderr),
+                false,
+                Some(duration_ms),
+            );
             // If Claude fails, default to Create (let the question be created)
             return Ok(CreateQuestionDecision::Create);
         }
 
         let response = output.stdout.trim();
+
+        log_subagent_event("create_question", &prompt, Some(response), true, Some(duration_ms));
 
         response.strip_prefix("AUTO_ANSWER:").map_or_else(
             // CREATE: or unrecognized format — allow question creation

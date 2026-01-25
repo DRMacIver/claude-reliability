@@ -1,6 +1,6 @@
 //! Debug hook event logging.
 //!
-//! When `debug_hook_logging` is enabled in the project config, every hook
+//! When `debug_logging` is enabled in the project config, every hook
 //! invocation is appended as a JSONL line to `.claude-reliability/hook-events.jsonl`.
 //! This allows debugging hook behavior by inspecting exactly what events were received.
 
@@ -13,9 +13,9 @@ use std::path::Path;
 /// Log file name within the data directory.
 const HOOK_EVENTS_FILE: &str = "hook-events.jsonl";
 
-/// Log a hook event if debug hook logging is enabled.
+/// Log a hook event if debug logging is enabled.
 ///
-/// Checks the project config for the `debug_hook_logging` flag. If enabled,
+/// Checks the project config for the `debug_logging` flag. If enabled,
 /// appends a JSONL line containing the hook type, timestamp, and raw input
 /// to the hook events log file.
 ///
@@ -31,7 +31,7 @@ pub fn log_hook_event_in(hook_type: &str, raw_input: &str, base_dir: &Path) {
         return;
     };
 
-    if !config.debug_hook_logging {
+    if !config.debug_logging {
         return;
     }
 
@@ -74,8 +74,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn setup_config(dir: &Path, debug_hook_logging: bool) {
-        let config = ProjectConfig { debug_hook_logging, ..Default::default() };
+    fn setup_config(dir: &Path, debug_logging: bool) {
+        let config = ProjectConfig { debug_logging, ..Default::default() };
         config.save_to(dir).unwrap();
     }
 

@@ -16,6 +16,7 @@ pub mod question;
 pub mod session;
 pub mod storage;
 pub mod subagent;
+pub mod subagent_logging;
 pub mod tasks;
 pub mod templates;
 pub mod testing;
