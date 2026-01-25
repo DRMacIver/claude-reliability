@@ -421,7 +421,36 @@ pub struct EmergencyStopInput {
 
 // Output types - defined at module level to avoid items_after_statements
 
-/// Work item output representation.
+/// Work item summary for list operations - minimal data to reduce response size.
+#[derive(Debug, Serialize)]
+struct WorkItemSummary {
+    id: String,
+    title: String,
+    priority: u8,
+    priority_label: &'static str,
+    status: String,
+    in_progress: bool,
+    requested: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_by: Vec<String>,
+}
+
+impl WorkItemSummary {
+    fn from_task(task: &crate::tasks::Task, blocked_by: Vec<String>) -> Self {
+        Self {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            priority: task.priority.as_u8(),
+            priority_label: priority_label(task.priority),
+            status: task.status.as_str().to_string(),
+            in_progress: task.in_progress,
+            requested: task.requested,
+            blocked_by,
+        }
+    }
+}
+
+/// Work item output representation (full details).
 #[derive(Debug, Serialize)]
 struct WorkItemOutput {
     id: String,
@@ -787,12 +816,25 @@ impl TasksServer {
             .list_tasks(filter)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        // Use summary format to reduce response size
         let outputs: Vec<_> = tasks
             .iter()
             .map(|t| {
-                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
-                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
-                WorkItemOutput::from_task(t, deps, guidance)
+                // Only include incomplete dependencies (blockers)
+                let blocked_by: Vec<String> = self
+                    .store
+                    .get_dependencies(&t.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|dep_id| {
+                        self.store
+                            .get_task(dep_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|t| t.status != Status::Complete)
+                    })
+                    .collect();
+                WorkItemSummary::from_task(t, blocked_by)
             })
             .collect();
 
@@ -894,12 +936,24 @@ impl TasksServer {
 
         let (tasks, total) = apply_limit(tasks, input.limit);
 
+        // Use summary format to reduce response size
         let outputs: Vec<_> = tasks
             .iter()
             .map(|t| {
-                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
-                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
-                WorkItemOutput::from_task(t, deps, guidance)
+                let blocked_by: Vec<String> = self
+                    .store
+                    .get_dependencies(&t.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|dep_id| {
+                        self.store
+                            .get_task(dep_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|t| t.status != Status::Complete)
+                    })
+                    .collect();
+                WorkItemSummary::from_task(t, blocked_by)
             })
             .collect();
 
@@ -1470,12 +1524,24 @@ impl TasksServer {
             )]));
         }
 
-        let output: Vec<WorkItemOutput> = tasks
+        // Use summary format to reduce response size
+        let output: Vec<WorkItemSummary> = tasks
             .iter()
             .map(|t| {
-                let deps = self.store.get_dependencies(&t.id).unwrap_or_default();
-                let guidance = self.store.get_task_guidance(&t.id).unwrap_or_default();
-                WorkItemOutput::from_task(t, deps, guidance)
+                let blocked_by: Vec<String> = self
+                    .store
+                    .get_dependencies(&t.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|dep_id| {
+                        self.store
+                            .get_task(dep_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|t| t.status != Status::Complete)
+                    })
+                    .collect();
+                WorkItemSummary::from_task(t, blocked_by)
             })
             .collect();
 
