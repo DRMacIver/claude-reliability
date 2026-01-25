@@ -918,10 +918,10 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
     }
 
     let mut result = StopHookResult::block()
-        .with_message("# Requested Tasks Incomplete")
+        .with_message("# Requested Work Items Incomplete")
         .with_message("")
         .with_message(
-            "The following tasks were requested by the user and must be completed before stopping:",
+            "The following work items (stored in the claude-reliability MCP server) were requested by the user and must be completed before stopping:",
         )
         .with_message("");
 
@@ -931,7 +931,7 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
 
     result = result
         .with_message("")
-        .with_message("Please complete these tasks or, if blocked, link them to questions explaining the blocker.")
+        .with_message("Please complete these work items or, if blocked, link them to questions explaining the blocker.")
         .with_message("")
         .with_message("If you've hit a problem you cannot solve without user input, use the `emergency_stop` tool.");
 
@@ -1346,8 +1346,8 @@ mod tests {
             result.messages
         );
         assert!(
-            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
-            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")),
+            "Expected 'Requested Work Items Incomplete' message but got: {:?}",
             result.messages
         );
     }
@@ -3555,7 +3555,7 @@ mod tests {
 
         let result = result.unwrap();
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+        assert!(result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")));
         assert!(result.messages.iter().any(|m| m.contains("Important task")));
     }
 
@@ -3690,7 +3690,7 @@ mod tests {
 
         // Should block because there's an incomplete requested task
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+        assert!(result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")));
     }
 
     /// Create a mock that returns no uncommitted changes but IS ahead of remote.
@@ -3766,8 +3766,8 @@ mod tests {
             result.messages
         );
         assert!(
-            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
-            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")),
+            "Expected 'Requested Work Items Incomplete' message but got: {:?}",
             result.messages
         );
 
@@ -3817,7 +3817,7 @@ mod tests {
 
         // Should block because there's an incomplete requested task and modifying work was done
         assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")));
+        assert!(result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")));
     }
 
     #[test]
@@ -3875,8 +3875,8 @@ mod tests {
             result.messages
         );
         assert!(
-            result.messages.iter().any(|m| m.contains("Requested Tasks Incomplete")),
-            "Expected 'Requested Tasks Incomplete' message but got: {:?}",
+            result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")),
+            "Expected 'Requested Work Items Incomplete' message but got: {:?}",
             result.messages
         );
     }
