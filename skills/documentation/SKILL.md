@@ -133,6 +133,39 @@ The migration may have partially run. Check the database state and either:
 Ensure the migration file is in the correct directory and has the `.sql` extension.
 ```
 
+## Documenting Decisions (ADRs)
+
+When making architecture or design decisions, record the rationale alongside the decision. Without recorded rationale, future developers face a dilemma: blindly accept past decisions or blindly reverse them.
+
+**What to capture:**
+- What forces were in tension?
+- What was decided?
+- What alternatives were considered and why rejected?
+- What are the consequences?
+
+**Format:** Keep it lightweight — a short paragraph in a commit message, a comment block at the top of a module, or a dedicated decision record. The key is that the rationale is captured somewhere durable and discoverable.
+
+ADRs are particularly valuable for decisions that seem arbitrary or surprising. If you chose a less obvious approach for a good reason, that reason must be written down or it will be lost.
+
+## The GHC Notes Pattern
+
+When a non-obvious decision or constraint affects multiple locations in the codebase, write the detailed explanation once in a canonical location with a clear heading, and reference it elsewhere with a short comment.
+
+**Example:**
+```rust
+// In the canonical location:
+// Note [Why we validate before serializing]
+// We must validate all fields before serializing because the serializer
+// assumes well-formed input and will produce corrupt output otherwise.
+// This was discovered in issue #42 when partial records caused silent
+// data corruption.
+
+// In other files that relate to this:
+// See Note [Why we validate before serializing] in validator.rs
+```
+
+This prevents comment duplication and drift while keeping code well-documented. Write the explanation once, reference it everywhere.
+
 ## Tips
 
 1. **Be specific** - Vague instructions lead to mistakes
@@ -140,3 +173,4 @@ Ensure the migration file is in the correct directory and has the `.sql` extensi
 3. **Note prerequisites** - What must be true before starting?
 4. **Add troubleshooting** - Document problems you encountered
 5. **Keep updated** - Outdated how-tos are worse than none
+6. **Record the "why"** - Decision rationale is as important as the decision itself

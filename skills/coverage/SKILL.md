@@ -60,6 +60,28 @@ cargo llvm-cov --show-missing-lines
 4. **Untestable code is a smell** - It's telling you something about the design
 5. **Mock at boundaries** - Don't mock internal implementation details
 
+## Writing Effective Tests
+
+### Use Data That Looks Like Data
+Test data should be visually distinctive and obviously different from code, variable names, and system defaults. This makes debugging vastly easier because when a value appears in a log or error message, you can immediately tell where it came from.
+
+- **Don't:** `name = "user"`, `path = "file"`, `id = 1`, `count = 0`
+- **Do:** `name = "alice-test-user"`, `path = "test-data/waveforms/meow.wav"`, `id = 42`, `count = 7`
+
+Generic values like `1` and `0` could be defaults, sentinel values, or array indices. Distinctive values are immediately recognizable as test data.
+
+### Write Test Names That Explain Intent
+Test names and docstrings should explain WHY a behavior matters, not just WHAT is being tested. Strip boilerplate phrases like "Test that...", "should...", "correctly", and "properly" — these add no information.
+
+- **Don't:** `test_parse_input_correctly` — "Test that input is parsed correctly"
+- **Do:** `test_parse_input_extracts_config_without_validation` — explains the purpose and what would go wrong if it failed
+
+### Be Explicit About What Tests Cover
+When reporting on tests, be clear about what they verify. "All tests pass" is less useful than "tests verify X and Y, but do not exercise the path where Z happens." This gives reviewers the information they need to assess whether additional testing is warranted.
+
+### Tests Are Checks, Not Proof
+A green test suite does not mean nothing broke. Tests only verify what they were written to verify. Remain skeptical even when all tests pass — think about whether a change could affect behavior not covered by any test. Supplement automated checks with active thinking about edge cases, surprising inputs, and interactions.
+
 ## Anti-Patterns to Avoid
 
 - Don't suppress with `#[coverage(off)]` annotations

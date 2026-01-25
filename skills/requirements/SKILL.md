@@ -79,6 +79,8 @@ Don't try to eliminate all uncertainty upfront. Some things only become clear on
 
 ## Anti-Patterns
 
+**The XY Problem.** A user asks for help with their attempted solution (Y) instead of their actual problem (X). When receiving a request, look past the literal ask to understand the underlying goal. If a user asks "how do I parse the third column of this CSV file?", the real question might be about data transformation. Always provide context about the broader goal, not just the immediate step.
+
 **Over-questioning.** Asking about every edge case before writing any code. Most questions answer themselves once you're in the code.
 
 **Interrogation mode.** Rapid-fire questions without context feels like a bureaucratic intake form, not a collaborative conversation.
