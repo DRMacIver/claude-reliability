@@ -927,10 +927,40 @@ impl TaskStore for SqliteTaskStore {
             (None, None) => String::new(),
         };
 
+        // Order by: status (open/stuck/blocked/complete/abandoned), unblocked, requested,
+        // priority, blocking count, created_at
+        // This prioritizes tasks that are best to work on
         let sql = format!(
             "SELECT id, title, description, priority, status, in_progress, requested, created_at, updated_at
              FROM tasks {where_clause}
-             ORDER BY priority ASC, created_at ASC
+             ORDER BY
+                 -- Status order: open (0), stuck (1), blocked (2), complete (3), abandoned (4)
+                 CASE status
+                     WHEN 'open' THEN 0
+                     WHEN 'stuck' THEN 1
+                     WHEN 'blocked' THEN 2
+                     WHEN 'complete' THEN 3
+                     WHEN 'abandoned' THEN 4
+                     ELSE 5
+                 END ASC,
+                 -- Unblocked first (count of open dependencies + blocking questions)
+                 (
+                     (SELECT COUNT(*) FROM task_dependencies d
+                      JOIN tasks dep ON d.depends_on = dep.id
+                      WHERE d.task_id = tasks.id AND dep.status NOT IN ('complete', 'abandoned'))
+                     +
+                     (SELECT COUNT(*) FROM task_questions tq
+                      JOIN questions q ON tq.question_id = q.id
+                      WHERE tq.task_id = tasks.id AND q.answer IS NULL)
+                 ) ASC,
+                 -- Requested first
+                 CASE WHEN requested = 1 THEN 0 ELSE 1 END ASC,
+                 -- Higher priority first (lower number = higher priority)
+                 priority ASC,
+                 -- Tasks that block more others first
+                 (SELECT COUNT(*) FROM task_dependencies d WHERE d.depends_on = tasks.id) DESC,
+                 -- Older tasks first
+                 created_at ASC
              {limit_clause}"
         );
 
@@ -2141,6 +2171,107 @@ mod tests {
         let tasks =
             store.list_tasks(TaskFilter { offset: Some(10), ..Default::default() }).unwrap();
         assert_eq!(tasks.len(), 0);
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_list_tasks_sort_order() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        // Create tasks with various properties to test sort order:
+        // 1. Open status first
+        // 2. Unblocked first
+        // 3. Requested first
+        // 4. Higher priority first (lower number)
+        // 5. Tasks that block more others first
+        // 6. Older tasks first
+
+        // Create tasks in a specific order to test sorting
+        // All same priority, same creation order - will test other factors
+
+        // Task A: open, unblocked, requested, blocks 2 others
+        let task_a = store.create_task("A - Best to work on", "", Priority::Medium).unwrap();
+        store
+            .update_task(&task_a.id, TaskUpdate { requested: Some(true), ..Default::default() })
+            .unwrap();
+
+        // Task B: open, unblocked, not requested
+        let _task_b =
+            store.create_task("B - Unblocked not requested", "", Priority::Medium).unwrap();
+
+        // Task C: open, blocked by A, requested
+        let task_c = store.create_task("C - Blocked but requested", "", Priority::Medium).unwrap();
+        store.add_dependency(&task_c.id, &task_a.id).unwrap();
+        store
+            .update_task(&task_c.id, TaskUpdate { requested: Some(true), ..Default::default() })
+            .unwrap();
+
+        // Task D: completed
+        let task_d = store.create_task("D - Completed", "", Priority::Medium).unwrap();
+        store
+            .update_task(
+                &task_d.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        // Task E: open, higher priority than A/B
+        let _task_e = store.create_task("E - High priority", "", Priority::High).unwrap();
+
+        // Make task A block two others (C already depends on A, add another)
+        let task_f = store.create_task("F - Also blocked by A", "", Priority::Medium).unwrap();
+        store.add_dependency(&task_f.id, &task_a.id).unwrap();
+
+        // Get all tasks with no filter
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+
+        // Expected order:
+        // Status: open (0) > stuck (1) > blocked (2) > complete (3) > abandoned (4)
+        // Within same status: unblocked > blocked by deps
+        // Within same block state: requested > not requested
+        // Within same requested: higher priority (lower number)
+        // Within same priority: blocks more others > blocks fewer
+        // Within same blocking count: older > newer
+        //
+        // 1. A - open, unblocked, REQUESTED, blocks 2 (medium priority)
+        // 2. E - open, unblocked, not requested, high priority, blocks 0
+        // 3. B - open, unblocked, not requested, medium priority, blocks 0
+        // 4. C - status=blocked, requested
+        // 5. F - status=blocked, not requested
+        // 6. D - completed
+
+        assert_eq!(tasks.len(), 6, "Should have 6 tasks");
+
+        // First should be A (open, unblocked, REQUESTED - requested beats priority)
+        assert_eq!(
+            tasks[0].title, "A - Best to work on",
+            "Requested unblocked task should be first (requested beats priority)"
+        );
+
+        // Second should be E (open, unblocked, not requested, high priority)
+        assert_eq!(tasks[1].title, "E - High priority", "High priority unblocked should be second");
+
+        // Third should be B (open, unblocked, not requested, medium priority, blocks none)
+        assert_eq!(
+            tasks[2].title, "B - Unblocked not requested",
+            "Unblocked non-requested medium priority should be third"
+        );
+
+        // Fourth and fifth should be C and F (status=blocked, sorted by requested)
+        // C is requested, F is not, so C should come first
+        assert_eq!(
+            tasks[3].title, "C - Blocked but requested",
+            "Blocked requested should be fourth"
+        );
+        assert_eq!(
+            tasks[4].title, "F - Also blocked by A",
+            "Blocked non-requested should be fifth"
+        );
+
+        // Last should be D (completed)
+        assert_eq!(tasks[5].title, "D - Completed", "Completed should be last");
 
         disable_deterministic_ids();
     }
