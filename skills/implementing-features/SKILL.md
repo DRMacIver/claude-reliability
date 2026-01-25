@@ -102,8 +102,10 @@ Errors you can't handle **must** be propagated, not hidden. Silent error handlin
 
 The only valid reason to swallow an error is when the operation is genuinely optional and failing to perform it has no user-visible consequences. Even then, prefer logging.
 
-### Don't Write Tests After the Fact
-Writing tests after implementation often leads to tests that merely confirm the implementation rather than verifying the intended behavior. Write tests first to define what "correct" means, then implement to satisfy those tests.
+### Prefer Writing Tests Before Implementation
+Writing tests after implementation often leads to tests that merely confirm the implementation rather than verifying the intended behavior. Writing tests first helps define what "correct" means before you build it.
+
+That said, writing tests after the fact is fine when needed — especially for edge cases discovered during implementation, for coverage gaps, or when the interface wasn't clear enough upfront. The goal is not to *need* to write tests after the fact, not to avoid it entirely. If you find yourself there, write the tests — it's better to have them than not.
 
 ## Checklist
 
@@ -111,7 +113,7 @@ Before marking a feature as complete:
 
 - [ ] Official documentation consulted for any unfamiliar APIs or tools
 - [ ] Existing codebase patterns followed
-- [ ] Tests written before implementation (TDD approach)
+- [ ] Tests written (ideally before implementation; after is fine if needed)
 - [ ] Implementation is minimal and focused on the request
 - [ ] All tests passing (including pre-existing tests)
 - [ ] Quality gates pass (lints, formatting, coverage)
