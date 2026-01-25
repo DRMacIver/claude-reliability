@@ -94,6 +94,17 @@ impl CommandRunner for MockCommandRunner {
         Ok(output.clone())
     }
 
+    fn run_in_dir(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+        _cwd: &std::path::Path,
+    ) -> Result<CommandOutput> {
+        // Mock ignores cwd, just delegates to run
+        self.run(program, args, timeout)
+    }
+
     fn is_available(&self, program: &str) -> bool {
         self.available_programs.borrow().contains(&program.to_string())
     }
@@ -226,6 +237,16 @@ impl CommandRunner for FailingCommandRunner {
         Err(std::io::Error::other(self.error_message.clone()).into())
     }
 
+    fn run_in_dir(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+        _cwd: &std::path::Path,
+    ) -> Result<CommandOutput> {
+        self.run(program, args, timeout)
+    }
+
     fn is_available(&self, _program: &str) -> bool {
         false
     }
@@ -258,6 +279,16 @@ impl CommandRunner for TimeoutCommandRunner {
             command: format_command(program, args),
             timeout_secs: self.timeout_secs,
         })
+    }
+
+    fn run_in_dir(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+        _cwd: &std::path::Path,
+    ) -> Result<CommandOutput> {
+        self.run(program, args, timeout)
     }
 
     fn is_available(&self, _program: &str) -> bool {
@@ -671,6 +702,23 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_command_runner_run_in_dir() {
+        use std::path::Path;
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "pwd",
+            &[],
+            CommandOutput { exit_code: 0, stdout: "/tmp\n".to_string(), stderr: String::new() },
+        );
+
+        // run_in_dir should delegate to run (mock ignores cwd)
+        let output = runner.run_in_dir("pwd", &[], None, Path::new("/tmp")).unwrap();
+        assert_eq!(output.stdout, "/tmp\n");
+        runner.verify();
+    }
+
+    #[test]
     #[should_panic(expected = "Command mismatch")]
     fn test_mock_command_runner_wrong_command() {
         let mut runner = MockCommandRunner::new();
@@ -813,6 +861,15 @@ mod tests {
     }
 
     #[test]
+    fn test_failing_command_runner_run_in_dir() {
+        use std::path::Path;
+
+        let runner = FailingCommandRunner::new("test error");
+        let result = runner.run_in_dir("any", &["args"], None, Path::new("/tmp"));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_timeout_command_runner() {
         let runner = TimeoutCommandRunner::new(300);
         let result = runner.run("any", &["args"], None);
@@ -821,6 +878,17 @@ mod tests {
         assert!(err_str.contains("timed out"), "Expected timeout error: {err_str}");
         assert!(err_str.contains("300"), "Expected timeout seconds: {err_str}");
         assert!(runner.is_available("any"));
+    }
+
+    #[test]
+    fn test_timeout_command_runner_run_in_dir() {
+        use std::path::Path;
+
+        let runner = TimeoutCommandRunner::new(300);
+        let result = runner.run_in_dir("any", &["args"], None, Path::new("/tmp"));
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("timed out"), "Expected timeout error: {err_str}");
     }
 
     #[test]

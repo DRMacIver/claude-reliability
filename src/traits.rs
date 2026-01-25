@@ -56,6 +56,30 @@ pub trait CommandRunner {
     fn run(&self, program: &str, args: &[&str], timeout: Option<Duration>)
         -> Result<CommandOutput>;
 
+    /// Run a command with the given arguments, timeout, and working directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program to run.
+    /// * `args` - The arguments to pass.
+    /// * `timeout` - Optional timeout duration.
+    /// * `cwd` - The working directory to run the command in.
+    ///
+    /// # Returns
+    ///
+    /// The command output, or an error if the command could not be started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command cannot be spawned or executed.
+    fn run_in_dir(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+        cwd: &std::path::Path,
+    ) -> Result<CommandOutput>;
+
     /// Check if a program is available in PATH.
     fn is_available(&self, program: &str) -> bool;
 }

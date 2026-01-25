@@ -6,6 +6,7 @@ use crate::traits::{
     CommandRunner, CreateQuestionContext, CreateQuestionDecision, EmergencyStopContext,
     EmergencyStopDecision, QuestionContext, SubAgent, SubAgentDecision,
 };
+use std::path::Path;
 use std::time::Duration;
 use tera::Context;
 
@@ -20,6 +21,10 @@ const EMERGENCY_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for `create_question` decisions (60 seconds).
 const CREATE_QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Directory to run sub-agents in to avoid picking up project hooks.
+/// Using /tmp ensures no project-specific settings or hooks are loaded.
+const SUBAGENT_CWD: &str = "/tmp";
 
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
@@ -59,10 +64,12 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/question_decision.tera", &ctx)
             .expect("question_decision.tera template should always render");
 
-        let output = self.runner.run(
+        // Run in a neutral directory to avoid picking up project hooks
+        let output = self.runner.run_in_dir(
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(QUESTION_DECISION_TIMEOUT),
+            Path::new(SUBAGENT_CWD),
         )?;
 
         if !output.success() {
@@ -103,7 +110,8 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/code_review.tera", &ctx)
             .expect("code_review.tera template should always render");
 
-        let output = self.runner.run(
+        // Run in a neutral directory to avoid picking up project hooks
+        let output = self.runner.run_in_dir(
             self.claude_cmd(),
             &[
                 "-p",
@@ -116,6 +124,7 @@ impl SubAgent for RealSubAgent<'_> {
                 "Read,Glob,Grep,Bash(git diff*),Bash(git log*),Bash(git show*)",
             ],
             Some(CODE_REVIEW_TIMEOUT),
+            Path::new(SUBAGENT_CWD),
         )?;
 
         if !output.success() {
@@ -170,10 +179,12 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/emergency_stop_decision.tera", &ctx)
             .expect("emergency_stop_decision.tera template should always render");
 
-        let output = self.runner.run(
+        // Run in a neutral directory to avoid picking up project hooks
+        let output = self.runner.run_in_dir(
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(EMERGENCY_STOP_TIMEOUT),
+            Path::new(SUBAGENT_CWD),
         )?;
 
         if !output.success() {
@@ -214,10 +225,12 @@ impl SubAgent for RealSubAgent<'_> {
         let prompt = templates::render("prompts/create_question_decision.tera", &ctx)
             .expect("create_question_decision.tera template should always render");
 
-        let output = self.runner.run(
+        // Run in a neutral directory to avoid picking up project hooks
+        let output = self.runner.run_in_dir(
             self.claude_cmd(),
             &["--print", "--model", "haiku", "-p", &prompt],
             Some(CREATE_QUESTION_TIMEOUT),
+            Path::new(SUBAGENT_CWD),
         )?;
 
         if !output.success() {

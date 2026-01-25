@@ -128,6 +128,32 @@ impl CommandRunner for RealCommandRunner {
         Ok(CommandOutput { exit_code, stdout, stderr })
     }
 
+    fn run_in_dir(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Option<Duration>,
+        cwd: &std::path::Path,
+    ) -> Result<CommandOutput> {
+        let mut command = Command::new(program);
+        command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).current_dir(cwd);
+
+        let mut child = spawn_with_etxtbsy_retry(|| command.spawn())?;
+
+        // Handle timeout if specified
+        let output = if let Some(timeout_duration) = timeout {
+            wait_with_timeout(&mut child, timeout_duration, program, args)?
+        } else {
+            child.wait_with_output()?
+        };
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+        Ok(CommandOutput { exit_code, stdout, stderr })
+    }
+
     fn is_available(&self, program: &str) -> bool {
         Command::new("which")
             .arg(program)
@@ -310,5 +336,32 @@ mod tests {
         // Use a command that takes a bit but not too long
         let output = runner.run("sleep", &["0.1"], None).unwrap();
         assert!(output.success());
+    }
+
+    #[test]
+    fn test_run_in_dir_basic() {
+        use std::path::Path;
+
+        let runner = RealCommandRunner::new();
+        // Run pwd in /tmp to verify directory change
+        let output = runner.run_in_dir("pwd", &[], None, Path::new("/tmp")).unwrap();
+        assert!(output.success());
+        // pwd output should contain /tmp (may be /private/tmp on macOS)
+        assert!(
+            output.stdout.contains("/tmp"),
+            "Expected /tmp in output, got: {}",
+            output.stdout.trim()
+        );
+    }
+
+    #[test]
+    fn test_run_in_dir_with_timeout() {
+        use std::path::Path;
+
+        let runner = RealCommandRunner::new();
+        let output =
+            runner.run_in_dir("echo", &["hello"], Some(Duration::from_secs(10)), Path::new("/tmp"));
+        assert!(output.is_ok());
+        assert_eq!(output.unwrap().stdout.trim(), "hello");
     }
 }
