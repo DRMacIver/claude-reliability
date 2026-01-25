@@ -10,11 +10,11 @@ Before making code changes, please set up a work item to track what you're worki
 
 ```
 # If a relevant work item already exists:
-work_on(task_id="<item-id>")
+work_on(work_item_id="<item-id>")
 
 # Or create a new one:
-create_task(title="Brief description of what you're doing", description="...")
-work_on(task_id="<returned-item-id>")
+create_work_item(title="Brief description of what you're doing", description="...")
+work_on(work_item_id="<returned-item-id>")
 ```
 
 This only takes a moment and helps you (and future sessions) stay oriented.

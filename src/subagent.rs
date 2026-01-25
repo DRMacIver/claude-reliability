@@ -2,7 +2,10 @@
 
 use crate::error::Result;
 use crate::templates;
-use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
+use crate::traits::{
+    CommandRunner, EmergencyStopContext, EmergencyStopDecision, QuestionContext, SubAgent,
+    SubAgentDecision,
+};
 use std::time::Duration;
 use tera::Context;
 
@@ -11,6 +14,9 @@ const QUESTION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for code reviews (5 minutes).
 const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Timeout for emergency stop decisions (60 seconds).
+const EMERGENCY_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
@@ -149,6 +155,50 @@ impl SubAgent for RealSubAgent<'_> {
                 response.chars().take(1000).collect::<String>()
             ),
         ))
+    }
+
+    fn evaluate_emergency_stop(
+        &self,
+        context: &EmergencyStopContext,
+    ) -> Result<EmergencyStopDecision> {
+        let mut ctx = Context::new();
+        ctx.insert("explanation", &context.explanation);
+
+        let prompt = templates::render("prompts/emergency_stop_decision.tera", &ctx)
+            .expect("emergency_stop_decision.tera template should always render");
+
+        let output = self.runner.run(
+            self.claude_cmd(),
+            &["--print", "--model", "haiku", "-p", &prompt],
+            Some(EMERGENCY_STOP_TIMEOUT),
+        )?;
+
+        if !output.success() {
+            // If Claude fails, default to Accept (conservative — let agent stop)
+            return Ok(EmergencyStopDecision::Accept(None));
+        }
+
+        let response = output.stdout.trim();
+
+        response.strip_prefix("ACCEPT:").map_or_else(
+            || {
+                response.strip_prefix("REJECT:").map_or(
+                    // Unrecognized format — default to Accept
+                    Ok(EmergencyStopDecision::Accept(None)),
+                    |instructions| {
+                        Ok(EmergencyStopDecision::Reject(instructions.trim().to_string()))
+                    },
+                )
+            },
+            |message| {
+                let msg = message.trim();
+                Ok(EmergencyStopDecision::Accept(if msg.is_empty() {
+                    None
+                } else {
+                    Some(msg.to_string())
+                }))
+            },
+        )
     }
 }
 
@@ -530,6 +580,103 @@ mod tests {
             // Falls through to default approval with raw output as feedback
             assert!(approved);
             assert!(feedback.contains("could not parse"));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_accept_with_message() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd =
+                setup_fake_claude(&dir, "ACCEPT: Missing credentials for deployment", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context =
+                EmergencyStopContext { explanation: "Cannot deploy without API key".to_string() };
+            let result = agent.evaluate_emergency_stop(&context).unwrap();
+
+            assert!(matches!(
+                result,
+                EmergencyStopDecision::Accept(Some(ref msg)) if msg.contains("Missing credentials")
+            ));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_accept_empty_message() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "ACCEPT:", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = EmergencyStopContext { explanation: "Blocked".to_string() };
+            let result = agent.evaluate_emergency_stop(&context).unwrap();
+
+            assert!(matches!(result, EmergencyStopDecision::Accept(None)));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_reject() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(
+                &dir,
+                "REJECT: Use the Deciding what to work on skill instead",
+                0,
+            );
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = EmergencyStopContext { explanation: "Too many tasks to do".to_string() };
+            let result = agent.evaluate_emergency_stop(&context).unwrap();
+
+            assert!(matches!(
+                result,
+                EmergencyStopDecision::Reject(ref msg) if msg.contains("Deciding what to work on")
+            ));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_command_fails() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = EmergencyStopContext { explanation: "Something broke".to_string() };
+            let result = agent.evaluate_emergency_stop(&context).unwrap();
+
+            // Command failure defaults to Accept
+            assert!(matches!(result, EmergencyStopDecision::Accept(None)));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_unrecognized_format() {
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "I think you should stop working on this", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = EmergencyStopContext { explanation: "Unclear".to_string() };
+            let result = agent.evaluate_emergency_stop(&context).unwrap();
+
+            // Unrecognized format defaults to Accept
+            assert!(matches!(result, EmergencyStopDecision::Accept(None)));
+        }
+
+        #[test]
+        fn test_real_subagent_emergency_stop_spawn_fails() {
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            let context = EmergencyStopContext { explanation: "test".to_string() };
+            let result = agent.evaluate_emergency_stop(&context);
+
+            // The run() call returns Err, which propagates via ?
+            assert!(result.is_err());
         }
     }
 }

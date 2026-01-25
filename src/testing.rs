@@ -8,7 +8,8 @@
 
 use crate::error::Result;
 use crate::traits::{
-    CommandOutput, CommandRunner, QuestionContext, StateStore, SubAgent, SubAgentDecision,
+    CommandOutput, CommandRunner, EmergencyStopContext, EmergencyStopDecision, QuestionContext,
+    StateStore, SubAgent, SubAgentDecision,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -102,8 +103,10 @@ impl CommandRunner for MockCommandRunner {
 pub struct MockSubAgent {
     question_decisions: RefCell<Vec<SubAgentDecision>>,
     code_reviews: RefCell<Vec<(bool, String)>>,
+    emergency_stop_decisions: RefCell<Vec<EmergencyStopDecision>>,
     question_index: RefCell<usize>,
     review_index: RefCell<usize>,
+    emergency_stop_index: RefCell<usize>,
 }
 
 impl MockSubAgent {
@@ -121,6 +124,11 @@ impl MockSubAgent {
     /// Add an expected code review result.
     pub fn expect_review(&mut self, approved: bool, feedback: &str) {
         self.code_reviews.borrow_mut().push((approved, feedback.to_string()));
+    }
+
+    /// Add an expected emergency stop decision.
+    pub fn expect_emergency_stop(&mut self, decision: EmergencyStopDecision) {
+        self.emergency_stop_decisions.borrow_mut().push(decision);
     }
 }
 
@@ -150,6 +158,20 @@ impl SubAgent for MockSubAgent {
         let review = reviews[*index].clone();
         *index += 1;
         Ok(review)
+    }
+
+    fn evaluate_emergency_stop(
+        &self,
+        _context: &EmergencyStopContext,
+    ) -> Result<EmergencyStopDecision> {
+        let mut index = self.emergency_stop_index.borrow_mut();
+        let decisions = self.emergency_stop_decisions.borrow();
+
+        assert!(*index < decisions.len(), "No more emergency stop decisions expected");
+
+        let decision = decisions[*index].clone();
+        *index += 1;
+        Ok(decision)
     }
 }
 
@@ -207,6 +229,13 @@ impl SubAgent for FailingSubAgent {
         _files: &[String],
         _review_guide: Option<&str>,
     ) -> Result<(bool, String)> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn evaluate_emergency_stop(
+        &self,
+        _context: &EmergencyStopContext,
+    ) -> Result<EmergencyStopDecision> {
         Err(std::io::Error::other(self.error_message.clone()).into())
     }
 }
@@ -541,7 +570,7 @@ impl crate::tasks::TaskStore for FailingTaskStore {
         Ok(())
     }
 
-    fn get_incomplete_requested_tasks(&self) -> Result<Vec<crate::tasks::Task>> {
+    fn get_incomplete_requested_work(&self) -> Result<Vec<crate::tasks::Task>> {
         Ok(vec![])
     }
 }
@@ -602,6 +631,46 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_sub_agent_emergency_stop_accept() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_emergency_stop(EmergencyStopDecision::Accept(Some(
+            "Blocked by missing credentials".to_string(),
+        )));
+
+        let context = EmergencyStopContext { explanation: "Cannot proceed".to_string() };
+        let decision = agent.evaluate_emergency_stop(&context).unwrap();
+
+        assert!(matches!(
+            decision,
+            EmergencyStopDecision::Accept(Some(ref msg)) if msg.contains("credentials")
+        ));
+    }
+
+    #[test]
+    fn test_mock_sub_agent_emergency_stop_reject() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_emergency_stop(EmergencyStopDecision::Reject(
+            "Use the skill instead".to_string(),
+        ));
+
+        let context = EmergencyStopContext { explanation: "Too much work".to_string() };
+        let decision = agent.evaluate_emergency_stop(&context).unwrap();
+
+        assert!(matches!(
+            decision,
+            EmergencyStopDecision::Reject(ref msg) if msg.contains("skill")
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "No more emergency stop decisions expected")]
+    fn test_mock_sub_agent_emergency_stop_no_expectations() {
+        let agent = MockSubAgent::new();
+        let context = EmergencyStopContext { explanation: "test".to_string() };
+        let _ = agent.evaluate_emergency_stop(&context);
+    }
+
+    #[test]
     #[should_panic(expected = "no more expectations")]
     fn test_mock_command_runner_too_many_calls() {
         let runner = MockCommandRunner::new();
@@ -633,6 +702,9 @@ mod tests {
         // All methods should return errors
         assert!(agent.decide_on_question(&test_context("test")).is_err());
         assert!(agent.review_code("diff", &[], None).is_err());
+        assert!(agent
+            .evaluate_emergency_stop(&EmergencyStopContext { explanation: "test".to_string() })
+            .is_err());
     }
 
     #[test]
@@ -749,6 +821,6 @@ mod tests {
         assert_eq!(store.request_all_open().unwrap(), 0);
         assert!(!store.is_request_mode_active().unwrap());
         store.clear_request_mode().unwrap();
-        assert!(store.get_incomplete_requested_tasks().unwrap().is_empty());
+        assert!(store.get_incomplete_requested_work().unwrap().is_empty());
     }
 }

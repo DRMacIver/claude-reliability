@@ -11,7 +11,6 @@ Variables:
   - untracked_files: List of untracked files (optional)
   - quality_check_enabled: Whether quality checks are enabled (bool)
   - require_push: Whether pushing is required (bool)
-  - problem_phrase: The phrase to use when hitting a problem
 #}
 # Uncommitted Changes
 
@@ -58,4 +57,4 @@ Add them with `git add` or add to .gitignore if they shouldn't be committed.
 
 ---
 
-If you've genuinely hit a blocker that requires user input, say: "{{ problem_phrase }}"
+If you've genuinely hit a blocker that requires user input, use the `emergency_stop` tool.

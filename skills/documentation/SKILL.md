@@ -60,7 +60,7 @@ create_howto(
 
 When a task needs to follow a procedure:
 ```
-link_task_to_howto(task_id="...", howto_id="...")
+link_work_to_howto(work_item_id="...", howto_id="...")
 ```
 
 Now when viewing the task, the guidance is visible.

@@ -130,7 +130,7 @@ pub fn list_unanswered_questions(base_dir: &Path) -> Vec<Question> {
 ///
 /// Returns empty vec if database doesn't exist or on any error.
 #[must_use]
-pub fn get_incomplete_requested_tasks(base_dir: &Path) -> Vec<(String, String, String)> {
+pub fn get_incomplete_requested_work(base_dir: &Path) -> Vec<(String, String, String)> {
     let db_path = paths::project_db_path(base_dir);
     if !db_path.exists() {
         return Vec::new();
@@ -141,7 +141,7 @@ pub fn get_incomplete_requested_tasks(base_dir: &Path) -> Vec<(String, String, S
     };
 
     store
-        .get_incomplete_requested_tasks()
+        .get_incomplete_requested_work()
         .unwrap_or_default()
         .into_iter()
         .map(|t| (t.id, t.title, t.status.as_str().to_string()))
@@ -375,26 +375,26 @@ mod tests {
     // ========== Incomplete Requested Tasks Tests ==========
 
     #[test]
-    fn test_get_incomplete_requested_tasks_no_database() {
+    fn test_get_incomplete_requested_work_no_database() {
         let dir = TempDir::new().unwrap();
-        let result = get_incomplete_requested_tasks(dir.path());
+        let result = get_incomplete_requested_work(dir.path());
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_empty() {
+    fn test_get_incomplete_requested_work_empty() {
         let dir = TempDir::new().unwrap();
         let db_path = test_db_path(dir.path());
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         let _store = SqliteTaskStore::new(&db_path).unwrap();
 
-        let result = get_incomplete_requested_tasks(dir.path());
+        let result = get_incomplete_requested_work(dir.path());
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_with_tasks() {
+    fn test_get_incomplete_requested_work_with_tasks() {
         let dir = TempDir::new().unwrap();
         let db_path = test_db_path(dir.path());
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
@@ -403,7 +403,7 @@ mod tests {
         let task = store.create_task("Requested Task", "", Priority::High).unwrap();
         store.request_tasks(&[&task.id]).unwrap();
 
-        let result = get_incomplete_requested_tasks(dir.path());
+        let result = get_incomplete_requested_work(dir.path());
         assert_eq!(result.len(), 1);
         let (id, title, status) = &result[0];
         assert_eq!(id, &task.id);
@@ -412,14 +412,14 @@ mod tests {
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_corrupted_database() {
+    fn test_get_incomplete_requested_work_corrupted_database() {
         let dir = TempDir::new().unwrap();
         let db_path = test_db_path(dir.path());
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         std::fs::write(&db_path, "invalid database").unwrap();
 
-        let result = get_incomplete_requested_tasks(dir.path());
+        let result = get_incomplete_requested_work(dir.path());
         assert!(result.is_empty());
     }
 

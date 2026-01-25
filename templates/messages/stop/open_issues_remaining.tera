@@ -2,12 +2,11 @@
 
 Variables:
   - open_count: Number of open requested work items
-  - problem_phrase: The phrase to use when hitting a problem
 #}
 # Work Items Remaining
 
-There are {{ open_count }} requested work item(s) still open. Run `list_tasks` to see what's left.
+There are {{ open_count }} requested work item(s) still open. Run `list_work_items` to see what's left.
 
 If you can continue, please work on the remaining items.
 
-If you've genuinely hit a blocker that needs user input, say: "{{ problem_phrase }}"
+If you've genuinely hit a blocker that needs user input, use the `emergency_stop` tool.

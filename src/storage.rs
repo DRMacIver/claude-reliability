@@ -20,6 +20,8 @@ pub mod markers {
     pub const NEEDS_VALIDATION: &str = "needs_validation";
     /// Agent should reflect on work before stopping.
     pub const MUST_REFLECT: &str = "must_reflect";
+    /// Emergency stop requested by agent.
+    pub const EMERGENCY_STOP: &str = "emergency_stop";
 }
 
 /// SQLite-based state store.

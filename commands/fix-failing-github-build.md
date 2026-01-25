@@ -12,7 +12,7 @@ This skill guides you through diagnosing and fixing CI failures systematically.
 
 First, capture the work:
 ```
-create_task(
+create_work_item(
   title="Fix failing CI build",
   description="GitHub Actions build is failing - diagnose and fix",
   priority=1
@@ -44,14 +44,14 @@ Look for:
 Break down the fix into steps:
 
 ```
-create_task(title="Reproduce CI failure locally")
-create_task(title="Identify root cause")
+create_work_item(title="Reproduce CI failure locally")
+create_work_item(title="Identify root cause")
   → add_dependency(depends_on="reproduce")
-create_task(title="Implement fix")
+create_work_item(title="Implement fix")
   → add_dependency(depends_on="identify")
-create_task(title="Verify fix passes locally")
+create_work_item(title="Verify fix passes locally")
   → add_dependency(depends_on="implement")
-create_task(title="Push and verify CI passes")
+create_work_item(title="Push and verify CI passes")
   → add_dependency(depends_on="verify-local")
 ```
 
@@ -111,7 +111,7 @@ just check
 
 Add a note to your task:
 ```
-add_note(task_id="...", content="Fixed by adding missing test for edge case X")
+add_note(work_item_id="...", content="Fixed by adding missing test for edge case X")
 ```
 
 ## Step 7: Push and Monitor
@@ -143,14 +143,14 @@ Don't give up - iterate:
 4. Fix and push again
 
 ```
-add_note(task_id="...", content="First fix didn't work - new error: ...")
+add_note(work_item_id="...", content="First fix didn't work - new error: ...")
 ```
 
 ## Step 9: Complete the Task
 
 Once CI passes:
 ```
-update_task(id="fix-failing-ci", status="complete")
+update_work_item(id="fix-failing-ci", status="complete")
 ```
 
 ## Common Fixes

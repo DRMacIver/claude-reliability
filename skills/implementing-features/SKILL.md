@@ -44,22 +44,36 @@ Before writing any new code:
 - Decide on function signatures, data structures, and interfaces
 - Consider error handling: what can go wrong and how should it be handled?
 
-### 3. Implementation Phase
+### 3. Test-First Phase (Write Tests Before Implementation)
 
-- Make changes incrementally, one logical step at a time
+Write tests **before** implementing the feature. This ensures:
+- You understand the expected behavior before writing code
+- The interface is well-designed (if it's hard to test, it's hard to use)
+- You have a clear definition of "done"
+
+Steps:
+1. Write tests that describe the expected behavior of the new feature
+2. Include tests for error paths and edge cases
+3. Verify the tests **fail** (they should, since the feature doesn't exist yet)
+4. Use the failing tests as a guide for implementation
+
+For each piece of functionality:
+- Write a test that exercises it
+- Implement just enough to make the test pass
+- Refactor if needed while keeping tests green
+
+### 4. Implementation Phase
+
+- Make changes incrementally, guided by the failing tests
 - Follow existing code style and patterns in the codebase
 - Handle errors appropriately but avoid over-engineering
 - Keep the implementation minimal - do what's asked, nothing more
-
-### 4. Testing Phase
-
-- Write tests that exercise the new functionality
-- Cover error paths and edge cases
-- Ensure tests could actually fail if the code is broken (no tautological tests)
-- Run the project's test suite to verify nothing is broken
+- Run tests frequently to confirm progress
 
 ### 5. Verification Phase
 
+- Run the full test suite to confirm nothing is broken
+- Add any additional tests discovered during implementation (integration tests, additional edge cases)
 - Run all quality gates (linters, formatters, tests, coverage)
 - Review your changes for security issues (injection, XSS, etc.)
 - Verify the implementation matches what was requested
@@ -78,13 +92,27 @@ If the project has test infrastructure, use it. If there's a coverage requiremen
 ### Don't Skip Error Handling Research
 When implementing error handling, understand what errors can actually occur. Don't handle hypothetical errors that can't happen, but do handle real failure modes properly.
 
+### Never Silently Swallow Errors
+Errors you can't handle **must** be propagated, not hidden. Silent error handling makes debugging nearly impossible and hides real problems:
+
+- **Don't** use empty catch blocks, `unwrap_or_default()` to hide failures, or `let _ = ...` to discard Results
+- **Do** propagate errors with `?`, return `Result`, or log the error visibly before continuing
+- If an error is truly recoverable, document **why** it's safe to ignore with a comment
+- "Log and continue" is only acceptable when the log message is guaranteed to be visible
+
+The only valid reason to swallow an error is when the operation is genuinely optional and failing to perform it has no user-visible consequences. Even then, prefer logging.
+
+### Don't Write Tests After the Fact
+Writing tests after implementation often leads to tests that merely confirm the implementation rather than verifying the intended behavior. Write tests first to define what "correct" means, then implement to satisfy those tests.
+
 ## Checklist
 
 Before marking a feature as complete:
 
 - [ ] Official documentation consulted for any unfamiliar APIs or tools
 - [ ] Existing codebase patterns followed
+- [ ] Tests written before implementation (TDD approach)
 - [ ] Implementation is minimal and focused on the request
-- [ ] Tests written and passing
+- [ ] All tests passing (including pre-existing tests)
 - [ ] Quality gates pass (lints, formatting, coverage)
 - [ ] No security vulnerabilities introduced

@@ -12,7 +12,7 @@ The user hasn't been active for {{ idle_minutes }} minutes. Rather than stopping
 
 ## What to do
 
-1. Use `list_tasks` to see what needs to be done
+1. Use `list_work_items` to see what needs to be done
 2. Pick a work item and use `work_on` to start working on it
 3. Complete the work item and mark it as done
 4. Continue with other items or stop when you're blocked

@@ -124,6 +124,40 @@ pub trait SubAgent {
         files: &[String],
         review_guide: Option<&str>,
     ) -> Result<(bool, String)>;
+
+    /// Evaluate whether an emergency stop request is legitimate.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The context for the emergency stop request.
+    ///
+    /// # Returns
+    ///
+    /// The sub-agent's decision on whether to accept or reject the stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sub-agent call fails.
+    fn evaluate_emergency_stop(
+        &self,
+        context: &EmergencyStopContext,
+    ) -> Result<EmergencyStopDecision>;
+}
+
+/// Context for emergency stop evaluation.
+#[derive(Debug, Clone)]
+pub struct EmergencyStopContext {
+    /// The agent's explanation for wanting to stop.
+    pub explanation: String,
+}
+
+/// Decision from a sub-agent about whether to allow an emergency stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmergencyStopDecision {
+    /// Accept the emergency stop, optionally with a message.
+    Accept(Option<String>),
+    /// Reject the emergency stop and provide instructions to continue.
+    Reject(String),
 }
 
 /// Trait for persistent state storage.

@@ -156,10 +156,12 @@ pub trait TaskStore {
     /// Clear request mode (called when stop is allowed).
     fn clear_request_mode(&self) -> Result<()>;
 
-    /// Get all incomplete requested tasks (for stop hook).
-    /// Returns tasks that are requested but not complete/abandoned, and not blocked on questions.
-    /// Also includes tasks that are dependencies of requested tasks (transitive).
-    fn get_incomplete_requested_tasks(&self) -> Result<Vec<Task>>;
+    /// Get incomplete requested work items (for stop hook).
+    /// Returns items that are requested but not complete/abandoned, and not blocked on questions.
+    /// Also includes items that are dependencies of requested items (transitive).
+    /// Results are ordered by priority (ascending) then dependent count (descending),
+    /// and limited to the top 5.
+    fn get_incomplete_requested_work(&self) -> Result<Vec<Task>>;
 }
 
 /// Fields that can be updated on a task.
@@ -1793,7 +1795,7 @@ impl TaskStore for SqliteTaskStore {
         Ok(())
     }
 
-    fn get_incomplete_requested_tasks(&self) -> Result<Vec<Task>> {
+    fn get_incomplete_requested_work(&self) -> Result<Vec<Task>> {
         let conn = self.open()?;
 
         // First, get all directly requested incomplete tasks
@@ -1843,6 +1845,23 @@ impl TaskStore for SqliteTaskStore {
                 }
             }
         }
+
+        // Sort by priority (ascending) then dependent count (descending)
+        result.sort_by(|a, b| {
+            let a_priority = a.priority.as_u8();
+            let b_priority = b.priority.as_u8();
+            let priority_cmp = a_priority.cmp(&b_priority);
+            if priority_cmp != std::cmp::Ordering::Equal {
+                return priority_cmp;
+            }
+            // For same priority, sort by dependent count (descending)
+            let a_deps = self.get_dependents(&a.id).map(|d| d.len()).unwrap_or(0);
+            let b_deps = self.get_dependents(&b.id).map(|d| d.len()).unwrap_or(0);
+            b_deps.cmp(&a_deps)
+        });
+
+        // Limit to top 5
+        result.truncate(5);
 
         Ok(result)
     }
@@ -3174,7 +3193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks() {
+    fn test_get_incomplete_requested_work() {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
@@ -3194,7 +3213,7 @@ mod tests {
             .unwrap();
 
         // Get incomplete requested tasks
-        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+        let incomplete = store.get_incomplete_requested_work().unwrap();
 
         // Only task1 should be returned (open and requested)
         assert_eq!(incomplete.len(), 1);
@@ -3207,7 +3226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_transitive() {
+    fn test_get_incomplete_requested_work_transitive() {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
@@ -3223,7 +3242,7 @@ mod tests {
         store.request_tasks(&[&task1.id]).unwrap();
 
         // Get incomplete requested tasks - should include task2 and task3 transitively
-        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+        let incomplete = store.get_incomplete_requested_work().unwrap();
 
         assert_eq!(incomplete.len(), 3);
         let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
@@ -3235,7 +3254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_blocked_on_question() {
+    fn test_get_incomplete_requested_work_blocked_on_question() {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
@@ -3250,7 +3269,7 @@ mod tests {
         store.link_task_to_question(&task1.id, &question.id).unwrap();
 
         // Get incomplete requested tasks - task1 should be excluded (blocked on question)
-        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+        let incomplete = store.get_incomplete_requested_work().unwrap();
 
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].id, task2.id);
@@ -3259,7 +3278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_incomplete_requested_tasks_blocked_on_question_and_dep() {
+    fn test_get_incomplete_requested_work_blocked_on_question_and_dep() {
         enable_deterministic_ids();
         let (_dir, store) = create_test_store();
 
@@ -3279,12 +3298,69 @@ mod tests {
         // Get incomplete requested tasks
         // task1 has both a question AND a dependency, so it's NOT blocked on question only
         // task2 is a transitive dependency
-        let incomplete = store.get_incomplete_requested_tasks().unwrap();
+        let incomplete = store.get_incomplete_requested_work().unwrap();
 
         assert_eq!(incomplete.len(), 2);
         let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
         assert!(ids.contains(&task1.id.as_str()));
         assert!(ids.contains(&task2.id.as_str()));
+
+        disable_deterministic_ids();
+    }
+
+    #[test]
+    fn test_get_incomplete_requested_work_ordering_and_limit() {
+        enable_deterministic_ids();
+        let (_dir, store) = create_test_store();
+
+        // Create 7 tasks with different priorities
+        let t_critical = store.create_task("Critical", "", Priority::Critical).unwrap();
+        let t_high1 = store.create_task("High 1", "", Priority::High).unwrap();
+        let t_high2 = store.create_task("High 2", "", Priority::High).unwrap();
+        let t_medium1 = store.create_task("Medium 1", "", Priority::Medium).unwrap();
+        let t_medium2 = store.create_task("Medium 2", "", Priority::Medium).unwrap();
+        let t_low = store.create_task("Low", "", Priority::Low).unwrap();
+        let t_backlog = store.create_task("Backlog", "", Priority::Backlog).unwrap();
+
+        // Make High 2 have more dependents than High 1
+        let dep1 = store.create_task("Dep of High 2 - a", "", Priority::Medium).unwrap();
+        let dep2 = store.create_task("Dep of High 2 - b", "", Priority::Medium).unwrap();
+        store.add_dependency(&dep1.id, &t_high2.id).unwrap();
+        store.add_dependency(&dep2.id, &t_high2.id).unwrap();
+
+        // Request all 7 tasks
+        store
+            .request_tasks(&[
+                &t_critical.id,
+                &t_high1.id,
+                &t_high2.id,
+                &t_medium1.id,
+                &t_medium2.id,
+                &t_low.id,
+                &t_backlog.id,
+            ])
+            .unwrap();
+
+        let incomplete = store.get_incomplete_requested_work().unwrap();
+
+        // Should be limited to 5
+        assert_eq!(incomplete.len(), 5);
+
+        // First item should be critical priority
+        assert_eq!(incomplete[0].id, t_critical.id);
+
+        // Next two should be high priority, with high2 first (more dependents)
+        assert_eq!(incomplete[1].id, t_high2.id);
+        assert_eq!(incomplete[2].id, t_high1.id);
+
+        // Then medium priority items
+        assert!(incomplete[3].priority == Priority::Medium);
+        assert!(incomplete[4].priority == Priority::Medium);
+
+        // Low and backlog should be excluded (truncated)
+        let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
+        assert!(!ids.contains(&t_low.id.as_str()));
+        assert!(!ids.contains(&t_backlog.id.as_str()));
 
         disable_deterministic_ids();
     }

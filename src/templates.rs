@@ -23,6 +23,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         include_str!("../templates/prompts/question_decision.tera"),
     );
     m.insert("prompts/code_review.tera", include_str!("../templates/prompts/code_review.tera"));
+    m.insert(
+        "prompts/emergency_stop_decision.tera",
+        include_str!("../templates/prompts/emergency_stop_decision.tera"),
+    );
 
     // Stop hook messages
     m.insert(
@@ -264,7 +268,6 @@ fn sample_context_for(template_name: &str) -> Context {
     ctx.insert("quality_output", "");
     ctx.insert("quality_check_enabled", &true);
     ctx.insert("require_push", &true);
-    ctx.insert("problem_phrase", "I have run into a problem I can't solve without user input.");
     ctx.insert(
         "human_input_phrase",
         "I have completed all work that I can and require human input to proceed.",
@@ -277,6 +280,9 @@ fn sample_context_for(template_name: &str) -> Context {
     ctx.insert("staleness_threshold", &5_u32);
     ctx.insert("task_count", &3_u32);
     ctx.insert("idle_minutes", &30_u32);
+
+    // Emergency stop
+    ctx.insert("explanation", "I cannot proceed because the API key is missing.");
 
     // Other hooks
     ctx.insert("tool_name", "Bash");
@@ -385,7 +391,7 @@ mod tests {
     fn test_embedded_template_count() {
         // Ensure we have all expected templates
         let names = embedded_template_names();
-        assert!(names.len() >= 14, "Expected at least 14 templates, got {}", names.len());
+        assert!(names.len() >= 15, "Expected at least 15 templates, got {}", names.len());
     }
 
     #[test]

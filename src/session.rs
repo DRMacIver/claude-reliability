@@ -175,6 +175,54 @@ pub fn clear_reflect_marker_with_store(store: &dyn StateStore) -> Result<()> {
     store.clear_marker(markers::MUST_REFLECT)
 }
 
+/// Check if emergency stop is active (marker exists in database).
+#[must_use]
+pub fn is_emergency_stop_active(base_dir: &Path) -> bool {
+    get_store(base_dir).map(|s| s.has_marker(markers::EMERGENCY_STOP)).unwrap_or(false)
+}
+
+/// Check if emergency stop is active using a provided store.
+#[must_use]
+pub fn is_emergency_stop_active_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::EMERGENCY_STOP)
+}
+
+/// Set the emergency stop marker.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_emergency_stop(base_dir: &Path) -> Result<()> {
+    get_store(base_dir)?.set_marker(markers::EMERGENCY_STOP)
+}
+
+/// Set the emergency stop marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_emergency_stop_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::EMERGENCY_STOP)
+}
+
+/// Clear the emergency stop marker.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_emergency_stop(base_dir: &Path) -> Result<()> {
+    get_store(base_dir)?.clear_marker(markers::EMERGENCY_STOP)
+}
+
+/// Clear the emergency stop marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_emergency_stop_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::EMERGENCY_STOP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +430,62 @@ mod tests {
 
         // Verify marker is set (database was created)
         assert!(has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_emergency_stop_not_active_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!is_emergency_stop_active(dir.path()));
+    }
+
+    #[test]
+    fn test_set_emergency_stop() {
+        let dir = TempDir::new().unwrap();
+
+        set_emergency_stop(dir.path()).unwrap();
+        assert!(is_emergency_stop_active(dir.path()));
+    }
+
+    #[test]
+    fn test_set_emergency_stop_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!is_emergency_stop_active_with_store(&store));
+
+        set_emergency_stop_with_store(&store).unwrap();
+
+        assert!(is_emergency_stop_active_with_store(&store));
+    }
+
+    #[test]
+    fn test_clear_emergency_stop() {
+        let dir = TempDir::new().unwrap();
+
+        set_emergency_stop(dir.path()).unwrap();
+        assert!(is_emergency_stop_active(dir.path()));
+
+        clear_emergency_stop(dir.path()).unwrap();
+        assert!(!is_emergency_stop_active(dir.path()));
+    }
+
+    #[test]
+    fn test_clear_emergency_stop_with_store() {
+        let store = MockStateStore::new();
+
+        set_emergency_stop_with_store(&store).unwrap();
+        assert!(is_emergency_stop_active_with_store(&store));
+
+        clear_emergency_stop_with_store(&store).unwrap();
+        assert!(!is_emergency_stop_active_with_store(&store));
+    }
+
+    #[test]
+    fn test_clear_emergency_stop_when_not_active() {
+        let dir = TempDir::new().unwrap();
+
+        // Should not error when clearing without setting
+        clear_emergency_stop(dir.path()).unwrap();
+        assert!(!is_emergency_stop_active(dir.path()));
     }
 
     #[test]

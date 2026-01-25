@@ -1,0 +1,33 @@
+{# Prompt for evaluating whether an emergency stop is legitimate.
+
+Variables:
+  - explanation: The agent's reason for wanting to stop
+#}
+You are evaluating whether an agent's request to stop working is legitimate.
+
+The agent wants to stop and gave this explanation:
+
+{{ explanation }}
+
+## Decision Criteria
+
+**ACCEPT** the stop if the agent has a genuine blocker:
+- Missing credentials or access
+- Environment issues (build tools, dependencies not available)
+- Unclear requirements that need user clarification
+- External service outage or failure
+- Genuinely stuck on a technical problem after making reasonable attempts
+
+**REJECT** the stop if:
+- The agent is complaining about having too much work to do
+- The agent wants to stop because the task list is long
+- The agent is overwhelmed but hasn't actually tried the work
+- The agent could make progress by using the "Deciding what to work on" skill to prioritize
+
+If rejecting because of too much work, tell the agent to use the "Deciding what to work on" skill to pick the most important item and focus on that.
+
+## Response Format
+
+Respond with exactly one line:
+- `ACCEPT: <optional message>` to allow the stop
+- `REJECT: <instructions for the agent>` to deny the stop and tell the agent what to do

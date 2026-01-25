@@ -19,9 +19,6 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use tera::Context;
 
-/// Magic string that allows stopping when encountering an unsolvable problem.
-pub const PROBLEM_NEEDS_USER: &str = "I have run into a problem I can't solve without user input.";
-
 /// Time window for considering user as "recently active" (minutes).
 pub const USER_RECENCY_MINUTES: u32 = 5;
 
@@ -349,29 +346,17 @@ fn check_validation_required(
 // Tier 3: Bypass Phrase Handling
 // =============================================================================
 
-/// Check for "I have run into a problem" phrase and enter problem mode.
+/// Check if an emergency stop has been requested via the `emergency_stop` MCP tool.
 ///
-/// When the agent says they've hit a problem they can't solve, enter problem mode
-/// which blocks all tool use until the next stop.
-///
-/// # Panics
-///
-/// Panics if entering problem mode fails (database error).
-fn check_problem_phrase(
-    transcript_info: &TranscriptInfo,
-    config: &StopHookConfig,
-) -> Option<StopHookResult> {
-    let output = transcript_info.last_assistant_output.as_ref()?;
-
-    if output.contains(PROBLEM_NEEDS_USER) {
-        // Enter problem mode - this blocks all tool use until next stop
-        session::enter_problem_mode(config.base_dir()).expect("failed to enter problem mode");
-        let message =
-            templates::render("messages/stop/problem_mode_activated.tera", &Context::new())
-                .expect("problem_mode_activated.tera template should always render");
-        return Some(StopHookResult::block().with_message(message));
+/// If the emergency stop marker is active, clears it and allows stopping.
+fn check_emergency_stop_exit(config: &StopHookConfig) -> Option<StopHookResult> {
+    if !session::is_emergency_stop_active(config.base_dir()) {
+        return None;
     }
-    None
+
+    // Clear the marker and allow stop
+    let _ = session::clear_emergency_stop(config.base_dir());
+    Some(StopHookResult::allow().with_message("Emergency stop activated. Allowing stop."))
 }
 
 /// Check for incomplete requested tasks that block stopping.
@@ -546,12 +531,11 @@ fn check_auto_work_tasks_block(
 ///
 /// # Check Order
 ///
-/// 1. **Tier 1 - Fast exits**: Problem mode, API errors, simple Q&A, auto-confirm commit/push
+/// 1. **Tier 1 - Fast exits**: Problem mode, emergency stop, API errors, simple Q&A, auto-confirm commit/push
 /// 2. **Tier 2 - Validation**: Run quality checks if configured
-/// 3. **Tier 3 - Bypass phrases**: Problem phrase, requested tasks, completion phrase
-/// 4. **Tier 4 - Git state**: Uncommitted changes block, unpushed commits check
-/// 5. **Tier 5 - Interactive**: Question handling with sub-agent
-/// 6. **Tier 6 - Quality & reflection**: Quality gate, reflection prompts, auto-work tasks
+/// 3. **Tier 3 - Task completion**: Requested tasks, auto-work tasks
+/// 4. **Tier 4 - Git state**: Uncommitted changes block
+/// 5. **Tier 5 - Reflection**: Reflection markers, question skip, reflection prompts
 ///
 /// Note: A clean git repo is never a reason to allow stopping - it just means
 /// git-related blocking conditions don't apply. All other checks still run.
@@ -606,6 +590,13 @@ pub fn run_stop_hook(
     }
     log.pass("problem_mode_exit", "not in problem mode");
 
+    // The agent has used the emergency_stop tool and it was accepted.
+    if let Some(r) = check_emergency_stop_exit(config) {
+        log.pass("emergency_stop_exit", "emergency stop active, allowing stop");
+        return Ok(log.into_result(r));
+    }
+    log.pass("emergency_stop_exit", "no emergency stop");
+
     // The agent has not yet done any work, and has asked a clarifying question,
     // which should be allowed automatically.
     if let Some(r) = check_simple_qa_fast_path(&transcript_info, config) {
@@ -641,15 +632,8 @@ pub fn run_stop_hook(
     log.pass("validation_required", "passed or not needed");
 
     // =========================================================================
-    // Tier 3: Bypass Phrase Handling
+    // Tier 3: Task Completion Checks
     // =========================================================================
-
-    // The agent says it has run into a problem and needs to stop.
-    if let Some(r) = check_problem_phrase(&transcript_info, config) {
-        log.pass("problem_phrase", "problem phrase detected, entering problem mode");
-        return Ok(log.into_result(r));
-    }
-    log.pass("problem_phrase", "no problem phrase");
 
     // There are outstanding requested tasks, so the agent is not allowed to stop.
     if let Some(r) = check_requested_tasks_block(&transcript_info, config) {
@@ -754,7 +738,7 @@ fn check_auto_work_tasks(
 /// A task is considered "incomplete" if it's requested and not complete/abandoned,
 /// unless it's blocked only on an unanswered question.
 fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookResult> {
-    let incomplete = tasks::get_incomplete_requested_tasks(config.base_dir());
+    let incomplete = tasks::get_incomplete_requested_work(config.base_dir());
 
     if incomplete.is_empty() {
         // No incomplete requested tasks - also clear request mode since all are done
@@ -778,9 +762,7 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
         .with_message("")
         .with_message("Please complete these tasks or, if blocked, link them to questions explaining the blocker.")
         .with_message("")
-        .with_message("If you've hit a problem you cannot solve without user input:")
-        .with_message("")
-        .with_message(format!("  \"{PROBLEM_NEEDS_USER}\""));
+        .with_message("If you've hit a problem you cannot solve without user input, use the `emergency_stop` tool.");
 
     Some(result)
 }
@@ -933,9 +915,7 @@ fn handle_uncommitted_changes(
     result.messages.push(String::new());
     result
         .messages
-        .push("If you've hit a problem you cannot solve without user input:".to_string());
-    result.messages.push(String::new());
-    result.messages.push(format!("  \"{PROBLEM_NEEDS_USER}\""));
+        .push("If you've hit a problem you cannot solve without user input, use the `emergency_stop` tool.".to_string());
 
     Ok(result)
 }
@@ -1794,9 +1774,38 @@ mod tests {
     }
 
     #[test]
-    fn test_problem_needs_user_constant() {
-        assert!(PROBLEM_NEEDS_USER.contains("problem"));
-        assert!(PROBLEM_NEEDS_USER.contains("user input"));
+    fn test_emergency_stop_exit_when_active() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // Set emergency stop marker
+        crate::session::set_emergency_stop(dir.path()).unwrap();
+        assert!(crate::session::is_emergency_stop_active(dir.path()));
+
+        // Should allow stop
+        let result = check_emergency_stop_exit(&config);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.allow_stop);
+
+        // Marker should be cleared
+        assert!(!crate::session::is_emergency_stop_active(dir.path()));
+    }
+
+    #[test]
+    fn test_emergency_stop_exit_when_not_active() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let config =
+            StopHookConfig { base_dir: Some(dir.path().to_path_buf()), ..Default::default() };
+
+        // No emergency stop marker
+        let result = check_emergency_stop_exit(&config);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -2186,10 +2195,10 @@ mod tests {
     }
 
     #[test]
-    fn test_bypass_problem_phrase_enters_problem_mode() {
+    fn test_emergency_stop_allows_stop_in_run_stop_hook() {
         use tempfile::TempDir;
 
-        let transcript_file = create_transcript_with_output(PROBLEM_NEEDS_USER);
+        let transcript_file = create_transcript_with_output("some output");
         let runner = mock_with_uncommitted_for_bypass();
         let sub_agent = MockSubAgent::new();
 
@@ -2204,12 +2213,14 @@ mod tests {
             ..Default::default()
         };
 
+        // Set emergency stop marker
+        crate::session::set_emergency_stop(dir.path()).unwrap();
+
         let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
-        // Problem phrase now blocks and enters problem mode
-        assert!(!result.allow_stop);
-        assert!(result.messages.iter().any(|m| m.contains("Problem Mode")));
-        // Verify problem mode marker was created
-        assert!(crate::session::is_problem_mode_active(dir.path()));
+        // Emergency stop should allow stopping
+        assert!(result.allow_stop);
+        // Marker should be cleared
+        assert!(!crate::session::is_emergency_stop_active(dir.path()));
     }
 
     #[test]
