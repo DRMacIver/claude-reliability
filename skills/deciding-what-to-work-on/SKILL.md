@@ -54,22 +54,18 @@ Some items unblock others. Prioritize items that are blocking other work:
 get_work_item(id="...") # Check what items this one blocks
 ```
 
-## When User is Away
+## Work Autonomously
 
-If the user hasn't been active:
+**You do not need user guidance on priorities.** The priority system (P0-P4) tells you what to work on. Use `what_should_i_work_on` and follow its suggestion.
 
-1. **Avoid big decisions** - Stick to well-defined items
-2. **Prefer cleanup** - Tests, docs, small fixes
-3. **Don't start new features** - Unless explicitly requested
-4. **Check the work list** - User may have left work queued
+**Large backlogs are normal.** Having many open tasks doesn't mean anything is wrong. Just work through them one at a time. Don't ask which subset to focus on - the priority system handles this.
 
-## When User is Active
+**Report genuine blockers.** Use `create_question` only for things that actually block progress:
+- Missing information needed to proceed
+- Conflicting requirements that need clarification
+- Decisions only the user can make
 
-If the user is present:
-
-1. **Ask about priorities** - "Should I continue with X or switch to Y?"
-2. **Report blockers** - Use `create_question` to document blockers
-3. **Confirm big changes** - Before major refactoring, verify direction
+**Don't use emergency_stop for "too much work".** Emergency stop is for genuine blockers that prevent ANY progress. A large backlog is not a blocker.
 
 ## Workflow
 

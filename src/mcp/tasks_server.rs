@@ -38,6 +38,14 @@ const INSTRUCTIONS: &str = r#"Work tracking server. Use these tools to create, u
 
 **Blocked tasks will wait.** If a task is blocked by dependencies, work on something else. When the dependencies are completed, the blocked task will become available.
 
+## Autonomous Work
+
+**You do not need user guidance on priorities.** The priority system (P0-P4) tells you what to work on. Use `what_should_i_work_on` to get the next task - don't ask the user which task to do.
+
+**Never use emergency_stop for "too much work".** Emergency stop is for genuine blockers like missing credentials, environment issues, or unclear requirements that prevent ANY progress. Having many tasks in the backlog is NOT a blocker - just work through them.
+
+**Sessions can end naturally.** When context runs out or you've made good progress, it's fine to stop. Work will continue in the next session. You don't need to complete everything in one session.
+
 ## Bulk Operations
 
 When working with multiple work items, use the bulk-tasks binary for better performance:
