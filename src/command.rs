@@ -5,6 +5,15 @@ use crate::traits::{CommandOutput, CommandRunner};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// Format a command and its arguments into a string for error messages.
+pub fn format_command(program: &str, args: &[&str]) -> String {
+    if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, args.join(" "))
+    }
+}
+
 /// ETXTBSY error code (errno 26 on Linux).
 /// This error occurs when trying to execute a file that is currently being written.
 const ETXTBSY: i32 = 26;
@@ -36,6 +45,51 @@ where
     }
 }
 
+/// Wait for a child process with a timeout.
+///
+/// Polls the child every 100ms until it exits or the timeout expires.
+/// If the timeout expires, kills the child and returns an error.
+fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+    program: &str,
+    args: &[&str],
+) -> Result<std::process::Output> {
+    use crate::error::Error;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    loop {
+        // Use ? to propagate io::Error via the From trait (which is tested elsewhere)
+        if let Some(status) = child.try_wait()? {
+            // Child has exited - collect output
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(ref mut out) = child.stdout {
+                std::io::Read::read_to_end(out, &mut stdout)?;
+            }
+            if let Some(ref mut err) = child.stderr {
+                std::io::Read::read_to_end(err, &mut stderr)?;
+            }
+            return Ok(std::process::Output { status, stdout, stderr });
+        }
+        // Still running - check timeout
+        if start.elapsed() >= timeout {
+            // Timeout expired - kill the child
+            let _ = child.kill();
+            let _ = child.wait(); // Reap the zombie
+
+            return Err(Error::CommandTimeout {
+                command: format_command(program, args),
+                timeout_secs: timeout.as_secs(),
+            });
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
 /// Real command runner that executes shell commands.
 #[derive(Debug, Default, Clone)]
 pub struct RealCommandRunner;
@@ -58,13 +112,14 @@ impl CommandRunner for RealCommandRunner {
         let mut command = Command::new(program);
         command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let child = spawn_with_etxtbsy_retry(|| command.spawn())?;
+        let mut child = spawn_with_etxtbsy_retry(|| command.spawn())?;
 
         // Handle timeout if specified
-        // Note: For now, we don't actually implement timeout - that would require
-        // spawning a separate thread or using async. We just use blocking wait.
-        let _ = timeout; // Acknowledge the parameter
-        let output = child.wait_with_output()?;
+        let output = if let Some(timeout_duration) = timeout {
+            wait_with_timeout(&mut child, timeout_duration, program, args)?
+        } else {
+            child.wait_with_output()?
+        };
 
         let exit_code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -192,5 +247,68 @@ mod tests {
     fn test_etxtbsy_constant() {
         // Verify the ETXTBSY constant is correct for Linux
         assert_eq!(ETXTBSY, 26);
+    }
+
+    #[test]
+    fn test_run_with_timeout_fast_command() {
+        // A fast command should complete well before the timeout
+        let runner = RealCommandRunner::new();
+        let output = runner.run("echo", &["hello"], Some(Duration::from_secs(10))).unwrap();
+        assert!(output.success());
+        assert_eq!(output.stdout.trim(), "hello");
+    }
+
+    #[test]
+    fn test_run_with_timeout_command_times_out() {
+        // A slow command should be killed when timeout expires
+        let runner = RealCommandRunner::new();
+        let result = runner.run("sleep", &["10"], Some(Duration::from_millis(100)));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(err_str.contains("timed out"), "Error should mention timeout: {err_str}");
+    }
+
+    #[test]
+    fn test_format_command_empty_args() {
+        // Test format_command with empty args
+        let result = super::format_command("test_program", &[]);
+        assert_eq!(result, "test_program");
+    }
+
+    #[test]
+    fn test_format_command_with_args() {
+        // Test format_command with args
+        let result = super::format_command("echo", &["hello", "world"]);
+        assert_eq!(result, "echo hello world");
+    }
+
+    #[test]
+    fn test_run_with_timeout_empty_args_via_timeout_runner() {
+        // Test that TimeoutCommandRunner correctly formats command without args
+        use crate::testing::TimeoutCommandRunner;
+        let runner = TimeoutCommandRunner::new(300);
+        // Test with empty args
+        let result = runner.run("test_program", &[], None);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(err_str.contains("timed out"), "Error should mention timeout: {err_str}");
+        // Error message should just be the program name without args
+        assert!(
+            err_str.contains("'test_program'"),
+            "Error should show command without args: {err_str}"
+        );
+    }
+
+    #[test]
+    fn test_run_without_timeout_waits_indefinitely() {
+        // Without a timeout, should wait for the command to complete
+        let runner = RealCommandRunner::new();
+        // Use a command that takes a bit but not too long
+        let output = runner.run("sleep", &["0.1"], None).unwrap();
+        assert!(output.success());
     }
 }

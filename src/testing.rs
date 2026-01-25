@@ -204,6 +204,40 @@ impl CommandRunner for FailingCommandRunner {
     }
 }
 
+/// A command runner that returns timeout errors, for testing timeout handling.
+#[derive(Debug, Default)]
+pub struct TimeoutCommandRunner {
+    timeout_secs: u64,
+}
+
+impl TimeoutCommandRunner {
+    /// Create a new timeout command runner with the specified timeout duration.
+    #[must_use]
+    pub const fn new(timeout_secs: u64) -> Self {
+        Self { timeout_secs }
+    }
+}
+
+impl CommandRunner for TimeoutCommandRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        _timeout: Option<Duration>,
+    ) -> Result<CommandOutput> {
+        use crate::command::format_command;
+        use crate::error::Error;
+        Err(Error::CommandTimeout {
+            command: format_command(program, args),
+            timeout_secs: self.timeout_secs,
+        })
+    }
+
+    fn is_available(&self, _program: &str) -> bool {
+        true
+    }
+}
+
 /// A sub-agent that always fails, for testing error paths.
 #[derive(Debug, Default)]
 pub struct FailingSubAgent {
@@ -693,6 +727,17 @@ mod tests {
         let result = runner.run("any", &["args"], None);
         assert!(result.is_err());
         assert!(!runner.is_available("any"));
+    }
+
+    #[test]
+    fn test_timeout_command_runner() {
+        let runner = TimeoutCommandRunner::new(300);
+        let result = runner.run("any", &["args"], None);
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("timed out"), "Expected timeout error: {err_str}");
+        assert!(err_str.contains("300"), "Expected timeout seconds: {err_str}");
+        assert!(runner.is_available("any"));
     }
 
     #[test]

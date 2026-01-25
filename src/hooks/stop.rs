@@ -6,7 +6,7 @@
 //! - Interactive question handling with sub-agent
 //! - Task completion tracking
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
@@ -17,10 +17,14 @@ use crate::traits::{CommandRunner, QuestionContext, SubAgent, SubAgentDecision};
 use crate::transcript::{self, is_simple_question, TranscriptInfo};
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tera::Context;
 
 /// Time window for considering user as "recently active" (minutes).
 pub const USER_RECENCY_MINUTES: u32 = 5;
+
+/// Timeout for quality check commands (5 minutes).
+pub const QUALITY_CHECK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Accumulator for tracking which checks have been run and their results.
 #[derive(Debug, Default)]
@@ -309,8 +313,29 @@ fn check_validation_required(
         return Ok(None);
     };
 
-    // Run the validation command
-    let output = runner.run("sh", &["-c", check_cmd], None)?;
+    // Run the validation command with timeout
+    let output = match runner.run("sh", &["-c", check_cmd], Some(QUALITY_CHECK_TIMEOUT)) {
+        Ok(output) => output,
+        Err(Error::CommandTimeout { command, timeout_secs }) => {
+            // Timeout - block exit with special message
+            let result = StopHookResult::block()
+                .with_message("# Quality Check Timeout")
+                .with_message("")
+                .with_message(format!(
+                    "The quality check command `{command}` took longer than {} minutes and was stopped.",
+                    timeout_secs / 60
+                ))
+                .with_message("")
+                .with_message("This indicates a problem that needs to be fixed:")
+                .with_message("- The check command may be hanging or stuck")
+                .with_message("- There may be an infinite loop or deadlock")
+                .with_message("- The test suite may have a performance regression")
+                .with_message("")
+                .with_message("Please investigate and fix the issue before continuing.");
+            return Ok(Some(result));
+        }
+        Err(e) => return Err(e),
+    };
 
     if output.exit_code != 0 {
         // Validation failed - block exit
@@ -822,13 +847,26 @@ fn handle_uncommitted_changes(
     // Run quality checks if enabled
     let mut quality_output = String::new();
     let mut quality_passed = true;
+    let mut quality_timed_out = false;
     if config.quality_check_enabled {
         if let Some(ref cmd) = config.quality_check_command {
             result.messages.push("# Running Quality Checks...".to_string());
             result.messages.push(String::new());
-            let output = runner.run("sh", &["-c", cmd], None)?;
-            quality_passed = output.success();
-            quality_output = output.combined_output();
+            match runner.run("sh", &["-c", cmd], Some(QUALITY_CHECK_TIMEOUT)) {
+                Ok(output) => {
+                    quality_passed = output.success();
+                    quality_output = output.combined_output();
+                }
+                Err(Error::CommandTimeout { timeout_secs, .. }) => {
+                    quality_passed = false;
+                    quality_timed_out = true;
+                    quality_output = format!(
+                        "Quality check timed out after {} minutes. This indicates a problem that needs to be fixed.",
+                        timeout_secs / 60
+                    );
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -842,16 +880,29 @@ fn handle_uncommitted_changes(
 
     // Show quality check results
     if !quality_passed {
-        result.messages.push("## Quality Issues".to_string());
-        result.messages.push(String::new());
-        result
-            .messages
-            .push("Quality checks found issues. Please fix them - leaving the codebase in good shape is part of doing great work.".to_string());
-        result.messages.push(String::new());
-        if !quality_output.is_empty() {
-            result.messages.push("### Output:".to_string());
+        if quality_timed_out {
+            result.messages.push("## Quality Check Timeout".to_string());
             result.messages.push(String::new());
-            result.messages.push(truncate_output(&quality_output, 50));
+            result
+                .messages
+                .push("The quality check command took too long and was stopped.".to_string());
+            result.messages.push(String::new());
+            result.messages.push("This indicates a problem that needs to be fixed:".to_string());
+            result.messages.push("- The check command may be hanging or stuck".to_string());
+            result.messages.push("- There may be an infinite loop or deadlock".to_string());
+            result.messages.push("- The test suite may have a performance regression".to_string());
+        } else {
+            result.messages.push("## Quality Issues".to_string());
+            result.messages.push(String::new());
+            result
+                .messages
+                .push("Quality checks found issues. Please fix them - leaving the codebase in good shape is part of doing great work.".to_string());
+            result.messages.push(String::new());
+            if !quality_output.is_empty() {
+                result.messages.push("### Output:".to_string());
+                result.messages.push(String::new());
+                result.messages.push(truncate_output(&quality_output, 50));
+            }
         }
     }
 
@@ -3695,5 +3746,146 @@ mod tests {
         let runner = MockCommandRunner::new();
         let result = check_validation_required(&config, &runner).unwrap();
         assert!(result.is_none(), "Expected None when no quality_check_command configured");
+    }
+
+    #[test]
+    fn test_check_validation_required_timeout_blocks_stop() {
+        use crate::testing::TimeoutCommandRunner;
+
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        // Set the validation marker
+        session::set_needs_validation(dir.path()).unwrap();
+
+        // Use a runner that always returns timeout
+        let runner = TimeoutCommandRunner::new(300);
+        let result = check_validation_required(&config, &runner).unwrap();
+
+        assert!(result.is_some(), "Expected Some result when timeout occurs");
+        let result = result.unwrap();
+        assert!(!result.allow_stop, "Should block stop on timeout");
+        assert!(
+            result.messages.iter().any(|m| m.contains("Quality Check Timeout")),
+            "Expected 'Quality Check Timeout' message but got: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("5 minutes")),
+            "Expected '5 minutes' in message but got: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_handle_uncommitted_changes_timeout_shows_message() {
+        use crate::git::{GitStatus, UncommittedChanges};
+        use crate::testing::{MockSubAgent, TimeoutCommandRunner};
+
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        let git_status = GitStatus {
+            uncommitted: UncommittedChanges {
+                has_unstaged: true,
+                has_staged: false,
+                has_untracked: false,
+            },
+            unstaged_files: vec!["modified.rs".to_string()],
+            ..Default::default()
+        };
+
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+        let runner = TimeoutCommandRunner::new(300);
+
+        let result =
+            handle_uncommitted_changes(&git_status, &config, &runner, &transcript_info, &sub_agent)
+                .unwrap();
+
+        assert!(!result.allow_stop, "Should block stop");
+        assert!(
+            result.messages.iter().any(|m| m.contains("Quality Check Timeout")),
+            "Expected 'Quality Check Timeout' message but got: {:?}",
+            result.messages
+        );
+        assert!(
+            result.messages.iter().any(|m| m.contains("hanging or stuck")),
+            "Expected 'hanging or stuck' in message but got: {:?}",
+            result.messages
+        );
+    }
+
+    #[test]
+    fn test_check_validation_required_command_error_propagates() {
+        use crate::testing::FailingCommandRunner;
+
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        // Set the validation marker
+        session::set_needs_validation(dir.path()).unwrap();
+
+        // Use a runner that always returns an error (not a timeout)
+        let runner = FailingCommandRunner::new("simulated command failure");
+        let result = check_validation_required(&config, &runner);
+
+        assert!(result.is_err(), "Expected error to propagate");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("simulated command failure"),
+            "Expected error message to contain 'simulated command failure' but got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_handle_uncommitted_changes_command_error_propagates() {
+        use crate::git::{GitStatus, UncommittedChanges};
+        use crate::testing::{FailingCommandRunner, MockSubAgent};
+
+        let dir = TempDir::new().unwrap();
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            quality_check_enabled: true,
+            quality_check_command: Some("just check".to_string()),
+            ..Default::default()
+        };
+
+        let git_status = GitStatus {
+            uncommitted: UncommittedChanges {
+                has_unstaged: true,
+                has_staged: false,
+                has_untracked: false,
+            },
+            unstaged_files: vec!["modified.rs".to_string()],
+            ..Default::default()
+        };
+
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+        let runner = FailingCommandRunner::new("simulated command failure");
+
+        let result =
+            handle_uncommitted_changes(&git_status, &config, &runner, &transcript_info, &sub_agent);
+
+        assert!(result.is_err(), "Expected error to propagate");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("simulated command failure"),
+            "Expected error message to contain 'simulated command failure' but got: {err}"
+        );
     }
 }
