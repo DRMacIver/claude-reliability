@@ -131,6 +131,13 @@ fn create_user_message_task(
         let _ = write!(description, "\n\nTranscript: {path}");
     }
 
+    // Add reminder guidance
+    description.push_str(
+        "\n\n---\n\
+         If you notice patterns that would benefit from a reminder, consider \
+         suggesting the user add one to `.claude-reliability/reminders.yaml`.",
+    );
+
     let task = store.create_task(&title, &description, Priority::Backlog)?;
 
     // Mark as requested so the agent must verify it's addressed
@@ -392,6 +399,20 @@ mod tests {
         let tasks = store.list_tasks(TaskFilter::default()).unwrap();
         assert_eq!(tasks.len(), 1);
         assert!(!tasks[0].description.contains("Transcript:"));
+    }
+
+    #[test]
+    fn test_create_user_message_work_item_includes_reminder_guidance() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        create_user_message_work_item("Test prompt", None, base);
+
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].description.contains("reminders.yaml"));
+        assert!(tasks[0].description.contains("reminder"));
     }
 
     #[test]

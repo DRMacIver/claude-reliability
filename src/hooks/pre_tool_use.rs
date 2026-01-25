@@ -7,9 +7,11 @@ use crate::hooks::{
     plan_tasks, run_code_review_hook, run_problem_mode_hook, run_protect_config_hook,
     run_require_task_hook, run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
 };
+use crate::reminders;
 use crate::subagent::RealSubAgent;
 use crate::templates;
 use crate::traits::{CommandRunner, SubAgent};
+use crate::transcript;
 use std::path::Path;
 use tera::Context;
 
@@ -104,8 +106,29 @@ pub fn run_pre_tool_use_with_sub_agent(
         }
     }
 
-    // All hooks passed
-    PreToolUseOutput::allow(None)
+    // All hooks passed - check for reminders
+    let context = get_reminder_context(input, base_dir);
+    PreToolUseOutput::allow(context)
+}
+
+/// Get reminder context from the last assistant output in the transcript.
+///
+/// Returns `None` if:
+/// - No transcript path is provided
+/// - The transcript cannot be parsed
+/// - No assistant output exists
+/// - No reminders match
+fn get_reminder_context(input: &HookInput, base_dir: &Path) -> Option<String> {
+    let transcript_path = input.transcript_path.as_ref()?;
+    let info = transcript::parse_transcript(Path::new(transcript_path)).ok()?;
+    let assistant_output = info.last_assistant_output.as_ref()?;
+
+    let reminder_messages = reminders::check_reminders(assistant_output, base_dir);
+    if reminder_messages.is_empty() {
+        return None;
+    }
+
+    Some(reminder_messages.join("\n\n"))
 }
 
 /// Handle `ExitPlanMode` by creating tasks from the plan file.
@@ -445,5 +468,149 @@ mod tests {
         let store = SqliteTaskStore::for_project(dir.path()).unwrap();
         let tasks = store.list_tasks(TaskFilter::default()).unwrap();
         assert_eq!(tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_pre_tool_use_includes_reminder_context() {
+        use crate::paths::project_data_dir;
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        // Create reminders.yaml
+        let data_dir = project_data_dir(dir.path());
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let reminders_path = data_dir.join("reminders.yaml");
+        let mut file = std::fs::File::create(&reminders_path).unwrap();
+        file.write_all(
+            br#"
+reminders:
+  - message: "Reminder: Handle edge cases carefully"
+    patterns:
+      - "edge case"
+"#,
+        )
+        .unwrap();
+
+        // Create a transcript file with assistant output that matches
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "We should consider this edge case"}]}}
+"#,
+        )
+        .unwrap();
+
+        // Clear reminder cache to ensure fresh load
+        crate::reminders::clear_cache();
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: None,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        let context = output.hook_specific_output.additional_context.unwrap();
+        assert!(context.contains("Handle edge cases carefully"));
+    }
+
+    #[test]
+    fn test_pre_tool_use_no_reminders_when_no_match() {
+        use crate::paths::project_data_dir;
+        use std::io::Write;
+
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        // Create reminders.yaml
+        let data_dir = project_data_dir(dir.path());
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let reminders_path = data_dir.join("reminders.yaml");
+        let mut file = std::fs::File::create(&reminders_path).unwrap();
+        file.write_all(
+            br#"
+reminders:
+  - message: "Handle edge cases"
+    patterns:
+      - "edge case"
+"#,
+        )
+        .unwrap();
+
+        // Create a transcript file with assistant output that doesn't match
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "This is a normal response"}]}}
+"#,
+        )
+        .unwrap();
+
+        // Clear reminder cache
+        crate::reminders::clear_cache();
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: None,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        assert!(output.hook_specific_output.additional_context.is_none());
+    }
+
+    #[test]
+    fn test_get_reminder_context_no_transcript() {
+        let dir = TempDir::new().unwrap();
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: None,
+            transcript_path: None,
+        };
+
+        let context = get_reminder_context(&input, dir.path());
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_get_reminder_context_invalid_transcript() {
+        let dir = TempDir::new().unwrap();
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: None,
+            transcript_path: Some("/nonexistent/transcript.jsonl".to_string()),
+        };
+
+        let context = get_reminder_context(&input, dir.path());
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_get_reminder_context_no_assistant_output() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a transcript file with only user message
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z"}
+"#,
+        )
+        .unwrap();
+
+        let input = HookInput {
+            tool_name: Some("Read".to_string()),
+            tool_input: None,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+        };
+
+        let context = get_reminder_context(&input, dir.path());
+        assert!(context.is_none());
     }
 }

@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod paths;
 pub mod question;
+pub mod reminders;
 pub mod session;
 pub mod storage;
 pub mod subagent;
