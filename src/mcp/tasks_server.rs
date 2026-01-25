@@ -83,6 +83,9 @@ How-to guides capture reusable procedures that can be linked to work items. When
 - Multiple work items can share the same how-to guide
 "#;
 
+/// Default result limit for list/search operations to prevent oversized responses.
+const DEFAULT_RESULT_LIMIT: usize = 50;
+
 /// MCP server for task management.
 #[derive(Clone)]
 pub struct TasksServer {
@@ -217,6 +220,8 @@ pub struct AddNoteInput {
 pub struct GetNotesInput {
     /// Work item ID.
     pub work_item_id: String,
+    /// Maximum number of notes to return (optional, default 50).
+    pub limit: Option<usize>,
 }
 
 /// Input for searching work items.
@@ -224,6 +229,8 @@ pub struct GetNotesInput {
 pub struct SearchWorkItemsInput {
     /// Search query.
     pub query: String,
+    /// Maximum number of results to return (optional, default 50).
+    pub limit: Option<usize>,
 }
 
 /// Input for getting audit log.
@@ -275,6 +282,8 @@ pub struct DeleteHowToInput {
 pub struct SearchHowTosInput {
     /// Search query.
     pub query: String,
+    /// Maximum number of results to return (optional, default 50).
+    pub limit: Option<usize>,
 }
 
 /// Input for linking a work item to a how-to.
@@ -331,6 +340,8 @@ pub struct ListQuestionsInput {
     /// If true, only return unanswered questions.
     #[serde(default)]
     pub unanswered_only: bool,
+    /// Maximum number of questions to return (optional, default 50).
+    pub limit: Option<usize>,
 }
 
 /// Input for searching questions.
@@ -338,6 +349,8 @@ pub struct ListQuestionsInput {
 pub struct SearchQuestionsInput {
     /// Search query.
     pub query: String,
+    /// Maximum number of results to return (optional, default 50).
+    pub limit: Option<usize>,
 }
 
 /// Input for linking a work item to a question.
@@ -516,6 +529,36 @@ const fn priority_label(priority: Priority) -> &'static str {
         Priority::Medium => "medium",
         Priority::Low => "low",
         Priority::Backlog => "backlog",
+    }
+}
+
+/// Apply a result limit, returning the truncated items and the total count.
+fn apply_limit<T>(items: Vec<T>, limit: Option<usize>) -> (Vec<T>, usize) {
+    let total = items.len();
+    let max = limit.unwrap_or(DEFAULT_RESULT_LIMIT);
+    if total <= max {
+        (items, total)
+    } else {
+        (items.into_iter().take(max).collect(), total)
+    }
+}
+
+/// Format a JSON response with optional truncation notice.
+fn format_list_response<T: Serialize>(
+    items: &[T],
+    total: usize,
+) -> Result<String, serde_json::Error> {
+    if total > items.len() {
+        // Wrap in an object with metadata
+        let wrapper = serde_json::json!({
+            "items": items,
+            "showing": items.len(),
+            "total": total,
+            "truncated": true,
+        });
+        serde_json::to_string_pretty(&wrapper)
+    } else {
+        serde_json::to_string_pretty(items)
     }
 }
 
@@ -715,7 +758,7 @@ impl TasksServer {
             priority,
             max_priority,
             ready_only: input.ready_only,
-            limit: input.limit,
+            limit: Some(input.limit.unwrap_or(DEFAULT_RESULT_LIMIT)),
             offset: input.offset,
         };
 
@@ -805,12 +848,14 @@ impl TasksServer {
             .get_notes(&input.work_item_id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (notes, total) = apply_limit(notes, input.limit);
+
         let outputs: Vec<_> = notes
             .into_iter()
             .map(|n| NoteOutput { id: n.id, content: n.content, created_at: n.created_at })
             .collect();
 
-        let json = serde_json::to_string_pretty(&outputs)
+        let json = format_list_response(&outputs, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -827,6 +872,8 @@ impl TasksServer {
             .search_tasks(&input.query)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (tasks, total) = apply_limit(tasks, input.limit);
+
         let outputs: Vec<_> = tasks
             .iter()
             .map(|t| {
@@ -836,7 +883,7 @@ impl TasksServer {
             })
             .collect();
 
-        let json = serde_json::to_string_pretty(&outputs)
+        let json = format_list_response(&outputs, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -848,9 +895,10 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: GetAuditLogInput,
     ) -> Result<CallToolResult, McpError> {
+        let limit = Some(input.limit.unwrap_or(DEFAULT_RESULT_LIMIT));
         let entries = self
             .store
-            .get_audit_log(input.work_item_id.as_deref(), input.limit)
+            .get_audit_log(input.work_item_id.as_deref(), limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let json = serde_json::to_string_pretty(&entries)
@@ -1009,9 +1057,10 @@ impl TasksServer {
         let howtos =
             self.store.list_howtos().map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (howtos, total) = apply_limit(howtos, None);
         let outputs: Vec<_> = howtos.iter().map(HowToOutput::from_howto).collect();
 
-        let json = serde_json::to_string_pretty(&outputs)
+        let json = format_list_response(&outputs, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1028,9 +1077,10 @@ impl TasksServer {
             .search_howtos(&input.query)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (howtos, total) = apply_limit(howtos, input.limit);
         let outputs: Vec<_> = howtos.iter().map(HowToOutput::from_howto).collect();
 
-        let json = serde_json::to_string_pretty(&outputs)
+        let json = format_list_response(&outputs, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1179,9 +1229,11 @@ impl TasksServer {
             .list_questions(input.unanswered_only)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (questions, total) = apply_limit(questions, input.limit);
         let output: Vec<QuestionOutput> =
             questions.iter().map(QuestionOutput::from_question).collect();
-        let json = serde_json::to_string_pretty(&output)
+
+        let json = format_list_response(&output, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1198,9 +1250,11 @@ impl TasksServer {
             .search_questions(&input.query)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (questions, total) = apply_limit(questions, input.limit);
         let output: Vec<QuestionOutput> =
             questions.iter().map(QuestionOutput::from_question).collect();
-        let json = serde_json::to_string_pretty(&output)
+
+        let json = format_list_response(&output, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1277,6 +1331,7 @@ impl TasksServer {
             .get_question_blocked_tasks()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        let (tasks, total) = apply_limit(tasks, None);
         let output: Vec<WorkItemOutput> = tasks
             .iter()
             .map(|t| {
@@ -1285,7 +1340,8 @@ impl TasksServer {
                 WorkItemOutput::from_task(t, deps, guidance)
             })
             .collect();
-        let json = serde_json::to_string_pretty(&output)
+
+        let json = format_list_response(&output, total)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
