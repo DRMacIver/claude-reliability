@@ -73,6 +73,7 @@ pub struct TranscriptEntry {
 const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "WebFetch", "WebSearch", "LS"];
 
 /// Parsed transcript information.
+#[allow(clippy::struct_excessive_bools)] // Bools represent independent flags, not a state machine
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptInfo {
     /// The last assistant output text.
@@ -83,6 +84,9 @@ pub struct TranscriptInfo {
     pub has_api_error: bool,
     /// Count of consecutive API errors at the end of the transcript.
     pub consecutive_api_errors: u32,
+    /// Whether the last API error was a 529 overloaded error.
+    /// These are transient and should be retried with backoff.
+    pub last_error_is_overloaded: bool,
     /// Whether the transcript contains any modifying (non-Read) tool uses.
     pub has_modifying_tool_use: bool,
     /// Whether the transcript contains any modifying tool uses since the last user message.
@@ -135,9 +139,12 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
         if is_api_error {
             info.has_api_error = true;
             info.consecutive_api_errors += 1;
+            // Track if this error is specifically an overloaded error
+            info.last_error_is_overloaded = is_overloaded_error(&entry);
         } else if entry.entry_type == "assistant" && !entry.is_api_error_message {
             // A valid (non-error) assistant message resets the consecutive counter
             info.consecutive_api_errors = 0;
+            info.last_error_is_overloaded = false;
         }
 
         match entry.entry_type.as_str() {
@@ -216,37 +223,59 @@ pub fn parse_transcript(path: &Path) -> Result<TranscriptInfo> {
     Ok(info)
 }
 
+/// Extract text content from a transcript entry.
+fn extract_texts(entry: &TranscriptEntry) -> Vec<&str> {
+    entry.message.as_ref().map_or_else(Vec::new, |message| match &message.content {
+        MessageContent::Text(text) => vec![text.as_str()],
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| {
+                if let ContentBlock::Text { text } = b {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    })
+}
+
+/// Check if an entry contains a 529 overloaded API error.
+/// These are transient errors that should be retried with backoff.
+fn is_overloaded_error(entry: &TranscriptEntry) -> bool {
+    for text in extract_texts(entry) {
+        // Check for 529 status code with overloaded_error type
+        if text.contains("API Error:") && text.contains("529") {
+            return true;
+        }
+        if text.contains("overloaded_error") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if an entry contains API error text patterns.
 fn is_api_error_text(entry: &TranscriptEntry) -> bool {
-    if let Some(message) = &entry.message {
-        let texts_to_check: Vec<&str> = match &message.content {
-            MessageContent::Text(text) => vec![text.as_str()],
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| {
-                    if let ContentBlock::Text { text } = b {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        };
-
-        for text in texts_to_check {
-            // Check for common API error patterns
-            if text.contains("API Error:") && text.contains("400") {
-                return true;
-            }
-            if text.contains("thinking")
-                && text.contains("blocks")
-                && text.contains("cannot be modified")
-            {
-                return true;
-            }
-            if text.contains("invalid_request_error") {
-                return true;
-            }
+    for text in extract_texts(entry) {
+        // Check for common API error patterns
+        if text.contains("API Error:") && text.contains("400") {
+            return true;
+        }
+        if text.contains("API Error:") && text.contains("529") {
+            return true;
+        }
+        if text.contains("thinking")
+            && text.contains("blocks")
+            && text.contains("cannot be modified")
+        {
+            return true;
+        }
+        if text.contains("invalid_request_error") {
+            return true;
+        }
+        if text.contains("overloaded_error") {
+            return true;
         }
     }
     false
@@ -412,6 +441,7 @@ also not json
             last_user_message_time: Some(Utc::now()),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -427,6 +457,7 @@ also not json
             last_user_message_time: Some(Utc::now() - chrono::Duration::minutes(10)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -696,6 +727,116 @@ also not json
             is_api_error_message: false,
         };
         assert!(!is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_529_overloaded() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+                }]),
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_api_error_text_overloaded_without_prefix() {
+        // Test overloaded_error detection without "API Error:" prefix
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+                }]),
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_api_error_text(&entry));
+    }
+
+    #[test]
+    fn test_is_overloaded_error_529() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+                }]),
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_overloaded_error(&entry));
+    }
+
+    #[test]
+    fn test_is_overloaded_error_type() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+                }]),
+            }),
+            is_api_error_message: false,
+        };
+        assert!(is_overloaded_error(&entry));
+    }
+
+    #[test]
+    fn test_is_not_overloaded_error_400() {
+        let entry = TranscriptEntry {
+            entry_type: "assistant".to_string(),
+            timestamp: None,
+            message: Some(Message {
+                content: MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: "API Error: 400 something went wrong".to_string(),
+                }]),
+            }),
+            is_api_error_message: false,
+        };
+        assert!(!is_overloaded_error(&entry));
+    }
+
+    #[test]
+    fn test_parse_transcript_overloaded_error_tracking() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 1);
+        assert!(info.last_error_is_overloaded);
+    }
+
+    #[test]
+    fn test_parse_transcript_non_overloaded_error_tracking() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "API Error: 400 bad request"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 1);
+        assert!(!info.last_error_is_overloaded);
+    }
+
+    #[test]
+    fn test_parse_transcript_overloaded_error_reset_by_success() {
+        let content = r#"{"type": "assistant", "message": {"content": [{"type": "text", "text": "API Error: 529 overloaded_error"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Success!"}]}}
+"#;
+        let file = create_temp_transcript(content);
+        let info = parse_transcript(file.path()).unwrap();
+        assert!(info.has_api_error);
+        assert_eq!(info.consecutive_api_errors, 0);
+        assert!(!info.last_error_is_overloaded);
     }
 
     #[test]

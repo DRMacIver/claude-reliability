@@ -227,14 +227,118 @@ fn check_problem_mode_exit(config: &StopHookConfig) -> Option<StopHookResult> {
     None
 }
 
+/// Default base backoff time for overloaded errors (5 seconds).
+const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
+
+/// Default maximum backoff time for overloaded errors (2 minutes).
+const DEFAULT_BACKOFF_MAX_SECS: u64 = 120;
+
+/// Configuration for overloaded error backoff.
+#[derive(Debug, Clone, Copy)]
+pub struct BackoffConfig {
+    /// Base backoff time in seconds.
+    pub base_secs: u64,
+    /// Maximum total wait time in seconds before allowing stop.
+    pub max_secs: u64,
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self { base_secs: DEFAULT_BACKOFF_BASE_SECS, max_secs: DEFAULT_BACKOFF_MAX_SECS }
+    }
+}
+
+/// Result of calculating backoff for overloaded errors.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OverloadedBackoffResult {
+    /// Should retry after sleeping for the specified duration.
+    Retry { sleep_secs: u64, error_count: u32 },
+    /// Should allow stop - exceeded maximum retry time.
+    AllowStop { error_count: u32, total_wait: u64 },
+}
+
+/// Calculate backoff for overloaded errors with default configuration.
+///
+/// Returns `Retry` with sleep duration if retries should continue,
+/// or `AllowStop` if maximum retry time has been exceeded.
+#[cfg(test)]
+pub fn calculate_overloaded_backoff(error_count: u32) -> OverloadedBackoffResult {
+    calculate_overloaded_backoff_with_config(error_count, &BackoffConfig::default())
+}
+
+/// Calculate backoff for overloaded errors with custom configuration.
+///
+/// Returns `Retry` with sleep duration if retries should continue,
+/// or `AllowStop` if maximum retry time has been exceeded.
+pub fn calculate_overloaded_backoff_with_config(
+    error_count: u32,
+    config: &BackoffConfig,
+) -> OverloadedBackoffResult {
+    // Calculate backoff: base * 2^(error_count - 1), capped at max
+    let backoff_secs = std::cmp::min(
+        config.base_secs.saturating_mul(1 << (error_count.saturating_sub(1))),
+        config.max_secs,
+    );
+
+    // Calculate total wait time so far: sum of all backoffs
+    // Sum of base * (1 + 2 + 4 + ... + 2^(n-1)) = base * (2^n - 1)
+    let capped_count = std::cmp::min(error_count, 6); // After 6 errors we're at max
+    let total_wait = config.base_secs.saturating_mul((1 << capped_count) - 1);
+
+    // If we've waited more than max total, allow stop
+    if total_wait > config.max_secs {
+        return OverloadedBackoffResult::AllowStop { error_count, total_wait };
+    }
+
+    // Add jitter (±20% of backoff time)
+    let jitter_range = backoff_secs / 5; // 20%
+    let sleep_secs = if jitter_range > 0 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        // Simple pseudo-random: take low bits of nanoseconds
+        // jitter_offset is in [0, 2 * jitter_range]
+        #[allow(clippy::cast_possible_truncation)] // Jitter is small, won't overflow u64
+        let jitter_offset = (seed % u128::from(jitter_range * 2 + 1)) as u64;
+
+        // Apply jitter: if offset > range, add (positive jitter); else subtract (negative jitter)
+        if jitter_offset > jitter_range {
+            backoff_secs.saturating_add(jitter_offset - jitter_range)
+        } else {
+            backoff_secs.saturating_sub(jitter_range - jitter_offset)
+        }
+    } else {
+        backoff_secs
+    };
+
+    OverloadedBackoffResult::Retry { sleep_secs, error_count }
+}
+
 /// Check for API error loop and allow exit to prevent infinite loops.
 ///
 /// If we've seen multiple consecutive API errors, allow the stop to prevent
 /// the agent from getting stuck in an error loop.
+///
+/// For 529 overloaded errors specifically, implements exponential backoff
+/// with retry instead of immediately allowing stop.
 fn check_api_error_loop(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
 ) -> Option<StopHookResult> {
+    check_api_error_loop_with_backoff(transcript_info, config, &BackoffConfig::default())
+}
+
+/// Check for API error loop with configurable backoff (for testing).
+fn check_api_error_loop_with_backoff(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+    backoff_config: &BackoffConfig,
+) -> Option<StopHookResult> {
+    // Handle 529 overloaded errors with exponential backoff
+    if transcript_info.last_error_is_overloaded && transcript_info.consecutive_api_errors > 0 {
+        return Some(handle_overloaded_error_with_backoff(transcript_info, config, backoff_config));
+    }
+
+    // For other API errors, use the threshold-based approach
     if transcript_info.consecutive_api_errors >= API_ERROR_THRESHOLD {
         let mut ctx = Context::new();
         ctx.insert("error_count", &transcript_info.consecutive_api_errors);
@@ -246,6 +350,48 @@ fn check_api_error_loop(
         ));
     }
     None
+}
+
+/// Handle 529 overloaded errors with configurable backoff.
+fn handle_overloaded_error_with_backoff(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+    backoff_config: &BackoffConfig,
+) -> StopHookResult {
+    let error_count = transcript_info.consecutive_api_errors;
+
+    match calculate_overloaded_backoff_with_config(error_count, backoff_config) {
+        OverloadedBackoffResult::AllowStop { error_count, total_wait } => {
+            StopHookResult::allow()
+                .with_message(format!(
+                    "# API Overloaded - Maximum Retry Time Exceeded\n\n\
+                     The API has been overloaded for too long ({error_count} consecutive errors, ~{total_wait}s total wait time).\n\n\
+                     Please start a new conversation to continue."
+                ))
+                .with_explanation(
+                    config.explain_stops,
+                    format!("{error_count} overloaded errors, exceeded maximum retry time"),
+                )
+        }
+        OverloadedBackoffResult::Retry { sleep_secs, error_count } => {
+            // Sleep for the backoff period
+            eprintln!(
+                "API overloaded (error {error_count}/~6). Waiting {sleep_secs}s before retry..."
+            );
+            std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
+
+            // Return a block result asking the agent to retry
+            StopHookResult::block()
+                .with_inject(
+                    "The API was temporarily overloaded. Please try your last request again."
+                        .to_string(),
+                )
+                .with_explanation(
+                    config.explain_stops,
+                    format!("overloaded error {error_count}, waited {sleep_secs}s, prompting retry"),
+                )
+        }
+    }
 }
 
 /// Check for simple Q&A exchange that should allow immediate exit.
@@ -2069,6 +2215,7 @@ mod tests {
             last_user_message_time: None,
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -2090,6 +2237,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(10)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -2110,6 +2258,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -2136,6 +2285,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -2167,6 +2317,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -2193,6 +2344,7 @@ mod tests {
             last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
             has_api_error: false,
             consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
             has_modifying_tool_use: false,
             has_modifying_tool_use_since_user: false,
             first_user_message: None,
@@ -3887,5 +4039,188 @@ mod tests {
             err.to_string().contains("simulated command failure"),
             "Expected error message to contain 'simulated command failure' but got: {err}"
         );
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_first_error() {
+        let result = calculate_overloaded_backoff(1);
+        match result {
+            OverloadedBackoffResult::Retry { sleep_secs, error_count } => {
+                // First error: 5s base, ±20% jitter (4-6s range)
+                assert!((4..=6).contains(&sleep_secs), "Expected 4-6s, got {sleep_secs}");
+                assert_eq!(error_count, 1);
+            }
+            OverloadedBackoffResult::AllowStop { .. } => {
+                panic!("Expected Retry, got AllowStop");
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_second_error() {
+        let result = calculate_overloaded_backoff(2);
+        match result {
+            OverloadedBackoffResult::Retry { sleep_secs, error_count } => {
+                // Second error: 10s base, ±20% jitter (8-12s range)
+                assert!((8..=12).contains(&sleep_secs), "Expected 8-12s, got {sleep_secs}");
+                assert_eq!(error_count, 2);
+            }
+            OverloadedBackoffResult::AllowStop { .. } => {
+                panic!("Expected Retry, got AllowStop");
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_exceeds_max() {
+        // After 6 errors, total wait is 5*(2^6-1) = 315s > 120s, so should allow stop
+        let result = calculate_overloaded_backoff(6);
+        match result {
+            OverloadedBackoffResult::AllowStop { error_count, total_wait } => {
+                assert_eq!(error_count, 6);
+                assert!(total_wait > 120, "Expected total_wait > 120, got {total_wait}");
+            }
+            OverloadedBackoffResult::Retry { .. } => {
+                panic!("Expected AllowStop, got Retry");
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_capped_at_120s() {
+        // At 5 errors, base backoff would be 5*16=80s, but total wait is 5*(2^5-1)=155s > 120s
+        // Actually, let's verify what happens at 5 errors:
+        // backoff = min(5*16, 120) = 80
+        // total_wait = 5*(2^5-1) = 155 > 120, so AllowStop
+        let result = calculate_overloaded_backoff(5);
+        match result {
+            OverloadedBackoffResult::AllowStop { error_count, total_wait } => {
+                assert_eq!(error_count, 5);
+                assert!(total_wait > 120, "Expected total_wait > 120, got {total_wait}");
+            }
+            OverloadedBackoffResult::Retry { .. } => {
+                panic!("Expected AllowStop at 5 errors due to total wait time");
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_zero_errors() {
+        // Edge case: 0 errors should still return Retry (won't happen in practice)
+        let result = calculate_overloaded_backoff(0);
+        match result {
+            OverloadedBackoffResult::Retry { sleep_secs, error_count } => {
+                // 0 errors: 5s * 2^(-1) would underflow, but saturating_sub handles it
+                // backoff = min(5*1, 120) = 5 (since 2^0=1 due to saturating_sub)
+                assert!(sleep_secs <= 6, "Expected <=6s, got {sleep_secs}");
+                assert_eq!(error_count, 0);
+            }
+            OverloadedBackoffResult::AllowStop { .. } => {
+                panic!("Expected Retry, got AllowStop");
+            }
+        }
+    }
+
+    #[test]
+    fn test_handle_overloaded_error_retry() {
+        // Test the retry path with zero backoff for fast testing
+        let transcript_info = TranscriptInfo {
+            consecutive_api_errors: 1,
+            last_error_is_overloaded: true,
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+        let backoff = BackoffConfig { base_secs: 0, max_secs: 100 };
+
+        let result = handle_overloaded_error_with_backoff(&transcript_info, &config, &backoff);
+        assert!(!result.allow_stop, "Overloaded error should block, not allow stop");
+        assert!(result.inject_response.is_some(), "Should inject retry message");
+        assert!(
+            result.inject_response.as_ref().unwrap().contains("try"),
+            "Inject message should ask to retry"
+        );
+    }
+
+    #[test]
+    fn test_handle_overloaded_error_allow_stop() {
+        // Test the allow stop path when max retry time exceeded
+        let transcript_info = TranscriptInfo {
+            consecutive_api_errors: 6,
+            last_error_is_overloaded: true,
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+        // Use small max_secs so total wait exceeds it quickly
+        let backoff = BackoffConfig { base_secs: 1, max_secs: 5 };
+
+        let result = handle_overloaded_error_with_backoff(&transcript_info, &config, &backoff);
+        assert!(result.allow_stop, "Should allow stop after max retry time exceeded");
+        assert!(
+            result.messages.iter().any(|m| m.contains("Maximum Retry Time")),
+            "Should mention max retry time exceeded"
+        );
+    }
+
+    #[test]
+    fn test_check_api_error_loop_non_overloaded_below_threshold() {
+        // Test that non-overloaded errors below threshold don't trigger
+        let transcript_info = TranscriptInfo {
+            consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = check_api_error_loop(&transcript_info, &config);
+        // Zero errors should not trigger anything (threshold is 1)
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_api_error_loop_non_overloaded_at_threshold() {
+        // Test that non-overloaded errors at threshold trigger allow stop
+        let transcript_info = TranscriptInfo {
+            consecutive_api_errors: 1,
+            last_error_is_overloaded: false,
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+
+        let result = check_api_error_loop(&transcript_info, &config);
+        // Single non-overloaded error should trigger allow stop (threshold is 1)
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.allow_stop, "Non-overloaded API error at threshold should allow stop");
+    }
+
+    #[test]
+    fn test_check_api_error_loop_overloaded_retry() {
+        // Test that overloaded errors trigger retry via check_api_error_loop path
+        let transcript_info = TranscriptInfo {
+            consecutive_api_errors: 1,
+            last_error_is_overloaded: true,
+            ..Default::default()
+        };
+        let config = StopHookConfig::default();
+        let backoff = BackoffConfig { base_secs: 0, max_secs: 100 };
+
+        let result = check_api_error_loop_with_backoff(&transcript_info, &config, &backoff);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop, "Overloaded error should block stop and prompt retry");
+        assert!(result.inject_response.is_some(), "Should inject retry prompt message");
+    }
+
+    #[test]
+    fn test_calculate_overloaded_backoff_jitter_positive() {
+        // Run multiple times to statistically exercise jitter branches
+        // The jitter is ±20%, so with base 10s (2nd error), range is 8-12s
+        for _ in 0..10 {
+            let result = calculate_overloaded_backoff(2);
+            if let OverloadedBackoffResult::Retry { sleep_secs, .. } = result {
+                // Should be in range 8-12
+                assert!((8..=12).contains(&sleep_secs), "Got {sleep_secs}");
+            }
+        }
     }
 }
