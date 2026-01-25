@@ -27,6 +27,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "prompts/emergency_stop_decision.tera",
         include_str!("../templates/prompts/emergency_stop_decision.tera"),
     );
+    m.insert(
+        "prompts/create_question_decision.tera",
+        include_str!("../templates/prompts/create_question_decision.tera"),
+    );
 
     // Stop hook messages
     m.insert(
@@ -283,6 +287,9 @@ fn sample_context_for(template_name: &str) -> Context {
 
     // Emergency stop
     ctx.insert("explanation", "I cannot proceed because the API key is missing.");
+
+    // Create question
+    ctx.insert("question_text", "Should I continue with the remaining tasks?");
 
     // Other hooks
     ctx.insert("tool_name", "Bash");

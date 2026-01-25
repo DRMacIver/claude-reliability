@@ -142,6 +142,24 @@ pub trait SubAgent {
         &self,
         context: &EmergencyStopContext,
     ) -> Result<EmergencyStopDecision>;
+
+    /// Evaluate whether a `create_question` request should be auto-answered.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The context for the create question request.
+    ///
+    /// # Returns
+    ///
+    /// The sub-agent's decision on whether to auto-answer or create the question.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sub-agent call fails.
+    fn evaluate_create_question(
+        &self,
+        context: &CreateQuestionContext,
+    ) -> Result<CreateQuestionDecision>;
 }
 
 /// Context for emergency stop evaluation.
@@ -158,6 +176,22 @@ pub enum EmergencyStopDecision {
     Accept(Option<String>),
     /// Reject the emergency stop and provide instructions to continue.
     Reject(String),
+}
+
+/// Context for `create_question` evaluation.
+#[derive(Debug, Clone)]
+pub struct CreateQuestionContext {
+    /// The question text the agent wants to create.
+    pub question_text: String,
+}
+
+/// Decision from a sub-agent about whether to auto-answer a `create_question` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateQuestionDecision {
+    /// Auto-answer the question instead of creating it.
+    AutoAnswer(String),
+    /// Allow the question to be created (genuinely needs user input).
+    Create,
 }
 
 /// Trait for persistent state storage.

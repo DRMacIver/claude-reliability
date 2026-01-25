@@ -8,8 +8,9 @@
 
 use crate::error::Result;
 use crate::traits::{
-    CommandOutput, CommandRunner, EmergencyStopContext, EmergencyStopDecision, QuestionContext,
-    StateStore, SubAgent, SubAgentDecision,
+    CommandOutput, CommandRunner, CreateQuestionContext, CreateQuestionDecision,
+    EmergencyStopContext, EmergencyStopDecision, QuestionContext, StateStore, SubAgent,
+    SubAgentDecision,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -104,9 +105,11 @@ pub struct MockSubAgent {
     question_decisions: RefCell<Vec<SubAgentDecision>>,
     code_reviews: RefCell<Vec<(bool, String)>>,
     emergency_stop_decisions: RefCell<Vec<EmergencyStopDecision>>,
+    create_question_decisions: RefCell<Vec<CreateQuestionDecision>>,
     question_index: RefCell<usize>,
     review_index: RefCell<usize>,
     emergency_stop_index: RefCell<usize>,
+    create_question_index: RefCell<usize>,
 }
 
 impl MockSubAgent {
@@ -129,6 +132,11 @@ impl MockSubAgent {
     /// Add an expected emergency stop decision.
     pub fn expect_emergency_stop(&mut self, decision: EmergencyStopDecision) {
         self.emergency_stop_decisions.borrow_mut().push(decision);
+    }
+
+    /// Add an expected `create_question` decision.
+    pub fn expect_create_question(&mut self, decision: CreateQuestionDecision) {
+        self.create_question_decisions.borrow_mut().push(decision);
     }
 }
 
@@ -168,6 +176,25 @@ impl SubAgent for MockSubAgent {
         let decisions = self.emergency_stop_decisions.borrow();
 
         assert!(*index < decisions.len(), "No more emergency stop decisions expected");
+
+        let decision = decisions[*index].clone();
+        *index += 1;
+        Ok(decision)
+    }
+
+    fn evaluate_create_question(
+        &self,
+        _context: &CreateQuestionContext,
+    ) -> Result<CreateQuestionDecision> {
+        let mut index = self.create_question_index.borrow_mut();
+        let decisions = self.create_question_decisions.borrow();
+
+        // If no decisions expected, default to Create (allow question creation)
+        if decisions.is_empty() {
+            return Ok(CreateQuestionDecision::Create);
+        }
+
+        assert!(*index < decisions.len(), "No more create_question decisions expected");
 
         let decision = decisions[*index].clone();
         *index += 1;
@@ -270,6 +297,13 @@ impl SubAgent for FailingSubAgent {
         &self,
         _context: &EmergencyStopContext,
     ) -> Result<EmergencyStopDecision> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn evaluate_create_question(
+        &self,
+        _context: &CreateQuestionContext,
+    ) -> Result<CreateQuestionDecision> {
         Err(std::io::Error::other(self.error_message.clone()).into())
     }
 }
@@ -705,6 +739,55 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_sub_agent_create_question_auto_answer() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_create_question(CreateQuestionDecision::AutoAnswer(
+            "Continue with other work".to_string(),
+        ));
+
+        let context = CreateQuestionContext { question_text: "Too many tasks".to_string() };
+        let decision = agent.evaluate_create_question(&context).unwrap();
+
+        assert!(matches!(
+            decision,
+            CreateQuestionDecision::AutoAnswer(ref answer) if answer.contains("Continue")
+        ));
+    }
+
+    #[test]
+    fn test_mock_sub_agent_create_question_create() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_create_question(CreateQuestionDecision::Create);
+
+        let context = CreateQuestionContext { question_text: "What is the API key?".to_string() };
+        let decision = agent.evaluate_create_question(&context).unwrap();
+
+        assert!(matches!(decision, CreateQuestionDecision::Create));
+    }
+
+    #[test]
+    fn test_mock_sub_agent_create_question_no_expectations_defaults_to_create() {
+        let agent = MockSubAgent::new();
+        let context = CreateQuestionContext { question_text: "test".to_string() };
+        let decision = agent.evaluate_create_question(&context).unwrap();
+
+        // When no expectations are set, default to Create
+        assert!(matches!(decision, CreateQuestionDecision::Create));
+    }
+
+    #[test]
+    #[should_panic(expected = "No more create_question decisions expected")]
+    fn test_mock_sub_agent_create_question_too_many_calls() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_create_question(CreateQuestionDecision::Create);
+
+        let context = CreateQuestionContext { question_text: "test".to_string() };
+        let _ = agent.evaluate_create_question(&context).unwrap();
+        // Second call should panic
+        let _ = agent.evaluate_create_question(&context);
+    }
+
+    #[test]
     #[should_panic(expected = "no more expectations")]
     fn test_mock_command_runner_too_many_calls() {
         let runner = MockCommandRunner::new();
@@ -749,6 +832,9 @@ mod tests {
         assert!(agent.review_code("diff", &[], None).is_err());
         assert!(agent
             .evaluate_emergency_stop(&EmergencyStopContext { explanation: "test".to_string() })
+            .is_err());
+        assert!(agent
+            .evaluate_create_question(&CreateQuestionContext { question_text: "test".to_string() })
             .is_err());
     }
 

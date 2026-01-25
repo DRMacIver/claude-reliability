@@ -26,6 +26,18 @@ use std::sync::Arc;
 /// Instructions for the MCP server, shown to agents using this server.
 const INSTRUCTIONS: &str = r#"Work tracking server. Use these tools to create, update, list, and manage work items with dependencies, notes, how-to guides, and questions requiring user input.
 
+## Working Through Tasks
+
+**Trust your assigned scope.** If you have been given a list of tasks to complete, that IS the scope of your work. Do not second-guess or try to reduce this scope - complete what you've been asked to do.
+
+**Work incrementally.** You are not expected to complete all tasks in a single session. Work through them in priority order, completing as many as you can. When a session ends, you'll pick up where you left off next time.
+
+**Use what_should_i_work_on.** When unsure which task to work on next, use `what_should_i_work_on` to automatically select the highest-priority unblocked task.
+
+**Having many open tasks is normal.** A large backlog doesn't mean anything is wrong - it's expected. Just work through tasks one at a time. Don't create questions asking about "too much work" or which subset to focus on - simply continue with the next available task.
+
+**Blocked tasks will wait.** If a task is blocked by dependencies, work on something else. When the dependencies are completed, the blocked task will become available.
+
 ## Bulk Operations
 
 When working with multiple work items, use the bulk-tasks binary for better performance:
@@ -1127,11 +1139,35 @@ impl TasksServer {
     }
 
     /// Create a new question that may block tasks.
+    ///
+    /// This method first evaluates whether the question can be auto-answered.
+    /// If so, returns the answer instead of creating the question.
     #[tool(description = "Create a question requiring user input that can block work items")]
     fn create_question(
         &self,
         #[tool(aggr)] input: CreateQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        use crate::command::RealCommandRunner;
+        use crate::subagent::RealSubAgent;
+        use crate::traits::{CreateQuestionContext, CreateQuestionDecision, SubAgent};
+
+        // Evaluate whether this question can be auto-answered
+        let runner = RealCommandRunner::new();
+        let sub_agent = RealSubAgent::new(&runner);
+        let context = CreateQuestionContext { question_text: input.text.clone() };
+
+        match sub_agent.evaluate_create_question(&context) {
+            Ok(CreateQuestionDecision::AutoAnswer(answer)) => {
+                // Return the auto-answer instead of creating the question
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Question auto-answered (no user input needed):\n\n{answer}"
+                ))]));
+            }
+            Ok(CreateQuestionDecision::Create) | Err(_) => {
+                // Proceed with creating the question
+            }
+        }
+
         let question = self
             .store
             .create_question(&input.text)

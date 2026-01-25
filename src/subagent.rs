@@ -3,8 +3,8 @@
 use crate::error::Result;
 use crate::templates;
 use crate::traits::{
-    CommandRunner, EmergencyStopContext, EmergencyStopDecision, QuestionContext, SubAgent,
-    SubAgentDecision,
+    CommandRunner, CreateQuestionContext, CreateQuestionDecision, EmergencyStopContext,
+    EmergencyStopDecision, QuestionContext, SubAgent, SubAgentDecision,
 };
 use std::time::Duration;
 use tera::Context;
@@ -17,6 +17,9 @@ const CODE_REVIEW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Timeout for emergency stop decisions (60 seconds).
 const EMERGENCY_STOP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for `create_question` decisions (60 seconds).
+const CREATE_QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Real sub-agent implementation using the Claude CLI.
 pub struct RealSubAgent<'a> {
@@ -198,6 +201,36 @@ impl SubAgent for RealSubAgent<'_> {
                     Some(msg.to_string())
                 }))
             },
+        )
+    }
+
+    fn evaluate_create_question(
+        &self,
+        context: &CreateQuestionContext,
+    ) -> Result<CreateQuestionDecision> {
+        let mut ctx = Context::new();
+        ctx.insert("question_text", &context.question_text);
+
+        let prompt = templates::render("prompts/create_question_decision.tera", &ctx)
+            .expect("create_question_decision.tera template should always render");
+
+        let output = self.runner.run(
+            self.claude_cmd(),
+            &["--print", "--model", "haiku", "-p", &prompt],
+            Some(CREATE_QUESTION_TIMEOUT),
+        )?;
+
+        if !output.success() {
+            // If Claude fails, default to Create (let the question be created)
+            return Ok(CreateQuestionDecision::Create);
+        }
+
+        let response = output.stdout.trim();
+
+        response.strip_prefix("AUTO_ANSWER:").map_or_else(
+            // CREATE: or unrecognized format — allow question creation
+            || Ok(CreateQuestionDecision::Create),
+            |answer| Ok(CreateQuestionDecision::AutoAnswer(answer.trim().to_string())),
         )
     }
 }
@@ -674,6 +707,98 @@ mod tests {
 
             let context = EmergencyStopContext { explanation: "test".to_string() };
             let result = agent.evaluate_emergency_stop(&context);
+
+            // The run() call returns Err, which propagates via ?
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_real_subagent_create_question_auto_answer() {
+            use crate::traits::CreateQuestionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(
+                &dir,
+                "AUTO_ANSWER: Continue with other work. Use what_should_i_work_on to pick the next task.",
+                0,
+            );
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context =
+                CreateQuestionContext { question_text: "Too many tasks to complete".to_string() };
+            let result = agent.evaluate_create_question(&context).unwrap();
+
+            assert!(matches!(
+                result,
+                CreateQuestionDecision::AutoAnswer(ref answer) if answer.contains("what_should_i_work_on")
+            ));
+        }
+
+        #[test]
+        fn test_real_subagent_create_question_create() {
+            use crate::traits::CreateQuestionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd =
+                setup_fake_claude(&dir, "CREATE: Genuinely needs user input about API key", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = CreateQuestionContext {
+                question_text: "What is the API key for the service?".to_string(),
+            };
+            let result = agent.evaluate_create_question(&context).unwrap();
+
+            assert!(matches!(result, CreateQuestionDecision::Create));
+        }
+
+        #[test]
+        fn test_real_subagent_create_question_command_fails() {
+            use crate::traits::CreateQuestionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = CreateQuestionContext { question_text: "Some question".to_string() };
+            let result = agent.evaluate_create_question(&context).unwrap();
+
+            // Command failure defaults to Create
+            assert!(matches!(result, CreateQuestionDecision::Create));
+        }
+
+        #[test]
+        fn test_real_subagent_create_question_unrecognized_format() {
+            use crate::traits::CreateQuestionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "I think this needs user input", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = CreateQuestionContext { question_text: "Unclear question".to_string() };
+            let result = agent.evaluate_create_question(&context).unwrap();
+
+            // Unrecognized format defaults to Create
+            assert!(matches!(result, CreateQuestionDecision::Create));
+        }
+
+        #[test]
+        fn test_real_subagent_create_question_spawn_fails() {
+            use crate::traits::CreateQuestionContext;
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            let context = CreateQuestionContext { question_text: "test".to_string() };
+            let result = agent.evaluate_create_question(&context);
 
             // The run() call returns Err, which propagates via ?
             assert!(result.is_err());
