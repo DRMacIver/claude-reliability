@@ -1848,11 +1848,8 @@ impl TaskStore for SqliteTaskStore {
         // Get transitive dependencies (tasks that requested tasks depend on)
         let dep_ids = Self::get_transitive_dependencies(&conn, &task_ids)?;
 
-        // Filter to incomplete dependencies that are not blocked on questions
-        let mut result: Vec<Task> = direct_requested
-            .into_iter()
-            .filter(|t| !Self::is_blocked_on_question_only(&conn, &t.id))
-            .collect();
+        // Collect all tasks (directly requested + dependencies)
+        let mut all_tasks: Vec<Task> = direct_requested;
 
         // Add incomplete dependencies (treating them as transitively requested)
         for dep_id in dep_ids {
@@ -1866,17 +1863,22 @@ impl TaskStore for SqliteTaskStore {
                 .optional()?;
 
             if let Some(task) = task {
-                // Include if incomplete and not blocked on a question
+                // Include if incomplete and not already in list
                 if !matches!(task.status, Status::Complete | Status::Abandoned)
-                    && !Self::is_blocked_on_question_only(&conn, &task.id)
-                    && !result.iter().any(|t| t.id == task.id)
+                    && !all_tasks.iter().any(|t| t.id == task.id)
                 {
-                    result.push(task);
+                    all_tasks.push(task);
                 }
             }
         }
 
+        // Filter to only READY tasks (not blocked by dependencies or questions)
+        // These are the "roots" - tasks the agent can actually work on now
+        let mut result: Vec<Task> =
+            all_tasks.into_iter().filter(|t| Self::is_ready(&conn, &t.id)).collect();
+
         // Sort by priority (ascending) then dependent count (descending)
+        // Tasks that unblock more work should be prioritized
         result.sort_by(|a, b| {
             let a_priority = a.priority.as_u8();
             let b_priority = b.priority.as_u8();
@@ -1898,26 +1900,9 @@ impl TaskStore for SqliteTaskStore {
 }
 
 impl SqliteTaskStore {
-    /// Check if a task is blocked only by unanswered questions (not by dependencies).
-    fn is_blocked_on_question_only(conn: &Connection, task_id: &str) -> bool {
-        // Check if task has unanswered questions
-        let has_unanswered_questions: bool = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM task_questions tq
-                    JOIN questions q ON tq.question_id = q.id
-                    WHERE tq.task_id = ?1 AND q.answer IS NULL
-                )",
-                params![task_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-
-        if !has_unanswered_questions {
-            return false;
-        }
-
-        // Check if task has incomplete dependencies (other than questions)
+    /// Check if a task is ready (not blocked by any incomplete dependencies or questions).
+    fn is_ready(conn: &Connection, task_id: &str) -> bool {
+        // Check for incomplete dependencies
         let has_incomplete_deps: bool = conn
             .query_row(
                 "SELECT EXISTS(
@@ -1930,8 +1915,24 @@ impl SqliteTaskStore {
             )
             .unwrap_or(false);
 
-        // Blocked on question only if has questions but no other blockers
-        !has_incomplete_deps
+        if has_incomplete_deps {
+            return false;
+        }
+
+        // Check for unanswered questions
+        let has_unanswered_questions: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM task_questions tq
+                    JOIN questions q ON tq.question_id = q.id
+                    WHERE tq.task_id = ?1 AND q.answer IS NULL
+                )",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        !has_unanswered_questions
     }
 }
 
@@ -3372,14 +3373,13 @@ mod tests {
         // Only request task1
         store.request_tasks(&[&task1.id]).unwrap();
 
-        // Get incomplete requested tasks - should include task2 and task3 transitively
+        // Get incomplete requested tasks - should only return task3 (the root)
+        // task1 is blocked by task2, task2 is blocked by task3
+        // Only task3 is ready to work on
         let incomplete = store.get_incomplete_requested_work().unwrap();
 
-        assert_eq!(incomplete.len(), 3);
-        let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&task1.id.as_str()));
-        assert!(ids.contains(&task2.id.as_str()));
-        assert!(ids.contains(&task3.id.as_str()));
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].id, task3.id);
 
         disable_deterministic_ids();
     }
@@ -3427,14 +3427,12 @@ mod tests {
         store.link_task_to_question(&task1.id, &question.id).unwrap();
 
         // Get incomplete requested tasks
-        // task1 has both a question AND a dependency, so it's NOT blocked on question only
-        // task2 is a transitive dependency
+        // task1 is blocked by both question AND dependency
+        // Only task2 is ready (the root dependency)
         let incomplete = store.get_incomplete_requested_work().unwrap();
 
-        assert_eq!(incomplete.len(), 2);
-        let ids: Vec<_> = incomplete.iter().map(|t| t.id.as_str()).collect();
-        assert!(ids.contains(&task1.id.as_str()));
-        assert!(ids.contains(&task2.id.as_str()));
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].id, task2.id);
 
         disable_deterministic_ids();
     }
