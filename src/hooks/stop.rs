@@ -931,7 +931,7 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
 
     result = result
         .with_message("")
-        .with_message("Please complete these work items or, if blocked, link them to questions explaining the blocker.")
+        .with_message("Use `update_work_item(id=\"...\", status=\"complete\")` to mark items done. Run `/task-management` for detailed guidance on working with work items.")
         .with_message("")
         .with_message("If you've hit a problem you cannot solve without user input, use the `emergency_stop` tool.");
 
