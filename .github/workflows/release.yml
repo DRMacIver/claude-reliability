@@ -18,7 +18,7 @@ jobs:
   check-release:
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
+      should_release: ${{ steps.check.outputs.should_release == 'true' && steps.debounce.outputs.skip != 'true' }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -57,8 +57,36 @@ jobs:
             echo "should_release=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Generate CalVer version
+      - name: Debounce - wait for more commits
         if: steps.check.outputs.should_release == 'true'
+        run: |
+          echo "Waiting 5 minutes to debounce rapid commits..."
+          CURRENT_SHA="${{ github.sha }}"
+          echo "Current commit: $CURRENT_SHA"
+          sleep 300
+
+      - name: Check for newer commits
+        if: steps.check.outputs.should_release == 'true'
+        id: debounce
+        run: |
+          # Fetch latest from origin
+          git fetch origin main
+          LATEST_SHA=$(git rev-parse origin/main)
+          CURRENT_SHA="${{ github.sha }}"
+
+          echo "Current commit: $CURRENT_SHA"
+          echo "Latest commit on main: $LATEST_SHA"
+
+          if [ "$CURRENT_SHA" != "$LATEST_SHA" ]; then
+            echo "Newer commits found - skipping this release, letting next workflow handle it"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "No newer commits - proceeding with release"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate CalVer version
+        if: steps.check.outputs.should_release == 'true' && steps.debounce.outputs.skip != 'true'
         id: version
         run: |
           VERSION=$(python3 scripts/release.py --version-only)
