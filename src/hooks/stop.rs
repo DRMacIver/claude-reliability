@@ -776,6 +776,15 @@ pub fn run_stop_hook(
     }
     log.pass("simple_qa_fast_path", "not simple Q&A");
 
+    // If the agent has asked if it should commit or push, auto-confirm.
+    // This must run BEFORE interactive_question check to prevent commit/push
+    // questions from being treated as interactive questions that allow stopping.
+    if let Some(r) = check_commit_push_auto_confirm(&transcript_info, config) {
+        log.pass("commit_push_auto_confirm", "auto-confirming commit/push");
+        return Ok(log.into_result(r));
+    }
+    log.pass("commit_push_auto_confirm", "no commit/push question");
+
     // The agent has asked a question. Decide now whether to permit it.
     if let Some(r) = check_interactive_question_block(&transcript_info, sub_agent, config) {
         let action = if r.allow_stop { "allowing stop" } else { "blocking" };
@@ -783,13 +792,6 @@ pub fn run_stop_hook(
         return Ok(log.into_result(r));
     }
     log.pass("interactive_question", "no interactive question");
-
-    // If the agent has asked if it should commit or push, auto-confirm.
-    if let Some(r) = check_commit_push_auto_confirm(&transcript_info, config) {
-        log.pass("commit_push_auto_confirm", "auto-confirming commit/push");
-        return Ok(log.into_result(r));
-    }
-    log.pass("commit_push_auto_confirm", "no commit/push question");
 
     // =========================================================================
     // Tier 2: Validation Checks
@@ -931,7 +933,7 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
 
     result = result
         .with_message("")
-        .with_message("Use `update_work_item(id=\"...\", status=\"complete\")` to mark items done. Run `/task-management` for detailed guidance on working with work items.")
+        .with_message("Use `update_work_item(id=\"...\", status=\"complete\")` to mark items done. Run `/claude-reliability:task-management` for detailed guidance.")
         .with_message("")
         .with_message("If you've hit a problem you cannot solve without user input, use the `emergency_stop` tool.");
 
@@ -946,10 +948,16 @@ fn check_commit_push_question(output: &str) -> Option<String> {
 
     // Check for commit confirmation questions
     if trimmed.ends_with("Would you like me to commit these changes?")
+        || trimmed.ends_with("Would you like me to commit these changes now?")
         || trimmed.ends_with("Would you like me to commit this?")
         || trimmed.ends_with("Would you like me to commit?")
+        || trimmed.ends_with("Would you like me to commit now?")
         || trimmed.ends_with("Shall I commit these changes?")
+        || trimmed.ends_with("Shall I commit these changes now?")
+        || trimmed.ends_with("Shall I commit now?")
         || trimmed.ends_with("Should I commit these changes?")
+        || trimmed.ends_with("Should I commit these changes now?")
+        || trimmed.ends_with("Should I commit now?")
         || trimmed.ends_with("Ready to commit?")
     {
         return Some("Yes, please commit these changes.".to_string());
@@ -957,11 +965,17 @@ fn check_commit_push_question(output: &str) -> Option<String> {
 
     // Check for push confirmation questions
     if trimmed.ends_with("Would you like me to push these changes?")
+        || trimmed.ends_with("Would you like me to push these changes now?")
         || trimmed.ends_with("Would you like me to push this?")
         || trimmed.ends_with("Would you like me to push?")
+        || trimmed.ends_with("Would you like me to push now?")
         || trimmed.ends_with("Shall I push these changes?")
+        || trimmed.ends_with("Shall I push these changes now?")
+        || trimmed.ends_with("Shall I push now?")
         || trimmed.ends_with("Should I push these changes?")
+        || trimmed.ends_with("Should I push these changes now?")
         || trimmed.ends_with("Should I push?")
+        || trimmed.ends_with("Should I push now?")
         || trimmed.ends_with("Ready to push?")
     {
         return Some("Yes, please push.".to_string());
@@ -2961,6 +2975,42 @@ mod tests {
         assert_eq!(
             check_commit_push_question("Should I commit these changes?"),
             Some("Yes, please commit these changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_commit_push_question_commit_now() {
+        assert_eq!(
+            check_commit_push_question("Would you like me to commit these changes now?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Would you like me to commit now?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Shall I commit these changes now?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Should I commit now?"),
+            Some("Yes, please commit these changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_commit_push_question_push_now() {
+        assert_eq!(
+            check_commit_push_question("Would you like me to push these changes now?"),
+            Some("Yes, please push.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Would you like me to push now?"),
+            Some("Yes, please push.".to_string())
+        );
+        assert_eq!(
+            check_commit_push_question("Should I push now?"),
+            Some("Yes, please push.".to_string())
         );
     }
 
