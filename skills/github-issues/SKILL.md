@@ -245,6 +245,18 @@ git commit -m "Fix various bugs"  # Which bugs? What issues?
 
 **Solution:** Actually test your changes against your acceptance criteria. Run the specific scenario from the issue.
 
+**For bug fixes, follow this workflow:**
+
+1. **Reproduce the bug first** — Before making any changes, run the exact reproduction steps from the issue. If you can't reproduce it, you can't verify you've fixed it. If the reproduction requires setup, do the setup. Write a temporary script if needed.
+
+2. **Apply your fix** — Make the code changes.
+
+3. **Verify the reproduction now succeeds** — Run the exact same reproduction steps. The bug should be gone. If it's not, iterate until it is.
+
+4. **Write a test** — If the bug was reproducible, that reproduction should become a test case.
+
+**Never ask "please check if this worked" when you can verify it yourself.** Run the actual command, exercise the actual workflow, reproduce the actual bug. Self-validate before asking humans.
+
 ## Checklist
 
 Before marking an issue as fixed:
@@ -253,6 +265,7 @@ Before marking an issue as fixed:
 - [ ] Read ALL comments on the issue
 - [ ] Checked for related issues and PRs
 - [ ] Defined clear acceptance criteria
+- [ ] For bugs: reproduced the issue before attempting a fix
 - [ ] Implemented a fix that addresses the root cause (not just symptoms)
 - [ ] Commits reference the issue number
 - [ ] Added tests that verify the fix

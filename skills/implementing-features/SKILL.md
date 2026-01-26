@@ -70,7 +70,44 @@ For each piece of functionality:
 - Keep the implementation minimal - do what's asked, nothing more
 - Run tests frequently to confirm progress
 
-### 5. Verification Phase
+### 5. Runtime Validation Phase
+
+**Actually run the code.** Tests are necessary but not sufficient. Before declaring a feature complete, execute it in a realistic scenario.
+
+Why this matters:
+- Tests often exercise code in isolation; real usage involves integration
+- Tests may mock dependencies that behave subtly differently from the real thing
+- The gap between "tests pass" and "feature works" is where bugs hide
+
+**How to validate:**
+
+1. **For features with a user interface or CLI:**
+   - Actually use it. Run the command. Click the button. Fill out the form.
+   - If the feature requires setup, do the setup and verify the whole flow.
+
+2. **For internal features or APIs:**
+   - Write a temporary script that exercises the feature end-to-end
+   - Put temporary scripts in gitignored directories (e.g., `tmp/`, `.scratch/`)
+   - Run the script repeatedly, fixing issues until it works
+
+3. **For bug fixes:**
+   - Reproduce the original bug first (before applying the fix)
+   - Apply the fix
+   - Verify the reproduction now succeeds
+
+**Iterate until it works:**
+- Don't just run it once. Run it multiple times with different inputs.
+- If it fails, fix it and run again. Don't move on until it actually works.
+- Temporary validation scripts can be messy — they're for validation, not production.
+
+**After validation:**
+- Refactor any useful temporary code into permanent locations (tests, utilities)
+- Delete scratch files that are no longer needed
+- If the temporary script revealed test gaps, add proper tests
+
+**Key principle:** Never ask "does this work?" when you can answer it yourself by running the code. Self-validate before asking humans.
+
+### 6. Final Verification Phase
 
 - Run the full test suite to confirm nothing is broken
 - Add any additional tests discovered during implementation (integration tests, additional edge cases)
@@ -152,6 +189,7 @@ Before marking a feature as complete:
 - [ ] Tests written (ideally before implementation; after is fine if needed)
 - [ ] Implementation is minimal and focused on the request
 - [ ] All tests passing (including pre-existing tests)
+- [ ] Feature validated by actually running it (not just tests passing)
 - [ ] Quality gates pass (lints, formatting, coverage)
 - [ ] No security vulnerabilities introduced
 - [ ] Error handling classifies bugs vs. recoverable errors appropriately
