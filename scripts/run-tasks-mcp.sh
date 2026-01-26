@@ -3,12 +3,25 @@
 #
 # This script ensures the tasks-mcp binary is available before running it.
 # It uses the same caching strategy as ensure-binary.sh.
+# Also logs to .claude-reliability/mcp.log for debugging disconnections.
 
 set -euo pipefail
 
 REPO="DRMacIver/claude-reliability"
 BINARY_NAME="tasks-mcp"
 CACHE_DIR="${HOME}/.claude-reliability"
+
+# Log to the MCP log file (in current working directory's .claude-reliability)
+log_to_mcp() {
+    local msg="$1"
+    local log_dir=".claude-reliability"
+    local log_file="${log_dir}/mcp.log"
+    local ts
+    ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")"
+
+    mkdir -p "$log_dir" 2>/dev/null || true
+    echo "[${ts}] WRAPPER: ${msg}" >> "$log_file" 2>/dev/null || true
+}
 
 # Get the directory where this script lives (plugin root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -180,12 +193,33 @@ build_from_source() {
     return 1
 }
 
+# Run the binary and log exit status
+run_and_log() {
+    local binary_path="$1"
+    shift
+
+    log_to_mcp "Starting binary: ${binary_path}"
+
+    # Run the binary and capture exit code
+    local exit_code=0
+    "$binary_path" "$@" || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_to_mcp "Binary exited with code ${exit_code}"
+    else
+        log_to_mcp "Binary exited normally (code 0)"
+    fi
+
+    exit $exit_code
+}
+
 # Main logic
 main() {
     local platform binary_path version
 
     # Detect platform
     if ! platform="$(detect_platform)"; then
+        log_to_mcp "ERROR: Could not detect platform"
         echo "ERROR: Could not detect platform" >&2
         exit 1
     fi
@@ -194,34 +228,39 @@ main() {
 
     # In the source repo, check if we need to rebuild due to source changes
     if is_source_repo && source_is_newer "$binary_path"; then
+        log_to_mcp "Source files changed, rebuilding"
         echo "Source files changed, rebuilding ${BINARY_NAME}..." >&2
         if build_from_source "$binary_path"; then
-            exec "$binary_path" "$@"
+            run_and_log "$binary_path" "$@"
         fi
+        log_to_mcp "Rebuild failed, trying other methods"
         echo "Rebuild failed, trying other methods..." >&2
     fi
 
     # Check if we have a cached binary
     if [[ -x "$binary_path" ]]; then
-        exec "$binary_path" "$@"
+        run_and_log "$binary_path" "$@"
     fi
 
     # Try to download from GitHub releases
     if ! is_source_repo; then
         version="$(get_latest_version)"
         if [[ -n "$version" ]]; then
+            log_to_mcp "Downloading version ${version}"
             if download_binary "$version" "$platform" "$binary_path"; then
-                exec "$binary_path" "$@"
+                run_and_log "$binary_path" "$@"
             fi
         fi
     fi
 
     # Fall back to building from source
+    log_to_mcp "Falling back to building from source"
     if build_from_source "$binary_path"; then
-        exec "$binary_path" "$@"
+        run_and_log "$binary_path" "$@"
     fi
 
     # All methods failed
+    log_to_mcp "ERROR: Could not obtain binary"
     echo "ERROR: Could not obtain ${BINARY_NAME} binary" >&2
     exit 1
 }
