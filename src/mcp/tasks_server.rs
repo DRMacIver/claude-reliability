@@ -9,6 +9,7 @@
 
 use crate::beads_sync;
 use crate::command::RealCommandRunner;
+use crate::mcp_logging::ToolCallGuard;
 use crate::session;
 use crate::tasks::{
     HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
@@ -622,6 +623,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: CreateWorkItemInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("create_work_item");
         let priority = Priority::from_u8(input.priority)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
@@ -645,6 +647,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: GetWorkItemInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_work_item");
         let task = self
             .store
             .get_task(&input.id)
@@ -695,6 +698,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: UpdateWorkItemInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("update_work_item");
         let priority = input
             .priority
             .map(Priority::from_u8)
@@ -757,6 +761,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: DeleteWorkItemInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("delete_work_item");
         let deleted = self
             .store
             .delete_task(&input.id)
@@ -783,6 +788,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: ListWorkItemsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("list_work_items");
         let status = input
             .status
             .as_ref()
@@ -850,6 +856,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: AddDependencyInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("add_dependency");
         self.store
             .add_dependency(&input.work_item_id, &input.depends_on)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -866,6 +873,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: RemoveDependencyInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("remove_dependency");
         let removed = self
             .store
             .remove_dependency(&input.work_item_id, &input.depends_on)
@@ -884,6 +892,7 @@ impl TasksServer {
     /// Add a note to a task.
     #[tool(description = "Add a note to a work item")]
     fn add_note(&self, #[tool(aggr)] input: AddNoteInput) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("add_note");
         let note = self
             .store
             .add_note(&input.work_item_id, &input.content)
@@ -905,6 +914,7 @@ impl TasksServer {
     /// Get all notes for a task.
     #[tool(description = "Get all notes attached to a work item")]
     fn get_notes(&self, #[tool(aggr)] input: GetNotesInput) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_notes");
         let notes = self
             .store
             .get_notes(&input.work_item_id)
@@ -929,6 +939,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: SearchWorkItemsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("search_work_items");
         let tasks = self
             .store
             .search_tasks(&input.query)
@@ -969,6 +980,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: GetAuditLogInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_audit_log");
         let limit = Some(input.limit.unwrap_or(DEFAULT_RESULT_LIMIT));
         let entries = self
             .store
@@ -984,6 +996,7 @@ impl TasksServer {
     /// Get a random task to work on from the highest priority ready tasks.
     #[tool(description = "Pick a random work item from the highest priority unblocked items")]
     fn what_should_i_work_on(&self) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("what_should_i_work_on");
         let task =
             self.store.pick_task().map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -1038,6 +1051,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: CreateHowToInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("create_howto");
         let howto = self
             .store
             .create_howto(&input.title, &input.instructions)
@@ -1053,6 +1067,7 @@ impl TasksServer {
     /// Get a how-to by ID.
     #[tool(description = "Get a how-to guide by its ID")]
     fn get_howto(&self, #[tool(aggr)] input: GetHowToInput) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_howto");
         let howto = self
             .store
             .get_howto(&input.id)
@@ -1079,6 +1094,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: UpdateHowToInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("update_howto");
         let update = HowToUpdate { title: input.title, instructions: input.instructions };
 
         let howto = self
@@ -1107,6 +1123,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: DeleteHowToInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("delete_howto");
         let deleted = self
             .store
             .delete_howto(&input.id)
@@ -1128,6 +1145,7 @@ impl TasksServer {
     /// List all how-tos.
     #[tool(description = "List all how-to guides")]
     fn list_howtos(&self) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("list_howtos");
         let howtos =
             self.store.list_howtos().map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -1146,6 +1164,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: SearchHowTosInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("search_howtos");
         let howtos = self
             .store
             .search_howtos(&input.query)
@@ -1166,6 +1185,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: LinkWorkToHowToInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("link_work_to_howto");
         self.store
             .link_task_to_howto(&input.work_item_id, &input.howto_id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1182,6 +1202,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: UnlinkWorkFromHowToInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("unlink_work_from_howto");
         let removed = self
             .store
             .unlink_task_from_howto(&input.work_item_id, &input.howto_id)
@@ -1212,6 +1233,8 @@ impl TasksServer {
         use crate::command::RealCommandRunner;
         use crate::subagent::RealSubAgent;
         use crate::traits::{CreateQuestionContext, CreateQuestionDecision, SubAgent};
+
+        let _guard = ToolCallGuard::new("create_question");
 
         // Evaluate whether this question can be auto-answered
         let runner = RealCommandRunner::new();
@@ -1248,6 +1271,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: GetQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_question");
         let question = self
             .store
             .get_question(&input.id)
@@ -1273,6 +1297,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: AnswerQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("answer_question");
         let question = self
             .store
             .answer_question(&input.id, &input.answer)
@@ -1298,6 +1323,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: DeleteQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("delete_question");
         let deleted = self
             .store
             .delete_question(&input.id)
@@ -1322,6 +1348,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: ListQuestionsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("list_questions");
         let questions = self
             .store
             .list_questions(input.unanswered_only)
@@ -1343,6 +1370,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: SearchQuestionsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("search_questions");
         let questions = self
             .store
             .search_questions(&input.query)
@@ -1366,6 +1394,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: LinkWorkToQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("link_work_to_question");
         self.store
             .link_task_to_question(&input.work_item_id, &input.question_id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1382,6 +1411,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: UnlinkWorkFromQuestionInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("unlink_work_from_question");
         let removed = self
             .store
             .unlink_task_from_question(&input.work_item_id, &input.question_id)
@@ -1406,6 +1436,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: GetBlockingQuestionsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_blocking_questions");
         let questions = self
             .store
             .get_blocking_questions(&input.work_item_id)
@@ -1424,6 +1455,7 @@ impl TasksServer {
         description = "Get all work items that are blocked by unanswered questions (and not blocked by dependencies)"
     )]
     fn get_question_blocked_work(&self) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_question_blocked_work");
         let tasks = self
             .store
             .get_question_blocked_tasks()
@@ -1450,6 +1482,7 @@ impl TasksServer {
         description = "Mark a work item as in-progress. Use this before making any code changes to track what you're working on."
     )]
     fn work_on(&self, #[tool(aggr)] input: WorkOnInput) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("work_on");
         let update = TaskUpdate { in_progress: Some(true), ..Default::default() };
 
         let task = self
@@ -1482,6 +1515,7 @@ impl TasksServer {
         &self,
         #[tool(aggr)] input: RequestWorkItemsInput,
     ) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("request_work_items");
         let task_ids: Vec<&str> = input.work_item_ids.iter().map(String::as_str).collect();
         let updated = self
             .store
@@ -1498,6 +1532,7 @@ impl TasksServer {
         description = "Mark all open work items as requested and enable request mode. New items will also be automatically requested until the agent successfully stops."
     )]
     fn request_all_open(&self) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("request_all_open");
         let updated = self
             .store
             .request_all_open()
@@ -1513,6 +1548,7 @@ impl TasksServer {
         description = "Get all incomplete requested work items. These are items the user has requested that must be completed (or blocked on a question) before the agent can stop."
     )]
     fn get_incomplete_requested_work(&self) -> Result<CallToolResult, McpError> {
+        let _guard = ToolCallGuard::new("get_incomplete_requested_work");
         let tasks = self
             .store
             .get_incomplete_requested_work()
@@ -1566,6 +1602,7 @@ impl TasksServer {
         use crate::subagent::RealSubAgent;
         use crate::traits::{EmergencyStopContext, EmergencyStopDecision, SubAgent};
 
+        let _guard = ToolCallGuard::new("emergency_stop");
         let runner = RealCommandRunner::new();
         let sub_agent = RealSubAgent::new(&runner);
 
