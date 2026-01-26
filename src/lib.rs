@@ -11,6 +11,7 @@ pub mod git;
 pub mod hook_logging;
 pub mod hooks;
 pub mod mcp;
+pub mod mcp_health;
 pub mod paths;
 pub mod question;
 pub mod reminders;

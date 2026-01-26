@@ -9,6 +9,7 @@
 use crate::error::{Error, Result};
 use crate::git::{self, GitStatus};
 use crate::hooks::HookInput;
+use crate::mcp_health;
 use crate::question::{is_continue_question, looks_like_question, truncate_for_context};
 use crate::session;
 use crate::tasks;
@@ -910,6 +911,10 @@ fn check_auto_work_tasks(
 /// Returns Some(block result) if there are incomplete requested tasks, None otherwise.
 /// A task is considered "incomplete" if it's requested and not complete/abandoned,
 /// unless it's blocked only on an unanswered question.
+///
+/// If the MCP server appears to be down (stale heartbeat), this returns an allow
+/// result with a warning instead of blocking, since the agent can't interact with
+/// the work item system.
 fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookResult> {
     let incomplete = tasks::get_incomplete_requested_work(config.base_dir());
 
@@ -917,6 +922,28 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
         // No incomplete requested tasks - also clear request mode since all are done
         tasks::clear_request_mode(config.base_dir());
         return None;
+    }
+
+    // Check if MCP server is alive before blocking
+    // If MCP is down, the agent can't mark items complete, so blocking would trap them
+    if !mcp_health::is_mcp_server_alive(config.base_dir()) {
+        let status = mcp_health::describe_mcp_status(config.base_dir());
+        return Some(
+            StopHookResult::allow()
+                .with_message("# Warning: MCP Server Not Responding")
+                .with_message("")
+                .with_message(&status)
+                .with_message("")
+                .with_message("There are incomplete requested work items, but the MCP server appears to be down.")
+                .with_message("Allowing stop since the agent cannot interact with the work item system.")
+                .with_message("")
+                .with_message("To reconnect: use `/mcp` and select the work server to reconnect.")
+                .with_message("")
+                .with_message("Incomplete items:")
+                .with_messages(incomplete.iter().map(|(id, title, status)| {
+                    format!("- [{status}] {id}: {title}")
+                })),
+        );
     }
 
     let mut result = StopHookResult::block()
@@ -1323,6 +1350,10 @@ mod tests {
         // Set up database directory and create a requested task
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Write heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(base).unwrap();
+
         let store = SqliteTaskStore::for_project(base).unwrap();
         let task = store.create_task("Critical task", "Must complete", Priority::High).unwrap();
         store.request_tasks(&[&task.id]).unwrap();
@@ -3591,6 +3622,9 @@ mod tests {
         let db_path = crate::paths::project_db_path(dir.path());
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
+        // Write a heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(dir.path()).unwrap();
+
         // Create a task store and request a task
         let store = SqliteTaskStore::for_project(dir.path()).unwrap();
         let task = store.create_task("Important task", "", Priority::High).unwrap();
@@ -3699,6 +3733,37 @@ mod tests {
     }
 
     #[test]
+    fn test_check_incomplete_requested_tasks_allows_when_mcp_down() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // NOTE: No heartbeat written - MCP appears to be down
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        // Should allow stop because MCP appears down, but with warning messages
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("MCP Server Not Responding")));
+        assert!(result.messages.iter().any(|m| m.contains("no heartbeat file")));
+        assert!(result.messages.iter().any(|m| m.contains("Incomplete items:")));
+        assert!(result.messages.iter().any(|m| m.contains(&task.id)));
+    }
+
+    #[test]
     fn test_run_stop_hook_blocks_with_incomplete_requested_tasks() {
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
 
@@ -3708,6 +3773,9 @@ mod tests {
         // Set up database directory
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Write heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(base).unwrap();
 
         // Create and request a task
         let store = SqliteTaskStore::for_project(base).unwrap();
@@ -3787,6 +3855,9 @@ mod tests {
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
+        // Write heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(base).unwrap();
+
         // Set the reflection marker (simulating a second stop after work)
         session::set_reflect_marker(base).unwrap();
 
@@ -3835,6 +3906,9 @@ mod tests {
         // Set up database directory
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Write heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(base).unwrap();
 
         // Create and request a task
         let store = SqliteTaskStore::for_project(base).unwrap();
@@ -3887,6 +3961,9 @@ mod tests {
         // Set up database directory
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // Write heartbeat so MCP appears alive
+        mcp_health::write_heartbeat(base).unwrap();
 
         // Create and request a task
         let store = SqliteTaskStore::for_project(base).unwrap();
