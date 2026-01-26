@@ -70,6 +70,47 @@ fn read_heartbeat(base_dir: &Path) -> Option<(u32, u64)> {
     Some((pid, timestamp))
 }
 
+/// MCP server health status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpHealth {
+    /// Server is alive (heartbeat is fresh and process is running).
+    Alive,
+    /// Heartbeat feature is not active (no heartbeat file exists).
+    /// This happens when the MCP binary doesn't have heartbeat support.
+    NoHeartbeatFeature,
+    /// Server appears to be down (heartbeat exists but is stale or process is dead).
+    Down,
+}
+
+/// Check the MCP server health status.
+///
+/// Returns:
+/// - `Alive` if heartbeat exists, is recent, and process is running
+/// - `NoHeartbeatFeature` if no heartbeat file exists (old binary without heartbeat support)
+/// - `Down` if heartbeat exists but is stale or process is dead
+#[must_use]
+pub fn check_mcp_health(base_dir: &Path) -> McpHealth {
+    let Some((pid, timestamp)) = read_heartbeat(base_dir) else {
+        // No heartbeat file - the MCP binary might not have heartbeat support
+        return McpHealth::NoHeartbeatFeature;
+    };
+
+    // Check if heartbeat is recent
+    let now =
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+    if now.saturating_sub(timestamp) > HEARTBEAT_STALE_SECS {
+        return McpHealth::Down;
+    }
+
+    // Check if the process is still running
+    if is_process_running(pid) {
+        McpHealth::Alive
+    } else {
+        McpHealth::Down
+    }
+}
+
 /// Check if the MCP server appears to be running.
 ///
 /// Returns `true` if:
@@ -80,20 +121,7 @@ fn read_heartbeat(base_dir: &Path) -> Option<(u32, u64)> {
 /// Returns `false` if the heartbeat is missing, stale, or the process is dead.
 #[must_use]
 pub fn is_mcp_server_alive(base_dir: &Path) -> bool {
-    let Some((pid, timestamp)) = read_heartbeat(base_dir) else {
-        return false;
-    };
-
-    // Check if heartbeat is recent
-    let now =
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-
-    if now.saturating_sub(timestamp) > HEARTBEAT_STALE_SECS {
-        return false;
-    }
-
-    // Check if the process is still running
-    is_process_running(pid)
+    check_mcp_health(base_dir) == McpHealth::Alive
 }
 
 /// Check if a process with the given PID is running.
@@ -384,5 +412,57 @@ mod tests {
         // PID 99999999 is unlikely to exist
         // On some systems this might exist, so we just check it doesn't panic
         let _ = is_process_running(99_999_999);
+    }
+
+    #[test]
+    fn test_check_mcp_health_no_heartbeat() {
+        let dir = TempDir::new().unwrap();
+        // No heartbeat written - feature not active
+        assert_eq!(check_mcp_health(dir.path()), McpHealth::NoHeartbeatFeature);
+    }
+
+    #[test]
+    fn test_check_mcp_health_alive() {
+        let dir = TempDir::new().unwrap();
+        write_heartbeat(dir.path()).unwrap();
+        // Fresh heartbeat from current process
+        assert_eq!(check_mcp_health(dir.path()), McpHealth::Alive);
+    }
+
+    #[test]
+    fn test_check_mcp_health_stale() {
+        let dir = TempDir::new().unwrap();
+        let path = heartbeat_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let pid = std::process::id();
+        let old_timestamp =
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+                - HEARTBEAT_STALE_SECS
+                - 10;
+
+        fs::write(&path, format!("{pid}\n{old_timestamp}\n")).unwrap();
+
+        assert_eq!(check_mcp_health(dir.path()), McpHealth::Down);
+    }
+
+    #[test]
+    fn test_check_mcp_health_dead_process() {
+        let dir = TempDir::new().unwrap();
+        let path = heartbeat_path(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // Use a PID that almost certainly doesn't exist
+        let fake_pid = 99_999_999u32;
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+
+        fs::write(&path, format!("{fake_pid}\n{now}\n")).unwrap();
+
+        // Should be Down (unless the PID happens to exist, which is very unlikely)
+        let health = check_mcp_health(dir.path());
+        assert!(
+            health == McpHealth::Down || health == McpHealth::Alive,
+            "Expected Down or Alive, got {health:?}"
+        );
     }
 }

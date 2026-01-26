@@ -926,7 +926,9 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
 
     // Check if MCP server is alive before blocking
     // If MCP is down, the agent can't mark items complete, so blocking would trap them
-    if !mcp_health::is_mcp_server_alive(config.base_dir()) {
+    // Only warn if we KNOW the MCP is down (heartbeat exists but stale/dead)
+    // If no heartbeat file exists, the MCP binary might not have heartbeat support yet
+    if mcp_health::check_mcp_health(config.base_dir()) == mcp_health::McpHealth::Down {
         let status = mcp_health::describe_mcp_status(config.base_dir());
         return Some(
             StopHookResult::allow()
@@ -3735,6 +3737,7 @@ mod tests {
     #[test]
     fn test_check_incomplete_requested_tasks_allows_when_mcp_down() {
         use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use std::time::SystemTime;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
@@ -3743,7 +3746,13 @@ mod tests {
         let db_path = crate::paths::project_db_path(base);
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-        // NOTE: No heartbeat written - MCP appears to be down
+        // Write a STALE heartbeat to simulate MCP being down
+        // (heartbeat exists but is too old)
+        let heartbeat_path = mcp_health::heartbeat_path(base);
+        std::fs::create_dir_all(heartbeat_path.parent().unwrap()).unwrap();
+        let old_timestamp =
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() - 200; // Well beyond the stale threshold (90s)
+        std::fs::write(&heartbeat_path, format!("99999999\n{old_timestamp}\n")).unwrap();
 
         // Create and request a task
         let store = SqliteTaskStore::for_project(base).unwrap();
@@ -3752,15 +3761,45 @@ mod tests {
 
         let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
 
-        // Should allow stop because MCP appears down, but with warning messages
+        // Should allow stop because MCP appears down (stale heartbeat), but with warning messages
         let result = check_incomplete_requested_tasks(&config);
         assert!(result.is_some());
         let result = result.unwrap();
         assert!(result.allow_stop);
         assert!(result.messages.iter().any(|m| m.contains("MCP Server Not Responding")));
-        assert!(result.messages.iter().any(|m| m.contains("no heartbeat file")));
+        assert!(result.messages.iter().any(|m| m.contains("stale")));
         assert!(result.messages.iter().any(|m| m.contains("Incomplete items:")));
         assert!(result.messages.iter().any(|m| m.contains(&task.id)));
+    }
+
+    #[test]
+    fn test_check_incomplete_requested_tasks_blocks_when_no_heartbeat_feature() {
+        // When no heartbeat file exists (MCP binary without heartbeat support),
+        // we should still block on incomplete tasks (not assume MCP is down)
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up database directory
+        let db_path = crate::paths::project_db_path(base);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        // NOTE: No heartbeat written - this simulates old MCP binary without heartbeat support
+
+        // Create and request a task
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Incomplete task", "", Priority::High).unwrap();
+        store.request_tasks(&[&task.id]).unwrap();
+
+        let config = StopHookConfig { base_dir: Some(base.to_path_buf()), ..Default::default() };
+
+        // Should BLOCK because no heartbeat file means feature not active, not that MCP is down
+        let result = check_incomplete_requested_tasks(&config);
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop, "Should block when heartbeat feature is not active");
+        assert!(result.messages.iter().any(|m| m.contains("Requested Work Items Incomplete")));
     }
 
     #[test]
