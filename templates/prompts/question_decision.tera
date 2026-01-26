@@ -69,14 +69,15 @@ CONTINUE: <reason why this doesn't seem like a real question for the user>
 - The agent is summarizing completed work (not actually asking something)
 
 ### Choose ALLOW_STOP only if:
-- The question requires user preference that the agent truly cannot infer
-  - e.g., "Do you want the button blue or green?" (genuine design choice)
-- The question asks for clarification about ambiguous requirements
+- The question asks for information the agent cannot possibly know or guess:
+  - e.g., "What is your API key?" or "What is the production database URL?"
+  - e.g., "Which third-party service should I integrate with?"
+- The question asks for clarification about genuinely ambiguous requirements where guessing wrong would be costly and hard to reverse
 - The output indicates that no work was needed AND the agent needs new direction:
   - "All issues are already closed - what would you like me to work on next?"
   - "The feature already exists - is there something else you need?"
-- The agent is asking whether to proceed with work that seems OUTSIDE the original scope
-  - (But routine continuation of the same task should be answered, not stopped)
+
+**Note:** For reversible decisions (colors, naming, approaches), the agent should just pick something reasonable and continue. The user can always request changes later.
 
 ## Important
 
