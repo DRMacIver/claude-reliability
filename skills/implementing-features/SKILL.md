@@ -7,6 +7,32 @@ description: "This skill should be used when the user asks to implement a new fe
 
 ## Before You Start
 
+### Understand the Feature Intent
+
+Before writing any code, ensure you understand **why** this feature exists and **what success looks like**.
+
+**1. Clarify the intent:**
+- What problem does this feature solve?
+- Who will use it and in what context?
+- What is the user trying to accomplish when they use this feature?
+
+**2. Sketch out usage scenarios:**
+- Describe 2-3 concrete scenarios where someone would use this feature
+- What does each scenario look like from the user's perspective?
+- What inputs would they provide? What outputs would they expect?
+
+**3. Define requirements for usefulness:**
+- For each scenario, what must be true for the implementation to actually help?
+- What behavior would make the feature useless or frustrating?
+- Are there edge cases within these scenarios that need handling?
+
+**4. Validate understanding:**
+- If the requirements are ambiguous, ask clarifying questions before proceeding
+- If you're uncertain about the intended use, propose your understanding and confirm it
+- It's better to spend time clarifying upfront than to build the wrong thing
+
+**Document these findings.** Write down the intent, scenarios, and requirements somewhere (a work item note, a comment, or just in your working memory). You'll need to verify against them after implementation.
+
 ### Verify Your Assumptions
 
 **If you are unsure how to do something or believe it is impossible, always check the official documentation for the relevant tools and libraries.** Do not make claims about what an API, library, or tool can or cannot do based on assumptions. Incorrect assumptions waste time and erode trust.
@@ -115,6 +141,12 @@ Why this matters:
 - Review your changes for security issues (injection, XSS, etc.)
 - Verify the implementation matches what was requested
 
+**Revisit the feature intent:**
+- Return to the intent, scenarios, and requirements you identified before starting
+- For each scenario: walk through it with the actual implementation. Does it work as expected?
+- For each requirement: confirm it is met. If a requirement isn't met, the feature isn't complete.
+- If you discover the implementation doesn't serve the original intent, either fix it or explicitly discuss the gap with the user
+
 ## Design Principles
 
 ### Parse, Don't Validate
@@ -184,6 +216,9 @@ Before diving into complex debugging, verify: Am I editing the right file? Did t
 
 Before marking a feature as complete:
 
+- [ ] Feature intent understood (what problem does it solve, for whom?)
+- [ ] Usage scenarios sketched out (2-3 concrete examples of how it will be used)
+- [ ] Requirements for usefulness defined (what must be true for each scenario to work?)
 - [ ] Official documentation consulted for any unfamiliar APIs or tools
 - [ ] Existing codebase patterns followed
 - [ ] Tests written (ideally before implementation; after is fine if needed)
@@ -194,3 +229,5 @@ Before marking a feature as complete:
 - [ ] No security vulnerabilities introduced
 - [ ] Error handling classifies bugs vs. recoverable errors appropriately
 - [ ] No new dependencies added without justification
+- [ ] Original scenarios revisited and confirmed to work with the implementation
+- [ ] All requirements for usefulness verified as met
