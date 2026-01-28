@@ -45,6 +45,18 @@ python -m snapshot_tests.run_snapshots --save-snapshot my-test
 - **Post-conditions**: Custom verification scripts for test success criteria
 - **Output normalization**: Handles timestamps, hashes, and other variable content
 
+## Work Tracking
+
+This project uses the claude-reliability plugin for work tracking via CLI:
+
+```bash
+claude-reliability work create -t "Title" -d "Description"  # Create work item
+claude-reliability work list                                 # List work items
+claude-reliability work on <id>                              # Mark as in-progress
+claude-reliability work update <id> --status complete        # Update status
+claude-reliability work next                                 # Get next work item
+```
+
 ## Quality Standards
 
 - All code must have tests
