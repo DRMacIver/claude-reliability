@@ -3,6 +3,7 @@
 //! Hooks for improving Claude Code reliability and safety.
 
 pub mod beads_sync;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod command;
 pub mod config;
@@ -10,9 +11,6 @@ pub mod error;
 pub mod git;
 pub mod hook_logging;
 pub mod hooks;
-pub mod mcp;
-pub mod mcp_health;
-pub mod mcp_logging;
 pub mod paths;
 pub mod question;
 pub mod reminders;

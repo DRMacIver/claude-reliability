@@ -295,6 +295,7 @@ fn find_code_review_section(base_dir: &Path) -> Option<String> {
 /// # Errors
 ///
 /// Returns an error if config cannot be loaded or saved.
+#[cfg(feature = "cli")]
 pub fn ensure_config(runner: &dyn CommandRunner) -> Result<ProjectConfig> {
     ensure_config_in(runner, Path::new("."))
 }

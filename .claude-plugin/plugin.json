@@ -11,12 +11,6 @@
   "keywords": ["reliability", "hooks", "quality", "code-review"],
   "commands": "./commands/",
   "skills": "./skills/",
-  "mcpServers": {
-    "work": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run-tasks-mcp.sh",
-      "args": []
-    }
-  },
   "hooks": {
     "Stop": [
       {

@@ -20,6 +20,7 @@ const HOOK_EVENTS_FILE: &str = "hook-events.jsonl";
 /// to the hook events log file.
 ///
 /// Errors are silently ignored — logging should never break hook execution.
+#[cfg(feature = "cli")]
 pub fn log_hook_event(hook_type: &str, raw_input: &str) {
     log_hook_event_in(hook_type, raw_input, Path::new("."));
 }

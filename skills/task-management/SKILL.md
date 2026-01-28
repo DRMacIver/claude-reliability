@@ -5,22 +5,22 @@ description: "This skill should be used when starting complex multi-step work, w
 
 # Task Management Guide
 
-## Finding Work: what_should_i_work_on
+## Finding Work: work next
 
-When you need to pick a work item to work on, use the `what_should_i_work_on` tool. It automatically:
+When you need to pick a work item to work on, use the `work next` command. It automatically:
 - Finds the highest priority unblocked items
 - Randomly picks one to avoid always doing the same type of work
 - Shows the item details so you can start immediately
 
 **Use this instead of manually scanning the work list.**
 
-```
+```bash
 # Start a work session
-what_should_i_work_on()
+claude-reliability work next
 # -> Returns a suggested work item with full details
 
 # Then mark it in progress
-work_on(work_item_id="...")
+claude-reliability work on <work-item-id>
 ```
 
 ## Creating Work Items Effectively
@@ -55,34 +55,41 @@ Good work items are:
 Dependencies ensure items happen in the right order. Use them to:
 
 ### Test-Driven Development (TDD)
-```
-1. create_work_item("Design API for feature X")
-2. create_work_item("Write tests for feature X")
-   -> add_dependency(task_id="write-tests", depends_on="design-api")
-3. create_work_item("Implement feature X")
-   -> add_dependency(task_id="implement", depends_on="write-tests")
+```bash
+# 1. Create work items
+claude-reliability work create -t "Design API for feature X"
+claude-reliability work create -t "Write tests for feature X"
+claude-reliability work create -t "Implement feature X"
+
+# 2. Add dependencies (use IDs from creation output)
+claude-reliability work add-dep <write-tests-id> --depends-on <design-api-id>
+claude-reliability work add-dep <implement-id> --depends-on <write-tests-id>
 ```
 
 This ensures: Design -> Tests -> Implementation
 
 ### Multi-Phase Work
-```
-1. create_work_item("Research options for auth system")
-2. create_work_item("Prototype chosen approach")
-   -> add_dependency(depends_on="research")
-3. create_work_item("Full implementation")
-   -> add_dependency(depends_on="prototype")
-4. create_work_item("Write documentation")
-   -> add_dependency(depends_on="implementation")
+```bash
+claude-reliability work create -t "Research options for auth system"
+claude-reliability work create -t "Prototype chosen approach"
+claude-reliability work create -t "Full implementation"
+claude-reliability work create -t "Write documentation"
+
+# Chain dependencies
+claude-reliability work add-dep <prototype-id> --depends-on <research-id>
+claude-reliability work add-dep <implement-id> --depends-on <prototype-id>
+claude-reliability work add-dep <docs-id> --depends-on <implement-id>
 ```
 
 ### Parallel with Sync Point
-```
-1. create_work_item("Implement frontend component")
-2. create_work_item("Implement backend API")
-3. create_work_item("Integration testing")
-   -> add_dependency(depends_on="frontend")
-   -> add_dependency(depends_on="backend")
+```bash
+claude-reliability work create -t "Implement frontend component"
+claude-reliability work create -t "Implement backend API"
+claude-reliability work create -t "Integration testing"
+
+# Testing depends on both
+claude-reliability work add-dep <testing-id> --depends-on <frontend-id>
+claude-reliability work add-dep <testing-id> --depends-on <backend-id>
 ```
 
 Both frontend and backend can proceed in parallel, but testing waits for both.
@@ -98,23 +105,12 @@ Both frontend and backend can proceed in parallel, but testing waits for both.
 - "Update user model to track reset tokens"
 - "Add rate limiting to reset endpoint"
 
-### Dependencies Model the Flow
-```
-create_work_item("Add reset_token field to User model")
-create_work_item("Create POST /auth/reset-password endpoint")
-  -> depends on model change
-create_work_item("Add email sending for reset links")
-  -> depends on endpoint
-create_work_item("Write integration tests")
-  -> depends on all above
-```
-
 ## Tips
 
 1. **When in doubt, create a work item** - You can always delete it later
 2. **Add notes as you work** - Future context is valuable
 3. **Use priorities realistically** - P0 is truly critical, most work is P2
-4. **Mark blockers with questions** - `create_question` and `link_work_to_question`
+4. **Mark blockers with questions** - `question create` and `question link`
 5. **Close items promptly** - Don't leave completed work as open
 
 ## Bulk Work Item Creation
@@ -137,25 +133,28 @@ The `id` fields are temporary for setting up dependencies. Real IDs are returned
 
 ## Quick Reference
 
-```
+```bash
 # Find work to do
-what_should_i_work_on()
+claude-reliability work next
 
 # Create work item
-create_work_item(title="...", description="...", priority=2)
+claude-reliability work create -t "Task title" -d "Description" -p 2
+
+# Get work item details
+claude-reliability work get <id>
 
 # Add dependency (work_item_id depends on depends_on)
-add_dependency(task_id="...", depends_on="...")
+claude-reliability work add-dep <id> --depends-on <other-id>
 
 # Start working
-work_on(work_item_id="...")
+claude-reliability work on <id>
 
 # Add context
-add_note(work_item_id="...", content="...")
+claude-reliability work add-note <id> -c "Progress note here"
 
 # Mark complete
-update_work_item(id="...", status="complete")
+claude-reliability work update <id> --status complete
 
 # List open items
-list_work_items(status="open", ready_only=true)
+claude-reliability work list --status open --ready-only
 ```

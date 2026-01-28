@@ -49,18 +49,17 @@ Common problems and solutions:
 
 ## Creating How-Tos
 
-```
-create_howto(
-  title="How to add a new API endpoint",
-  instructions="... markdown content ..."
-)
+```bash
+claude-reliability howto create \
+  -t "How to add a new API endpoint" \
+  -i "... markdown content ..."
 ```
 
 ## Linking to Tasks
 
 When a task needs to follow a procedure:
-```
-link_work_to_howto(work_item_id="...", howto_id="...")
+```bash
+claude-reliability work link-howto <work-item-id> --howto-id <howto-id>
 ```
 
 Now when viewing the task, the guidance is visible.
@@ -68,21 +67,21 @@ Now when viewing the task, the guidance is visible.
 ## Searching How-Tos
 
 Find relevant guides:
-```
-search_howtos(query="deploy")
-list_howtos()  # See all
+```bash
+claude-reliability howto search "deploy"
+claude-reliability howto list  # See all
 ```
 
 ## Maintaining How-Tos
 
 ### Update When Procedures Change
-```
-update_howto(id="...", instructions="... new content ...")
+```bash
+claude-reliability howto update <id> -i "... new content ..."
 ```
 
 ### Delete Obsolete Guides
-```
-delete_howto(id="...")
+```bash
+claude-reliability howto delete <id>
 ```
 
 ### Review Periodically
