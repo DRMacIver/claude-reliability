@@ -3,17 +3,23 @@
 #
 # This script:
 # 1. In the source repo: rebuilds if source files changed (for local dev)
-# 2. Checks for cached binary in ~/.claude-reliability/bin/
-# 3. Downloads from GitHub releases if not cached
+# 2. Checks for binary in PROJECT/.claude-reliability/bin/ (project-local, NOT shared)
+# 3. Downloads from GitHub releases if not present
 # 4. Falls back to building from source (from this repo) with cargo
 # 5. Prints the path to the binary on success, exits non-zero on failure
+#
+# IMPORTANT: Binaries are stored PER-PROJECT in .claude-reliability/bin/, NOT in
+# a shared home directory location. This allows different projects to use
+# different versions of the plugin.
 
 set -euo pipefail
 
 REPO="DRMacIver/claude-reliability"
 BINARY_NAME="claude-reliability"
-CACHE_DIR="${HOME}/.claude-reliability"
-VERSION_FILE="${CACHE_DIR}/version"
+
+# Project-local binary location (NOT shared across projects)
+PROJECT_BIN_DIR=".claude-reliability/bin"
+VERSION_FILE=".claude-reliability/version"
 
 # Get the directory where this script lives (plugin root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -235,7 +241,8 @@ main() {
         exit 1
     fi
 
-    binary_path="${CACHE_DIR}/bin/${BINARY_NAME}"
+    # Project-local binary path (NOT shared)
+    binary_path="${PROJECT_BIN_DIR}/${BINARY_NAME}"
 
     # In the source repo, check if we need to rebuild due to source changes
     if is_source_repo && source_is_newer "$binary_path"; then
@@ -250,7 +257,7 @@ main() {
         echo "Rebuild failed, trying other methods..." >&2
     fi
 
-    # Check if we have a cached binary
+    # Check if we have a binary
     if [[ -x "$binary_path" ]]; then
         # Verify it works
         if "$binary_path" version >/dev/null 2>&1; then
@@ -268,6 +275,7 @@ main() {
             if download_binary "$version" "$platform" "$binary_path"; then
                 # Verify downloaded binary works
                 if "$binary_path" version >/dev/null 2>&1; then
+                    mkdir -p "$(dirname "$VERSION_FILE")"
                     echo "$version" > "$VERSION_FILE"
                     echo "$binary_path"
                     exit 0
@@ -281,6 +289,7 @@ main() {
     if build_from_source "$binary_path"; then
         # Verify built binary works
         if "$binary_path" version >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$VERSION_FILE")"
             echo "source" > "$VERSION_FILE"
             echo "$binary_path"
             exit 0

@@ -3,10 +3,14 @@
 #
 # This script:
 # 1. In the source repo: rebuilds if source files changed
-# 2. Otherwise checks for binary at .claude/bin/claude-reliability
+# 2. Otherwise checks for binary at .claude-reliability/bin/claude-reliability
 # 3. If missing, tries to download from GitHub releases
 # 4. Falls back to building from source if in the source repo
 # 5. Prints the path to the binary on success, exits non-zero on failure
+#
+# IMPORTANT: Binaries are stored PER-PROJECT in .claude-reliability/bin/, NOT in
+# a shared home directory location. This allows different projects to use
+# different versions of the plugin.
 
 set -euo pipefail
 
@@ -17,7 +21,8 @@ GITHUB_API="https://api.github.com"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-BINARY_PATH="${PROJECT_ROOT}/.claude/bin/claude-reliability"
+# Project-local binary path (NOT shared)
+BINARY_PATH="${PROJECT_ROOT}/.claude-reliability/bin/claude-reliability"
 PLUGIN_SOURCE_FILE="${PROJECT_ROOT}/.claude/plugin-source.txt"
 
 # Check for external plugin source (installed from local checkout)
@@ -160,7 +165,7 @@ download_from_release() {
         return 1
     fi
 
-    mkdir -p "${PROJECT_ROOT}/.claude/bin"
+    mkdir -p "$(dirname "$BINARY_PATH")"
     tar -xzf "${tmp_dir}/release.tar.gz" -C "$tmp_dir"
     mv "${tmp_dir}/claude-reliability" "$BINARY_PATH"
     chmod +x "$BINARY_PATH"
@@ -222,8 +227,8 @@ build_from_source() {
         return 1
     fi
 
-    # Copy the built binary to the project's .claude/bin
-    mkdir -p "${PROJECT_ROOT}/.claude/bin"
+    # Copy the built binary to the project's .claude-reliability/bin
+    mkdir -p "$(dirname "$BINARY_PATH")"
 
     local built_binary="${source_dir}/target/release/claude-reliability"
     if [[ -x "$built_binary" ]]; then

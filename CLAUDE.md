@@ -2,6 +2,12 @@
 
 A plugin for Claude to improve its reliability through comprehensive testing infrastructure and behavioral validation.
 
+## IMPORTANT: Binary Location
+
+**DO NOT put binaries in shared locations like `~/.claude-reliability/`.**
+
+Different projects may use different versions of this plugin. Binaries MUST be stored per-project in `.claude-reliability/bin/` within the project directory, NOT in a shared home directory location. The startup hooks ensure the correct version is available at `.claude-reliability/bin/claude-reliability` for each project.
+
 ## Overview
 
 This project provides tools for testing and validating Claude Code behavior by recording and replaying tool call transcripts. The infrastructure supports reliability improvements through snapshot-based testing that captures expected behavior and validates consistency across changes.
@@ -47,14 +53,14 @@ python -m snapshot_tests.run_snapshots --save-snapshot my-test
 
 ## Work Tracking
 
-This project uses the claude-reliability plugin for work tracking via CLI:
+This project uses the claude-reliability plugin for work tracking via CLI. The binary is at `.claude-reliability/bin/claude-reliability`:
 
 ```bash
-claude-reliability work create -t "Title" -d "Description"  # Create work item
-claude-reliability work list                                 # List work items
-claude-reliability work on <id>                              # Mark as in-progress
-claude-reliability work update <id> --status complete        # Update status
-claude-reliability work next                                 # Get next work item
+.claude-reliability/bin/claude-reliability work create -t "Title" -d "Description"  # Create work item
+.claude-reliability/bin/claude-reliability work list                                 # List work items
+.claude-reliability/bin/claude-reliability work on <id>                              # Mark as in-progress
+.claude-reliability/bin/claude-reliability work update <id> --status complete        # Update status
+.claude-reliability/bin/claude-reliability work next                                 # Get next work item
 ```
 
 ## Quality Standards
