@@ -183,7 +183,6 @@ install_rust() {
 }
 
 # Build from source using cargo (from the plugin repo)
-# Builds both cli and mcp binaries to avoid timeout when MCP server starts
 build_from_source() {
     local target_path="$1"
 
@@ -203,22 +202,12 @@ build_from_source() {
 
     echo "Building ${BINARY_NAME} from source..." >&2
 
-    # Build with both cli and mcp features to get both binaries
-    # This prevents MCP server timeout on first run
-    if cargo build --release --features cli,mcp --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
+    if cargo build --release --features cli --manifest-path "${PLUGIN_ROOT}/Cargo.toml" >&2; then
         local built_binary="${PLUGIN_ROOT}/target/release/${BINARY_NAME}"
         if [[ -x "$built_binary" ]]; then
             mkdir -p "$(dirname "$target_path")"
             cp "$built_binary" "$target_path"
             chmod +x "$target_path"
-
-            # Also cache the MCP binary if it was built
-            local mcp_binary="${PLUGIN_ROOT}/target/release/tasks-mcp"
-            local mcp_target="${CACHE_DIR}/bin/tasks-mcp"
-            if [[ -x "$mcp_binary" ]]; then
-                cp "$mcp_binary" "$mcp_target"
-                chmod +x "$mcp_target"
-            fi
 
             # Copy bulk-tasks to the plugin's bin directory (version-scoped)
             local bulk_binary="${PLUGIN_ROOT}/target/release/bulk_tasks"

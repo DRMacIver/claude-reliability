@@ -4,11 +4,11 @@ This project uses the claude-reliability plugin for work tracking.
 
 ## Quick Reference
 
-Work management is available through the MCP tools:
-- `create_work_item` - Create a new work item
-- `list_work_items` - List work items by status
-- `work_on` - Mark a work item as in-progress
-- `update_work_item` - Update work item status
+Work management is available through the CLI:
+- `claude-reliability work create` - Create a new work item
+- `claude-reliability work list` - List work items by status
+- `claude-reliability work on` - Mark a work item as in-progress
+- `claude-reliability work update` - Update work item status
 
 ## Landing the Plane (Session Completion)
 

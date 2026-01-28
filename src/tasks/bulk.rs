@@ -2,7 +2,7 @@
 //!
 //! This module provides functions for creating multiple tasks, setting up
 //! dependencies, listing, and searching tasks - all via JSON input/output
-//! which is much faster than individual MCP tool calls.
+//! which is faster than individual CLI calls.
 //!
 //! # Usage
 //!

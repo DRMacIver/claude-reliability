@@ -18,7 +18,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 BINARY_PATH="${PROJECT_ROOT}/.claude/bin/claude-reliability"
-MCP_BINARY_PATH="${PROJECT_ROOT}/.claude/bin/tasks-mcp"
 PLUGIN_SOURCE_FILE="${PROJECT_ROOT}/.claude/plugin-source.txt"
 
 # Check for external plugin source (installed from local checkout)
@@ -56,7 +55,7 @@ get_plugin_source_dir() {
     fi
 }
 
-# Check if source files are newer than either binary
+# Check if source files are newer than the binary
 source_is_newer() {
     local source_dir
     source_dir="$(get_plugin_source_dir)"
@@ -65,38 +64,32 @@ source_is_newer() {
         return 1  # No source, can't be newer
     fi
 
-    # Need to build if either binary is missing
-    if [[ ! -x "$BINARY_PATH" ]] || [[ ! -x "$MCP_BINARY_PATH" ]]; then
+    # Need to build if binary is missing
+    if [[ ! -x "$BINARY_PATH" ]]; then
         return 0  # Missing binary, need to build
     fi
 
-    # Use the older of the two binaries for comparison
-    local ref_binary="$BINARY_PATH"
-    if [[ "$MCP_BINARY_PATH" -ot "$BINARY_PATH" ]]; then
-        ref_binary="$MCP_BINARY_PATH"
-    fi
-
-    # Check if any Rust source files are newer than the reference binary
+    # Check if any Rust source files are newer than the binary
     local newer_files
-    newer_files=$(find "${source_dir}/src" -name '*.rs' -newer "$ref_binary" 2>/dev/null | head -1)
+    newer_files=$(find "${source_dir}/src" -name '*.rs' -newer "$BINARY_PATH" 2>/dev/null | head -1)
     if [[ -n "$newer_files" ]]; then
         return 0  # Source is newer
     fi
 
     # Also check Cargo.toml for dependency changes
-    if [[ "${source_dir}/Cargo.toml" -nt "$ref_binary" ]]; then
+    if [[ "${source_dir}/Cargo.toml" -nt "$BINARY_PATH" ]]; then
         return 0
     fi
 
     # Check templates directory too
     if [[ -d "${source_dir}/templates" ]]; then
-        newer_files=$(find "${source_dir}/templates" -type f -newer "$ref_binary" 2>/dev/null | head -1)
+        newer_files=$(find "${source_dir}/templates" -type f -newer "$BINARY_PATH" 2>/dev/null | head -1)
         if [[ -n "$newer_files" ]]; then
             return 0
         fi
     fi
 
-    return 1  # Binaries are up to date
+    return 1  # Binary is up to date
 }
 
 # Detect platform
@@ -172,13 +165,6 @@ download_from_release() {
     mv "${tmp_dir}/claude-reliability" "$BINARY_PATH"
     chmod +x "$BINARY_PATH"
 
-    # Also install tasks-mcp if present in the archive
-    if [[ -f "${tmp_dir}/tasks-mcp" ]]; then
-        mv "${tmp_dir}/tasks-mcp" "$MCP_BINARY_PATH"
-        chmod +x "$MCP_BINARY_PATH"
-        echo "MCP server installed to ${MCP_BINARY_PATH}" >&2
-    fi
-
     return 0
 }
 
@@ -236,13 +222,7 @@ build_from_source() {
         return 1
     fi
 
-    # Build MCP server binary
-    if ! cargo build --release --features mcp --manifest-path "${source_dir}/Cargo.toml" >&2; then
-        echo "MCP server build failed" >&2
-        return 1
-    fi
-
-    # Copy the built binaries to the project's .claude/bin
+    # Copy the built binary to the project's .claude/bin
     mkdir -p "${PROJECT_ROOT}/.claude/bin"
 
     local built_binary="${source_dir}/target/release/claude-reliability"
@@ -254,16 +234,6 @@ build_from_source() {
         return 1
     fi
 
-    local built_mcp="${source_dir}/target/release/tasks-mcp"
-    if [[ -x "$built_mcp" ]]; then
-        cp "$built_mcp" "$MCP_BINARY_PATH"
-        chmod +x "$MCP_BINARY_PATH"
-        echo "MCP server built and installed" >&2
-    else
-        echo "Built MCP binary not found at ${built_mcp}" >&2
-        return 1
-    fi
-
     return 0
 }
 
@@ -271,16 +241,16 @@ build_from_source() {
 # Main logic
 # ============================================================================
 
-# Helper to check if both binaries are ready
-binaries_ready() {
-    [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1 && [[ -x "$MCP_BINARY_PATH" ]]
+# Helper to check if binary is ready
+binary_ready() {
+    [[ -x "$BINARY_PATH" ]] && "$BINARY_PATH" version >/dev/null 2>&1
 }
 
 # Check if we have a plugin source and need to rebuild due to source changes
 if has_plugin_source && source_is_newer; then
     echo "Source files changed, rebuilding..." >&2
     if build_from_source; then
-        if binaries_ready; then
+        if binary_ready; then
             echo "$BINARY_PATH"
             exit 0
         fi
@@ -288,24 +258,24 @@ if has_plugin_source && source_is_newer; then
     echo "Rebuild failed, trying other methods..." >&2
 fi
 
-# Check if both binaries exist and are executable
-if binaries_ready; then
+# Check if binary exists and is executable
+if binary_ready; then
     echo "$BINARY_PATH"
     exit 0
 fi
 
-# Remove broken binaries
+# Remove broken binary
 if [[ -x "$BINARY_PATH" ]] && ! "$BINARY_PATH" version >/dev/null 2>&1; then
     rm -f "$BINARY_PATH"
 fi
 
-# Not in source repo or missing binaries - try downloading
+# Not in source repo or missing binary - try downloading
 artifact_name=$(detect_platform)
 
 if [[ -n "$artifact_name" ]]; then
     # Try downloading first
     if download_from_release "$artifact_name"; then
-        if binaries_ready; then
+        if binary_ready; then
             echo "$BINARY_PATH"
             exit 0
         fi
@@ -314,13 +284,13 @@ fi
 
 # Fall back to building from source (only works if we have plugin source)
 if has_plugin_source && build_from_source; then
-    if binaries_ready; then
+    if binary_ready; then
         echo "$BINARY_PATH"
         exit 0
     fi
 fi
 
-echo "ERROR: Failed to obtain claude-reliability binaries" >&2
+echo "ERROR: Failed to obtain claude-reliability binary" >&2
 echo "" >&2
 echo "Tried:" >&2
 echo "  - Download from GitHub releases (${GITHUB_API}/repos/${REPO}/releases/latest)" >&2
@@ -328,14 +298,11 @@ if has_plugin_source; then
     echo "  - Build from source ($(get_plugin_source_dir))" >&2
 fi
 echo "" >&2
-echo "Expected binary locations:" >&2
-echo "  CLI: ${BINARY_PATH}" >&2
-echo "  MCP: ${MCP_BINARY_PATH}" >&2
+echo "Expected binary location: ${BINARY_PATH}" >&2
 echo "Detected platform: $(uname -s) $(uname -m)" >&2
 echo "Supported platforms: Linux x86_64, Linux ARM64, macOS ARM64" >&2
 echo "" >&2
 echo "To build manually:" >&2
 echo "  cd <source-dir>" >&2
 echo "  cargo build --release --features cli" >&2
-echo "  cargo build --release --features mcp" >&2
 exit 1

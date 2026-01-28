@@ -206,6 +206,6 @@ digraph StopHookStateMachine {
     // - AnalyzeDiff: Bash(git diff --cached, git diff)
     // - RunQualityOnChanges: Bash(sh -c "quality_command")
     // - RunValidation: Bash(sh -c "quality_command")
-    // - CheckReadyIssues: MCP task tools
+    // - CheckReadyIssues: CLI task tools (claude-reliability work)
     // - SubAgentDecision: Sub-agent API call (decide_on_question)
 }
