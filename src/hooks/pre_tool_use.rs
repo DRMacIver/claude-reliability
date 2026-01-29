@@ -95,6 +95,11 @@ pub fn run_pre_tool_use_with_sub_agent(
             check_hook!(run_validation_hook(input, base_dir));
         }
 
+        "EnterPlanMode" => {
+            // Inject user intent guidance before planning
+            return handle_enter_plan_mode();
+        }
+
         "ExitPlanMode" => {
             // Create tasks for the plan being approved
             // This runs at PreToolUse because PostToolUse doesn't fire for ExitPlanMode
@@ -129,6 +134,23 @@ fn get_reminder_context(input: &HookInput, base_dir: &Path) -> Option<String> {
     }
 
     Some(reminder_messages.join("\n\n"))
+}
+
+/// Handle `EnterPlanMode` by injecting user intent guidance.
+///
+/// This injects guidance about understanding user intent as additional context,
+/// ensuring the agent considers the user's actual intent before planning.
+///
+/// # Panics
+///
+/// Panics if the embedded template fails to render. Templates are verified by
+/// `test_all_embedded_templates_render`, so this should only occur if a template
+/// has a bug that escaped tests.
+fn handle_enter_plan_mode() -> PreToolUseOutput {
+    let ctx = Context::new();
+    let context = templates::render("messages/enter_plan_mode_intent.tera", &ctx)
+        .expect("enter_plan_mode_intent.tera template should always render");
+    PreToolUseOutput::allow(Some(context))
 }
 
 /// Handle `ExitPlanMode` by creating tasks from the plan file.
@@ -393,6 +415,37 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Code review required"));
+    }
+
+    #[test]
+    fn test_enter_plan_mode_includes_intent_context() {
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        let input = HookInput {
+            tool_name: Some("EnterPlanMode".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        let context = output
+            .hook_specific_output
+            .additional_context
+            .expect("EnterPlanMode should include additional context");
+        assert!(
+            context.contains("Load-Bearing Feature"),
+            "Intent context should mention load-bearing features"
+        );
+        assert!(
+            context.contains("Sanity Check"),
+            "Intent context should include sanity check guidance"
+        );
+        assert!(
+            context.contains("understanding-user-intent"),
+            "Intent context should reference the full skill"
+        );
     }
 
     #[test]

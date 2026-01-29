@@ -92,6 +92,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         include_str!("../templates/messages/session_intro.tera"),
     );
     m.insert("messages/require_task.tera", include_str!("../templates/messages/require_task.tera"));
+    m.insert(
+        "messages/enter_plan_mode_intent.tera",
+        include_str!("../templates/messages/enter_plan_mode_intent.tera"),
+    );
 
     m
 });

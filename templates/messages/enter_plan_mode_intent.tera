@@ -1,0 +1,42 @@
+{# Injected as additionalContext when EnterPlanMode fires.
+   Ensures the agent considers user intent before planning.
+
+Variables: none
+#}
+# Before Planning: Understand What the User Actually Wants
+
+Before creating your plan, systematically verify you understand the user's actual intent — not just a literal reading of their words. The most expensive failure mode is building something that technically satisfies a request but is obviously useless.
+
+## 1. Identify the Load-Bearing Feature
+
+State in one sentence: "The central point of this request is ___."
+
+If your plan doesn't deliver this central feature, nothing else matters. A notification system that doesn't deliver notifications, a cache that doesn't invalidate, a test that doesn't assert — these are all examples of missing the load-bearing feature.
+
+## 2. Surface the Obvious Implications
+
+Ask: "If I described my plan to the person who made this request, would they say 'but obviously I also need X'?"
+
+Common implicit expectations:
+- Things that are added must be connected to the system (not standalone dead code)
+- Things that are built must actually function (not stubs or placeholders)
+- Things must work in context (not just in isolation)
+- Changes should be made where they belong (right project, right module, right directory)
+- If adding a hook, it must be registered and triggered. If adding a skill, it must be discoverable.
+
+## 3. Sanity Check Your Interpretation
+
+- Re-read the request word by word. Does your plan address each element?
+- Is your plan solving the problem that was asked about, or a different (usually easier) one?
+- Is the scope right? A reasonable request leading to a trivial change, or an enormous rewrite, suggests misunderstanding.
+- Would the user recognize your plan as fulfilling their request — not just technically, but actually?
+
+**Red flags:** Your plan ignores a key phrase in the request. You're solving a suspiciously easier problem. You're adding things but not connecting them. You're working in the wrong place.
+
+## 4. After Implementation: Verify
+
+- Walk through the original request again and check every element is addressed
+- Test the complete flow end-to-end from the user's perspective
+- Apply the "Would I accept this?" test: if you made this request, would you be satisfied?
+
+For the full guidance on understanding user intent, load the skill: `understanding-user-intent`
