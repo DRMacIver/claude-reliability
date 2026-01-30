@@ -16,11 +16,11 @@ When you need to pick a work item to work on, use the `work next` command. It au
 
 ```bash
 # Start a work session
-.claude-reliability/bin/claude-reliability work next
+claude-reliability work next
 # -> Returns a suggested work item with full details
 
 # Then mark it in progress
-.claude-reliability/bin/claude-reliability work on <work-item-id>
+claude-reliability work on <work-item-id>
 ```
 
 ## Creating Work Items Effectively
@@ -57,39 +57,39 @@ Dependencies ensure items happen in the right order. Use them to:
 ### Test-Driven Development (TDD)
 ```bash
 # 1. Create work items
-.claude-reliability/bin/claude-reliability work create -t "Design API for feature X"
-.claude-reliability/bin/claude-reliability work create -t "Write tests for feature X"
-.claude-reliability/bin/claude-reliability work create -t "Implement feature X"
+claude-reliability work create -t "Design API for feature X"
+claude-reliability work create -t "Write tests for feature X"
+claude-reliability work create -t "Implement feature X"
 
 # 2. Add dependencies (use IDs from creation output)
-.claude-reliability/bin/claude-reliability work add-dep <write-tests-id> --depends-on <design-api-id>
-.claude-reliability/bin/claude-reliability work add-dep <implement-id> --depends-on <write-tests-id>
+claude-reliability work add-dep <write-tests-id> --depends-on <design-api-id>
+claude-reliability work add-dep <implement-id> --depends-on <write-tests-id>
 ```
 
 This ensures: Design -> Tests -> Implementation
 
 ### Multi-Phase Work
 ```bash
-.claude-reliability/bin/claude-reliability work create -t "Research options for auth system"
-.claude-reliability/bin/claude-reliability work create -t "Prototype chosen approach"
-.claude-reliability/bin/claude-reliability work create -t "Full implementation"
-.claude-reliability/bin/claude-reliability work create -t "Write documentation"
+claude-reliability work create -t "Research options for auth system"
+claude-reliability work create -t "Prototype chosen approach"
+claude-reliability work create -t "Full implementation"
+claude-reliability work create -t "Write documentation"
 
 # Chain dependencies
-.claude-reliability/bin/claude-reliability work add-dep <prototype-id> --depends-on <research-id>
-.claude-reliability/bin/claude-reliability work add-dep <implement-id> --depends-on <prototype-id>
-.claude-reliability/bin/claude-reliability work add-dep <docs-id> --depends-on <implement-id>
+claude-reliability work add-dep <prototype-id> --depends-on <research-id>
+claude-reliability work add-dep <implement-id> --depends-on <prototype-id>
+claude-reliability work add-dep <docs-id> --depends-on <implement-id>
 ```
 
 ### Parallel with Sync Point
 ```bash
-.claude-reliability/bin/claude-reliability work create -t "Implement frontend component"
-.claude-reliability/bin/claude-reliability work create -t "Implement backend API"
-.claude-reliability/bin/claude-reliability work create -t "Integration testing"
+claude-reliability work create -t "Implement frontend component"
+claude-reliability work create -t "Implement backend API"
+claude-reliability work create -t "Integration testing"
 
 # Testing depends on both
-.claude-reliability/bin/claude-reliability work add-dep <testing-id> --depends-on <frontend-id>
-.claude-reliability/bin/claude-reliability work add-dep <testing-id> --depends-on <backend-id>
+claude-reliability work add-dep <testing-id> --depends-on <frontend-id>
+claude-reliability work add-dep <testing-id> --depends-on <backend-id>
 ```
 
 Both frontend and backend can proceed in parallel, but testing waits for both.
@@ -135,26 +135,26 @@ The `id` fields are temporary for setting up dependencies. Real IDs are returned
 
 ```bash
 # Find work to do
-.claude-reliability/bin/claude-reliability work next
+claude-reliability work next
 
 # Create work item
-.claude-reliability/bin/claude-reliability work create -t "Task title" -d "Description" -p 2
+claude-reliability work create -t "Task title" -d "Description" -p 2
 
 # Get work item details
-.claude-reliability/bin/claude-reliability work get <id>
+claude-reliability work get <id>
 
 # Add dependency (work_item_id depends on depends_on)
-.claude-reliability/bin/claude-reliability work add-dep <id> --depends-on <other-id>
+claude-reliability work add-dep <id> --depends-on <other-id>
 
 # Start working
-.claude-reliability/bin/claude-reliability work on <id>
+claude-reliability work on <id>
 
 # Add context
-.claude-reliability/bin/claude-reliability work add-note <id> -c "Progress note here"
+claude-reliability work add-note <id> -c "Progress note here"
 
 # Mark complete
-.claude-reliability/bin/claude-reliability work update <id> --status complete
+claude-reliability work update <id> --status complete
 
 # List open items
-.claude-reliability/bin/claude-reliability work list --status open --ready-only
+claude-reliability work list --status open --ready-only
 ```

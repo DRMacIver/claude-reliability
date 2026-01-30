@@ -6,7 +6,9 @@ A plugin for Claude to improve its reliability through comprehensive testing inf
 
 **DO NOT put binaries in shared locations like `~/.claude-reliability/`.**
 
-Different projects may use different versions of this plugin. Binaries MUST be stored per-project in `.claude-reliability/bin/` within the project directory, NOT in a shared home directory location. The startup hooks ensure the correct version is available at `.claude-reliability/bin/claude-reliability` for each project.
+Different projects may use different versions of this plugin. Binaries MUST be stored per-project in `.claude-reliability/bin/` within the project directory, NOT in a shared home directory location. The startup hooks ensure the correct version is available for each project.
+
+**Command usage:** Just use `claude-reliability` in all commands and documentation. The pre-tool-use hook automatically rewrites bare `claude-reliability` commands to the correct path (`.claude-reliability/bin/claude-reliability`) via `updatedInput` before execution.
 
 ## Overview
 
@@ -53,14 +55,14 @@ python -m snapshot_tests.run_snapshots --save-snapshot my-test
 
 ## Work Tracking
 
-This project uses the claude-reliability plugin for work tracking via CLI. The binary is at `.claude-reliability/bin/claude-reliability`:
+This project uses the claude-reliability plugin for work tracking via CLI. The binary is at `claude-reliability`:
 
 ```bash
-.claude-reliability/bin/claude-reliability work create -t "Title" -d "Description"  # Create work item
-.claude-reliability/bin/claude-reliability work list                                 # List work items
-.claude-reliability/bin/claude-reliability work on <id>                              # Mark as in-progress
-.claude-reliability/bin/claude-reliability work update <id> --status complete        # Update status
-.claude-reliability/bin/claude-reliability work next                                 # Get next work item
+claude-reliability work create -t "Title" -d "Description"  # Create work item
+claude-reliability work list                                 # List work items
+claude-reliability work on <id>                              # Mark as in-progress
+claude-reliability work update <id> --status complete        # Update status
+claude-reliability work next                                 # Get next work item
 ```
 
 ## Quality Standards

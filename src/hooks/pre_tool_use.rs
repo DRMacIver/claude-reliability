@@ -65,6 +65,11 @@ pub fn run_pre_tool_use_with_sub_agent(
     // Tool-specific hooks
     match tool_name {
         "Bash" => {
+            // Rewrite bare "claude-reliability" to the correct binary path
+            if let Some(rewritten) = rewrite_bare_claude_reliability(input) {
+                return rewritten;
+            }
+
             // Check for --no-verify
             check_hook!(run_no_verify_check(input));
 
@@ -168,6 +173,37 @@ fn handle_exit_plan_mode(base_dir: &Path, plans_dir_override: Option<&Path>) {
         // Log but don't block - plan approval should continue
         eprintln!("Warning: Failed to create plan tasks: {e}");
     }
+}
+
+/// Rewrite bare `claude-reliability` commands to use the correct binary path.
+///
+/// When a Bash command starts with `claude-reliability` (without a path prefix),
+/// this rewrites it to `.claude-reliability/bin/claude-reliability` so that
+/// documentation and instructions can use the short form.
+///
+/// Returns `Some(output)` with `updatedInput` if the command was rewritten,
+/// or `None` if no rewrite was needed.
+fn rewrite_bare_claude_reliability(input: &HookInput) -> Option<PreToolUseOutput> {
+    let command = input.tool_input.as_ref()?.command.as_deref()?;
+    let trimmed = command.trim_start();
+
+    // Only match bare "claude-reliability" at the start (not already a path)
+    if !trimmed.starts_with("claude-reliability") {
+        return None;
+    }
+
+    // Ensure it's the full token, not something like "claude-reliability-other"
+    let rest = &trimmed["claude-reliability".len()..];
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
+
+    // Rewrite the first occurrence
+    let new_command =
+        command.replacen("claude-reliability", ".claude-reliability/bin/claude-reliability", 1);
+
+    let updated_input = serde_json::json!({ "command": new_command });
+    Some(PreToolUseOutput::allow_with_rewrite(updated_input))
 }
 
 /// Check for --no-verify flag in git commands.
@@ -415,6 +451,133 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Code review required"));
+    }
+
+    #[test]
+    fn test_bash_rewrites_bare_claude_reliability() {
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("claude-reliability work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        let updated = output.hook_specific_output.updated_input.unwrap();
+        assert_eq!(updated["command"], ".claude-reliability/bin/claude-reliability work list");
+    }
+
+    #[test]
+    fn test_bash_does_not_rewrite_full_path() {
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(".claude-reliability/bin/claude-reliability work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        // Should NOT have updatedInput since the path is already correct
+        assert!(output.hook_specific_output.updated_input.is_none());
+    }
+
+    #[test]
+    fn test_bash_does_not_rewrite_similar_names() {
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("claude-reliability-other work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        assert!(output.hook_specific_output.updated_input.is_none());
+    }
+
+    #[test]
+    fn test_bash_rewrites_bare_claude_reliability_no_args() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("claude-reliability".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = rewrite_bare_claude_reliability(&input).unwrap();
+        let updated = result.hook_specific_output.updated_input.unwrap();
+        assert_eq!(updated["command"], ".claude-reliability/bin/claude-reliability");
+    }
+
+    #[test]
+    fn test_bash_rewrites_preserves_leading_whitespace() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("  claude-reliability work next".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = rewrite_bare_claude_reliability(&input).unwrap();
+        let updated = result.hook_specific_output.updated_input.unwrap();
+        assert_eq!(updated["command"], "  .claude-reliability/bin/claude-reliability work next");
+    }
+
+    #[test]
+    fn test_bash_no_rewrite_for_non_claude_reliability() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("git status".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(rewrite_bare_claude_reliability(&input).is_none());
+    }
+
+    #[test]
+    fn test_bash_no_rewrite_for_no_command() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput { command: None, ..Default::default() }),
+            ..Default::default()
+        };
+
+        assert!(rewrite_bare_claude_reliability(&input).is_none());
+    }
+
+    #[test]
+    fn test_bash_no_rewrite_for_no_tool_input() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: None,
+            ..Default::default()
+        };
+
+        assert!(rewrite_bare_claude_reliability(&input).is_none());
     }
 
     #[test]

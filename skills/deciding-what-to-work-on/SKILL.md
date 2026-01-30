@@ -9,7 +9,7 @@ description: "This skill should be used when the user asks 'what should I work o
 
 If you just need something to work on:
 ```bash
-.claude-reliability/bin/claude-reliability work next
+claude-reliability work next
 ```
 
 This picks a random work item from the highest-priority unblocked items.
@@ -20,7 +20,7 @@ This picks a random work item from the highest-priority unblocked items.
 
 Before picking new work, check if anything is blocked on you:
 ```bash
-.claude-reliability/bin/claude-reliability work list --status open --ready-only
+claude-reliability work list --status open --ready-only
 ```
 
 Look for items you previously started that might be waiting.
@@ -35,14 +35,14 @@ Work in priority order:
 - **P4 (Backlog)**: Future work, not urgent
 
 ```bash
-.claude-reliability/bin/claude-reliability work list --max-priority 1 --ready-only  # Show P0 and P1 only
+claude-reliability work list --max-priority 1 --ready-only  # Show P0 and P1 only
 ```
 
 ### 3. Check for Questions
 
 Items might be blocked on user questions:
 ```bash
-.claude-reliability/bin/claude-reliability work blocked
+claude-reliability work blocked
 ```
 
 If you can answer any of these yourself now (with context you've gained), do so with `question answer`.
@@ -51,7 +51,7 @@ If you can answer any of these yourself now (with context you've gained), do so 
 
 Some items unblock others. Prioritize items that are blocking other work:
 ```bash
-.claude-reliability/bin/claude-reliability work get <id>  # Check what items this one blocks
+claude-reliability work get <id>  # Check what items this one blocks
 ```
 
 ## Work Autonomously
@@ -69,21 +69,21 @@ Some items unblock others. Prioritize items that are blocking other work:
 
 ## Workflow
 
-1. `.claude-reliability/bin/claude-reliability work list --status open --ready-only` - See what's available
+1. `claude-reliability work list --status open --ready-only` - See what's available
 2. Pick highest priority unblocked item
-3. `.claude-reliability/bin/claude-reliability work on <id>` - Mark as in-progress
-4. `.claude-reliability/bin/claude-reliability work get <id>` - Read full description and notes
+3. `claude-reliability work on <id>` - Mark as in-progress
+4. `claude-reliability work get <id>` - Read full description and notes
 5. Do the work
-6. `.claude-reliability/bin/claude-reliability work add-note <id> -c "..."` - Record progress/findings
-7. `.claude-reliability/bin/claude-reliability work update <id> --status complete` - Mark done
+6. `claude-reliability work add-note <id> -c "..."` - Record progress/findings
+7. `claude-reliability work update <id> --status complete` - Mark done
 8. Repeat
 
 ## When Stuck
 
 If you're stuck on an item:
 
-1. **Create a question**: `.claude-reliability/bin/claude-reliability question create -t "How should I handle X?"`
-2. **Link it**: `.claude-reliability/bin/claude-reliability question link <work-id> --question-id <q-id>`
+1. **Create a question**: `claude-reliability question create -t "How should I handle X?"`
+2. **Link it**: `claude-reliability question link <work-id> --question-id <q-id>`
 3. **Move on**: The item is now blocked, pick another
 
 Don't spin on problems that need user input.
@@ -93,6 +93,6 @@ Don't spin on problems that need user input.
 If `work list --ready-only` shows nothing:
 
 1. Check `work blocked` - maybe you can answer some questions
-2. Look at backlog: `.claude-reliability/bin/claude-reliability work list --priority 4`
+2. Look at backlog: `claude-reliability work list --priority 4`
 3. Ask the user if there's something they want done
 4. Stop if genuinely nothing to do - it's okay to stop when work is done

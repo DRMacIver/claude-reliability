@@ -50,7 +50,7 @@ Common problems and solutions:
 ## Creating How-Tos
 
 ```bash
-.claude-reliability/bin/claude-reliability howto create \
+claude-reliability howto create \
   -t "How to add a new API endpoint" \
   -i "... markdown content ..."
 ```
@@ -59,7 +59,7 @@ Common problems and solutions:
 
 When a task needs to follow a procedure:
 ```bash
-.claude-reliability/bin/claude-reliability work link-howto <work-item-id> --howto-id <howto-id>
+claude-reliability work link-howto <work-item-id> --howto-id <howto-id>
 ```
 
 Now when viewing the task, the guidance is visible.
@@ -68,20 +68,20 @@ Now when viewing the task, the guidance is visible.
 
 Find relevant guides:
 ```bash
-.claude-reliability/bin/claude-reliability howto search "deploy"
-.claude-reliability/bin/claude-reliability howto list  # See all
+claude-reliability howto search "deploy"
+claude-reliability howto list  # See all
 ```
 
 ## Maintaining How-Tos
 
 ### Update When Procedures Change
 ```bash
-.claude-reliability/bin/claude-reliability howto update <id> -i "... new content ..."
+claude-reliability howto update <id> -i "... new content ..."
 ```
 
 ### Delete Obsolete Guides
 ```bash
-.claude-reliability/bin/claude-reliability howto delete <id>
+claude-reliability howto delete <id>
 ```
 
 ### Review Periodically

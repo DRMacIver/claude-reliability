@@ -74,6 +74,9 @@ pub struct HookSpecificOutput {
     /// Additional context to provide to the agent.
     #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    /// Updated tool input to replace the original before execution.
+    #[serde(rename = "updatedInput", skip_serializing_if = "Option::is_none")]
+    pub updated_input: Option<serde_json::Value>,
 }
 
 impl PreToolUseOutput {
@@ -84,6 +87,19 @@ impl PreToolUseOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: "allow".to_string(),
                 additional_context: context,
+                updated_input: None,
+            },
+        }
+    }
+
+    /// Create an "allow" response that rewrites the tool input.
+    pub fn allow_with_rewrite(updated_input: serde_json::Value) -> Self {
+        Self {
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: "PreToolUse".to_string(),
+                permission_decision: "allow".to_string(),
+                additional_context: None,
+                updated_input: Some(updated_input),
             },
         }
     }
@@ -95,6 +111,7 @@ impl PreToolUseOutput {
                 hook_event_name: "PreToolUse".to_string(),
                 permission_decision: "block".to_string(),
                 additional_context: context,
+                updated_input: None,
             },
         }
     }
@@ -159,6 +176,25 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("block"));
         assert!(!json.contains("additionalContext"));
+        assert!(!json.contains("updatedInput"));
+    }
+
+    #[test]
+    fn test_pre_tool_use_output_allow_with_rewrite() {
+        let updated = serde_json::json!({"command": "new-command arg1"});
+        let output = PreToolUseOutput::allow_with_rewrite(updated);
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("allow"));
+        assert!(json.contains("updatedInput"));
+        assert!(json.contains("new-command arg1"));
+        assert!(!json.contains("additionalContext"));
+    }
+
+    #[test]
+    fn test_pre_tool_use_output_allow_omits_updated_input() {
+        let output = PreToolUseOutput::allow(Some("context".to_string()));
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(!json.contains("updatedInput"));
     }
 
     #[test]
