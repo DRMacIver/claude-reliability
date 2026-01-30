@@ -143,6 +143,7 @@ fn run_stop_cmd(stdin: &str) -> CliOutput {
         explain_stops: project_config.explain_stops,
         auto_work_on_tasks: project_config.auto_work_on_tasks,
         auto_work_idle_minutes: project_config.auto_work_idle_minutes,
+        single_work_item_id: crate::single_work_item::get_single_work_item_id(),
     };
 
     let input = match parse_hook_input(stdin) {
@@ -447,6 +448,46 @@ fn work_search(store: &SqliteTaskStore, query: &str, limit: Option<usize>) -> Cl
 }
 
 fn work_next(store: &SqliteTaskStore) -> CliOutput {
+    // In single work item mode, always return the assigned item (or "no items" if done)
+    if let Some(single_id) = crate::single_work_item::get_single_work_item_id() {
+        return match store.get_task(&single_id) {
+            Ok(Some(task))
+                if !matches!(
+                    task.status,
+                    crate::tasks::Status::Complete | crate::tasks::Status::Abandoned
+                ) =>
+            {
+                let deps = store.get_dependencies(&task.id).unwrap_or_default();
+                let notes = store.get_notes(&task.id).unwrap_or_default();
+                let guidance = store.get_task_guidance(&task.id).unwrap_or_default();
+
+                let howtos: Vec<HowToOutput> = guidance
+                    .iter()
+                    .filter_map(|id| {
+                        store.get_howto(id).ok().flatten().map(|h| HowToOutput::from(&h))
+                    })
+                    .collect();
+
+                let output = WorkItemSuggestion {
+                    task: WorkItemOutput::from_task(&task, deps, guidance),
+                    notes: notes.into_iter().map(NoteOutput::from).collect(),
+                    howtos,
+                    message: format!(
+                        "Single work item mode: {} (priority: {})",
+                        task.title,
+                        priority_label(task.priority)
+                    ),
+                };
+                json_output(&output)
+            }
+            Ok(_) => success_output(
+                "No work items available. The single assigned work item is already complete."
+                    .to_string(),
+            ),
+            Err(e) => error_output(e.to_string()),
+        };
+    }
+
     match store.pick_task() {
         Ok(Some(task)) => {
             let deps = store.get_dependencies(&task.id).unwrap_or_default();
@@ -479,6 +520,15 @@ fn work_next(store: &SqliteTaskStore) -> CliOutput {
 }
 
 fn work_on(store: &SqliteTaskStore, id: &str) -> CliOutput {
+    // In single work item mode, reject attempts to work on a different item
+    if let Some(single_id) = crate::single_work_item::get_single_work_item_id() {
+        if id != single_id {
+            return error_output(format!(
+                "Single work item mode: can only work on {single_id}, not {id}"
+            ));
+        }
+    }
+
     let update = TaskUpdate { in_progress: Some(true), ..Default::default() };
 
     match store.update_task(id, update) {

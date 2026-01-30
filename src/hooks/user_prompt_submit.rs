@@ -52,6 +52,16 @@ pub fn run_user_prompt_submit_hook(
     input: &UserPromptSubmitInput,
     base_dir: Option<&Path>,
 ) -> Result<UserPromptSubmitOutput> {
+    let single_work_item_id = crate::single_work_item::get_single_work_item_id();
+    run_user_prompt_submit_hook_inner(input, base_dir, single_work_item_id.as_deref())
+}
+
+/// Inner implementation that accepts single work item ID explicitly for testability.
+fn run_user_prompt_submit_hook_inner(
+    input: &UserPromptSubmitInput,
+    base_dir: Option<&Path>,
+    single_work_item_id: Option<&str>,
+) -> Result<UserPromptSubmitOutput> {
     let base = base_dir.unwrap_or_else(|| Path::new("."));
 
     // Clear the needs validation marker - user has seen changes
@@ -63,6 +73,21 @@ pub fn run_user_prompt_submit_hook(
     // Check if this is a post-compaction scenario
     if input.is_compact_summary {
         return Ok(UserPromptSubmitOutput { system_message: Some(post_compaction_message(input)) });
+    }
+
+    // Single work item mode: validate the assigned item and announce it
+    if let Some(swi_id) = single_work_item_id {
+        return match crate::single_work_item::validate_work_item(base, swi_id) {
+            Ok((id, title)) => Ok(UserPromptSubmitOutput {
+                system_message: Some(format!(
+                    "Single work item mode active. Assigned item: [{id}] {title}\n\
+                     Only this item needs to be completed to exit."
+                )),
+            }),
+            Err(msg) => {
+                Ok(UserPromptSubmitOutput { system_message: Some(format!("ERROR: {msg}")) })
+            }
+        };
     }
 
     // Create a work item for the user's message to verify nothing is missed
@@ -498,5 +523,60 @@ mod tests {
         let result = create_user_message_task(&store, "test prompt", None);
 
         assert!(result.is_err());
+    }
+
+    // -- Single work item mode tests --
+
+    #[test]
+    fn test_single_work_item_valid_announces_mode() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("My assigned task", "Do the thing", Priority::Medium).unwrap();
+
+        let input = input_with_prompt("Hello");
+        let output = run_user_prompt_submit_hook_inner(&input, Some(base), Some(&task.id)).unwrap();
+
+        assert!(output.system_message.is_some());
+        let msg = output.system_message.unwrap();
+        assert!(msg.contains("Single work item mode active"), "msg: {msg}");
+        assert!(msg.contains(&task.id), "msg: {msg}");
+        assert!(msg.contains("My assigned task"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_single_work_item_invalid_id_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create the database so the store can be opened
+        let _store = SqliteTaskStore::for_project(base).unwrap();
+
+        let input = input_with_prompt("Hello");
+        let output =
+            run_user_prompt_submit_hook_inner(&input, Some(base), Some("nonexistent-id")).unwrap();
+
+        assert!(output.system_message.is_some());
+        let msg = output.system_message.unwrap();
+        assert!(msg.contains("ERROR"), "msg: {msg}");
+        assert!(msg.contains("not found"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_single_work_item_skips_work_item_creation() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("Assigned item", "Work on this", Priority::Medium).unwrap();
+
+        let input = input_with_prompt("Please fix the bug");
+        run_user_prompt_submit_hook_inner(&input, Some(base), Some(&task.id)).unwrap();
+
+        // Only the pre-existing task should exist (no "User message:" task created)
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task.id);
     }
 }

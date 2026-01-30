@@ -15,6 +15,7 @@ pub mod paths;
 pub mod question;
 pub mod reminders;
 pub mod session;
+pub mod single_work_item;
 pub mod storage;
 pub mod subagent;
 pub mod subagent_logging;

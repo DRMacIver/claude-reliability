@@ -94,6 +94,9 @@ pub struct StopHookConfig {
     pub auto_work_on_tasks: bool,
     /// Minutes of user inactivity before prompting to work on tasks.
     pub auto_work_idle_minutes: u32,
+    /// When set, constrains the session to a single assigned work item.
+    /// Read from `CLAUDE_RELIABILITY_SINGLE_WORK_ITEM` at config construction time.
+    pub single_work_item_id: Option<String>,
 }
 
 impl StopHookConfig {
@@ -541,6 +544,12 @@ fn check_requested_tasks_block(
     if !transcript_info.has_modifying_tool_use {
         return None;
     }
+
+    // In single work item mode, check only the assigned item
+    if let Some(single_id) = &config.single_work_item_id {
+        return check_single_work_item_complete(config, single_id);
+    }
+
     check_incomplete_requested_tasks(config)
 }
 
@@ -622,7 +631,12 @@ fn check_reflection_marker_allow(config: &StopHookConfig) -> Option<StopHookResu
     session::clear_reflect_marker(base_dir).expect("failed to clear reflect marker");
 
     // Check for incomplete requested tasks before allowing stop (work was done)
-    if let Some(result) = check_incomplete_requested_tasks(config) {
+    // In single work item mode, check only the assigned item
+    if let Some(single_id) = &config.single_work_item_id {
+        if let Some(result) = check_single_work_item_complete(config, single_id) {
+            return Some(result);
+        }
+    } else if let Some(result) = check_incomplete_requested_tasks(config) {
         return Some(result);
     }
 
@@ -936,6 +950,35 @@ fn check_incomplete_requested_tasks(config: &StopHookConfig) -> Option<StopHookR
         .with_message("Use `claude-reliability work update <id> --status complete` to mark items done. Run `/claude-reliability:task-management` for detailed guidance.")
         .with_message("")
         .with_message("If you've hit a problem you cannot solve without user input, use `claude-reliability emergency-stop <explanation>`.");
+
+    Some(result)
+}
+
+/// Check if the single assigned work item is complete.
+///
+/// Returns `None` if the item is complete (allow stop).
+/// Returns `Some(block)` if the item is still incomplete.
+fn check_single_work_item_complete(
+    config: &StopHookConfig,
+    single_id: &str,
+) -> Option<StopHookResult> {
+    if crate::single_work_item::is_work_item_complete(config.base_dir(), single_id) {
+        return None;
+    }
+
+    let result = StopHookResult::block()
+        .with_message("# Single Work Item Incomplete")
+        .with_message("")
+        .with_message(format!("The assigned work item ({single_id}) has not been completed yet."))
+        .with_message("")
+        .with_message(
+            "Use `claude-reliability work update <id> --status complete` to mark it done.",
+        )
+        .with_message("")
+        .with_message(
+            "If you've hit a problem you cannot solve without user input, \
+             use `claude-reliability emergency-stop <explanation>`.",
+        );
 
     Some(result)
 }
@@ -4273,5 +4316,135 @@ mod tests {
                 assert!((8..=12).contains(&sleep_secs), "Got {sleep_secs}");
             }
         }
+    }
+
+    // -- Single work item mode tests --
+
+    #[test]
+    fn test_check_single_work_item_complete_allows_when_done() {
+        use crate::tasks::{Priority, SqliteTaskStore, Status, TaskStore, TaskUpdate};
+
+        let dir = TempDir::new().unwrap();
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "Do it", Priority::Medium).unwrap();
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            single_work_item_id: Some(task.id.clone()),
+            ..Default::default()
+        };
+        let result = check_single_work_item_complete(&config, &task.id);
+
+        assert!(result.is_none(), "Should allow stop when item is complete");
+    }
+
+    #[test]
+    fn test_check_single_work_item_complete_blocks_when_incomplete() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "Do it", Priority::Medium).unwrap();
+
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            single_work_item_id: Some(task.id.clone()),
+            ..Default::default()
+        };
+        let result = check_single_work_item_complete(&config, &task.id);
+
+        assert!(result.is_some(), "Should block stop when item is incomplete");
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        let joined = result.messages.join("\n");
+        assert!(joined.contains("Single Work Item Incomplete"), "messages: {joined}");
+        assert!(joined.contains(&task.id), "messages: {joined}");
+    }
+
+    #[test]
+    fn test_check_requested_tasks_block_dispatches_to_single_item() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+        use crate::transcript::TranscriptInfo;
+
+        let dir = TempDir::new().unwrap();
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "Do it", Priority::Medium).unwrap();
+
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            single_work_item_id: Some(task.id),
+            ..Default::default()
+        };
+        let transcript_info = TranscriptInfo { has_modifying_tool_use: true, ..Default::default() };
+        let result = check_requested_tasks_block(&transcript_info, &config);
+
+        // Item is open so it blocks
+        assert!(result.is_some());
+        let joined = result.unwrap().messages.join("\n");
+        assert!(joined.contains("Single Work Item Incomplete"), "messages: {joined}");
+    }
+
+    #[test]
+    fn test_check_reflection_marker_blocks_for_incomplete_single_item() {
+        use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+        let dir = TempDir::new().unwrap();
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "Do it", Priority::Medium).unwrap();
+
+        // Set reflection marker so the function proceeds
+        session::set_reflect_marker(dir.path()).unwrap();
+
+        // Task is still open (incomplete)
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            single_work_item_id: Some(task.id),
+            ..Default::default()
+        };
+        let result = check_reflection_marker_allow(&config);
+
+        // Item is incomplete, so reflection should block
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        let joined = result.messages.join("\n");
+        assert!(joined.contains("Single Work Item Incomplete"), "messages: {joined}");
+    }
+
+    #[test]
+    fn test_check_reflection_marker_dispatches_to_single_item() {
+        use crate::tasks::{Priority, SqliteTaskStore, Status, TaskStore, TaskUpdate};
+
+        let dir = TempDir::new().unwrap();
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let task = store.create_task("Task", "Do it", Priority::Medium).unwrap();
+
+        // Set reflection marker so the function proceeds
+        session::set_reflect_marker(dir.path()).unwrap();
+
+        // Complete the task
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate { status: Some(Status::Complete), ..Default::default() },
+            )
+            .unwrap();
+
+        let config = StopHookConfig {
+            base_dir: Some(dir.path().to_path_buf()),
+            single_work_item_id: Some(task.id),
+            ..Default::default()
+        };
+        let result = check_reflection_marker_allow(&config);
+
+        // Item is complete, so reflection should allow
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
     }
 }
