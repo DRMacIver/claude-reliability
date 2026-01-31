@@ -1,18 +1,28 @@
 # claude-reliability
 
-Claude is great, except when it's not. I routinely got frustrated when it did amazing work and stopped at the 90% mark, or subverted or forgot my instructions, or otherwise just behaved extremely sloppily. As a result, I developed some elaborate personal infrastructure to get it to behave.
+This is a plugin that contains a grab bag of my personal infrastructure for trying to get Claude to be something I can actually delegate real software development tasks to. It's idiosyncratic, a work in progress, only sometimes effective, and every time I try to use Claude without it now I get sad.
 
-Then I got frustrated when I didn't have my elaborate personal infrastructure at work, so I decided to make it open source. This is a mostly-from-scratch rewrite of that, with a lot of the weirder bits fixed, some of the rest hardened up, and some attempt to make it useful to people who are not literally me.
+In theory if you install it, Claude will become magically better at software development, at the cost of potentially taking quite a lot longer (mostly, but not always, because it actually does what you ask it to do rather than stopping 10% of the way through).
 
-**Warning**: One way in which this is highly specialised to my use cases is that it is likely to be quite token hungry. If you are on a cheap plan, please pay careful attention to usage as it may blow through your limits fast. I use 20xMax for most of my development and am happy to trade tokens for my time as a result if it gets me good software. If you have radically different preferences from me, you might still find this useful, but you might want to have a think about how to adapt it to you. I'm generally happy for it to be configurable, so if there are changes that would make it more useful to you please do feel free to request them or submit issues.
+I do not necessarily expect it to be useful to other people in its current state, but if you want to give it a go, I'm interested in hearing other people's experiences with it.
 
-Main features:
+## Problems solved
 
-1. A *lot* of guard rails on when Claude is allowed to stop. Tests and linting should pass (or whatever you want to configure here), code should be committed and pushed.
-2. Self-review of code with another model before committing.
-3. A just-keep-working mode which causes Claude to actually keep working until it's done.
+Broadly speaking the problems I am trying to solve are that Claude doesn't do what it's told and what it does doesn't work. This plugin tries to guide it away from common shortcuts it tries to take, and to enforce that it actually does the work that it is told to do. Claude really doesn't like doing that, so it's at best a partial success, but it's a lot better than not using it.
 
-This is currently alpha-grade software: I expect it to work well, except when it doesn't. Please let me know if you use it, and report any problems you encounter.
+It is particularly optimised for a problem I keep running into where I ask Claude to do something that will take a couple of hours, go away, and come back later to find that 20 minutes in it decided it had done enough work and stopped, or that the task that I had asked it to do was too hard and so it should implement a simpler and obviously useless version of it.
+
+Key features:
+
+1. Enforce that all work must be tested before it is committed, and committed before it is marked complete.
+2. Code is reviewed before committing.
+3. When Claude asks questions like "Would you like me to actually do the work that you just asked me to do?" the plugin automatically answers "Yes".
+4. When Claude asks questions in the middle of its work that have reasonable default answers, the plugin automatically provides those answers rather than letting Claude stop working.
+5. Keep track of work that has been explicitly requested to be completed, and block exit until that work has actually been completed.
+
+There are a number of escape hatches and special cases in here to try to keep Claude also useful for normal interaction while this is going on. They even mostly work.
+
+The plugin also provides a number of skills around general software development and how to do it properly. I'm not actually sure how useful they are, they're a bit speculative.
 
 ## Installation
 
@@ -26,19 +36,22 @@ This is currently alpha-grade software: I expect it to work well, except when it
 /plugin install claude-reliability@claude-reliability-marketplace
 ```
 
-The plugin will automatically download the pre-built binary from the latest GitHub release, or build from source if no release is available for your platform.
+The plugin will automatically download the pre-built binary from the latest GitHub release, or build from source if no release is available for your platform. You will need a rust compiler if you're building it from source.
 
 ## Supported platforms
 
 | Platform | Method |
 |----------|--------|
 | Linux x86_64 | Pre-built release |
+| Linux ARM64 | Pre-built release |
 | macOS ARM64 | Pre-built release |
 | Other Unix Platforms| Builds from source (requires or will install Rust) |
 
+It probably could be made to work on Windows if you wanted it to, but it currently relies on bash scripts that would need a Windows equivalent. I imagine it works fine on WSL but I haven't tested it. 
+
 ## Development
 
-This project is largely vibe-coded, with Claude doing the majority of the development (with careful oversight from me, and all of the tooling in place in this project to make that good and reliable). In theory the following command will drop you into a claude code shell in a docker container with all of the reliability features present:
+This project is largely vibe-coded, with Claude doing the majority of the development (with mostly-careful oversight from me). In theory the following command will drop you into a claude code shell in a docker container with all of the reliability features present:
 
 ```bash
 just develop
