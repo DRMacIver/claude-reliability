@@ -397,26 +397,59 @@ fn handle_overloaded_error_with_backoff(
     }
 }
 
+/// Check if a message contains commit or push keywords.
+///
+/// Case-insensitive check for "commit" or "push" in the message text.
+fn contains_commit_push_keywords(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("commit") || lower.contains("push")
+}
+
 /// Check for simple Q&A exchange that should allow immediate exit.
 ///
 /// If the last user message is a simple question and no modifications were made
 /// since then, this is a clarifying Q&A - allow immediate stop (skip reflection).
 /// The agent can answer however it wants (long answers, follow-up questions, etc.)
+///
+/// Guard clauses prevent the fast path when:
+/// - The user message contains commit/push keywords (fall through to auto-confirm)
+/// - The git repo has uncommitted changes or unpushed commits (work needs landing)
+///
+/// # Errors
+///
+/// Returns an error if git commands fail.
 fn check_simple_qa_fast_path(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
-) -> Option<StopHookResult> {
+    runner: &dyn CommandRunner,
+) -> Result<Option<StopHookResult>> {
     if !transcript_info.has_modifying_tool_use_since_user {
         if let Some(ref last_user_msg) = transcript_info.last_user_message {
             if is_simple_question(last_user_msg) {
-                return Some(StopHookResult::allow().with_explanation(
+                // Don't swallow messages like "Can you commit this?"
+                if contains_commit_push_keywords(last_user_msg) {
+                    return Ok(None);
+                }
+
+                // Don't allow fast path when git repo has dirty state
+                if config.git_repo {
+                    let git_status = git::check_uncommitted_changes(runner)?;
+                    if git_status.uncommitted.has_changes() {
+                        return Ok(None);
+                    }
+                    if config.require_push && git_status.ahead_of_remote {
+                        return Ok(None);
+                    }
+                }
+
+                return Ok(Some(StopHookResult::allow().with_explanation(
                     config.explain_stops,
                     "simple Q&A with no modifications since question",
-                ));
+                )));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Check for commit/push confirmation questions and auto-confirm them.
@@ -784,7 +817,7 @@ pub fn run_stop_hook(
 
     // The agent has not yet done any work, and has asked a clarifying question,
     // which should be allowed automatically.
-    if let Some(r) = check_simple_qa_fast_path(&transcript_info, config) {
+    if let Some(r) = check_simple_qa_fast_path(&transcript_info, config, runner)? {
         log.pass("simple_qa_fast_path", "simple Q&A, allowing stop");
         return Ok(log.into_result(r));
     }
@@ -3605,6 +3638,294 @@ mod tests {
 
         // Should still allow (git is clean) but via normal path
         assert!(result.allow_stop);
+    }
+
+    // ========== Commit/Push Keyword Guard Tests ==========
+
+    #[test]
+    fn test_contains_commit_push_keywords() {
+        assert!(contains_commit_push_keywords("Can you commit this?"));
+        assert!(contains_commit_push_keywords("Please COMMIT the changes"));
+        assert!(contains_commit_push_keywords("Should I push?"));
+        assert!(contains_commit_push_keywords("PUSH to remote?"));
+        assert!(contains_commit_push_keywords("commit and push?"));
+        assert!(!contains_commit_push_keywords("What does this function do?"));
+        assert!(!contains_commit_push_keywords("How does the API work?"));
+    }
+
+    #[test]
+    fn test_simple_question_with_commit_keyword_no_fast_path() {
+        // "Can you commit this?" is a simple question but should NOT fast-path
+        // because it contains commit/push keywords — must fall through to auto-confirm.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        // Git status checks needed because fast path falls through
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "Can you commit this?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Sure, I'll commit it."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should allow (git is clean, no commit/push question from assistant),
+        // but NOT via the simple Q&A fast path — it fell through to normal checks.
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_simple_question_with_push_keyword_no_fast_path() {
+        // "Should I push?" should NOT fast-path due to push keyword.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let mut runner = MockCommandRunner::new();
+        runner.expect(
+            "git",
+            &["diff", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["diff", "--cached", "--stat"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() },
+        );
+        runner.expect(
+            "git",
+            &["rev-list", "--count", "@{upstream}..HEAD"],
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() },
+        );
+
+        let sub_agent = MockSubAgent::new();
+
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "Should I push?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Yes, you should push."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Fell through to normal checks, git is clean, so allows stop
+        assert!(result.allow_stop);
+    }
+
+    #[test]
+    fn test_simple_question_with_uncommitted_changes_no_fast_path() {
+        // A simple question like "What does this do?" should NOT fast-path
+        // when the repo has uncommitted changes — work needs landing.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let has_changes = CommandOutput {
+            exit_code: 0,
+            stdout: " file.rs | 10 ++++++++++\n".to_string(),
+            stderr: String::new(),
+        };
+        let file_list =
+            CommandOutput { exit_code: 0, stdout: "file.rs\n".to_string(), stderr: String::new() };
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        let mut runner = MockCommandRunner::new();
+        // First check_uncommitted_changes (simple Q&A fast path guard)
+        runner.expect("git", &["diff", "--stat"], has_changes.clone());
+        runner.expect("git", &["diff", "--name-only"], file_list.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits.clone());
+
+        // Second check_uncommitted_changes (Tier 4 main check)
+        runner.expect("git", &["diff", "--stat"], has_changes);
+        runner.expect("git", &["diff", "--name-only"], file_list);
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "This function calculates the sum."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because of uncommitted changes, NOT fast-path
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Uncommitted Changes")));
+    }
+
+    #[test]
+    fn test_simple_question_with_unpushed_commits_no_fast_path() {
+        // A simple question should NOT fast-path when there are unpushed commits
+        // and require_push is enabled.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let one_commit =
+            CommandOutput { exit_code: 0, stdout: "1\n".to_string(), stderr: String::new() };
+
+        let mut runner = MockCommandRunner::new();
+        // First check_uncommitted_changes (simple Q&A fast path guard)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            empty_success.clone(),
+        );
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit.clone());
+
+        // Second check_uncommitted_changes (Tier 4 main check)
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], one_commit);
+
+        let sub_agent = MockSubAgent::new();
+
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "This function calculates the sum."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            require_push: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Should block because of unpushed commits, NOT fast-path
+        assert!(!result.allow_stop);
+    }
+
+    #[test]
+    fn test_simple_question_clean_git_repo_allows_fast_path() {
+        // A simple question with a clean git repo (git_repo: true) should still
+        // allow the fast path when there are no uncommitted changes or unpushed commits.
+        let dir = tempfile::TempDir::new().unwrap();
+        let base = dir.path();
+
+        let empty_success =
+            CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() };
+        let zero_commits =
+            CommandOutput { exit_code: 0, stdout: "0\n".to_string(), stderr: String::new() };
+
+        let mut runner = MockCommandRunner::new();
+        // check_uncommitted_changes (simple Q&A fast path guard) — clean
+        runner.expect("git", &["diff", "--stat"], empty_success.clone());
+        runner.expect("git", &["diff", "--cached", "--stat"], empty_success.clone());
+        runner.expect("git", &["ls-files", "--others", "--exclude-standard"], empty_success);
+        runner.expect("git", &["rev-list", "--count", "@{upstream}..HEAD"], zero_commits);
+
+        let sub_agent = MockSubAgent::new();
+
+        let transcript_content = r#"{"type": "user", "message": {"role": "user", "content": "What does this function do?"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "id": "1"}]}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "This function calculates the sum."}]}}
+"#;
+        let transcript_file = base.join("transcript.jsonl");
+        std::fs::write(&transcript_file, transcript_content).unwrap();
+
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_file.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+
+        let config = StopHookConfig {
+            git_repo: true,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+
+        // Clean git repo + simple question = fast path should allow stop
+        assert!(result.allow_stop, "Simple question with clean git repo should allow stop");
     }
 
     // ========== Requested Tasks Tests ==========

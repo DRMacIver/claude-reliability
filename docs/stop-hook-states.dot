@@ -20,6 +20,10 @@ digraph StopHookStateMachine {
     CheckAPIErrors [label="Check:\nconsecutive_api_errors >= 2?"];
     APIErrorLoop [label="API Error Loop\nDetected"];
 
+    // 2b. Simple Q&A Fast Path
+    CheckSimpleQA [label="Check:\nsimple question?\nno modifying tools?"];
+    SimpleQAExit [label="Simple Q&A\nFast Path Exit"];
+
     // 3. Commit/Push Question Fast Path (git repos only)
     CheckCommitPushQ [label="Check:\nlast_output ends with\ncommit/push question?"];
     AutoConfirmCommit [label="Auto-confirm:\n\"Yes, please commit\""];
@@ -102,8 +106,13 @@ digraph StopHookStateMachine {
 
     // 2. API Errors
     CheckAPIErrors -> APIErrorLoop [label="yes"];
-    CheckAPIErrors -> CheckCommitPushQ [label="no"];
+    CheckAPIErrors -> CheckSimpleQA [label="no"];
     APIErrorLoop -> AllowStop;
+
+    // 2b. Simple Q&A Fast Path
+    CheckSimpleQA -> SimpleQAExit [label="simple question +\nno commit/push keywords +\nclean git state"];
+    CheckSimpleQA -> CheckCommitPushQ [label="not simple Q&A\nor commit/push keywords\nor dirty git"];
+    SimpleQAExit -> AllowStop;
 
     // 3. Commit/Push Question (git repos only)
     CheckCommitPushQ -> AutoConfirmCommit [label="commit question"];
@@ -201,6 +210,7 @@ digraph StopHookStateMachine {
     // (Shown as labels on transitions where relevant bash commands are invoked)
 
     // The following transitions involve specific tool uses:
+    // - CheckSimpleQA: Bash(git diff --stat, git diff --cached --stat, git ls-files, git rev-list) (when git_repo)
     // - CheckGitClean: Bash(git diff --stat, git diff --cached --stat, git ls-files, git rev-list)
     // - CheckUncommitted: Bash(git diff --stat, git diff --cached --stat, git ls-files, git rev-list)
     // - AnalyzeDiff: Bash(git diff --cached, git diff)
