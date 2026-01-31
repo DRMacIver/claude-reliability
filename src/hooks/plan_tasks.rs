@@ -15,18 +15,7 @@ pub struct ExitPlanModeToolResponse {
     pub plan: Option<String>,
 }
 
-/// Find the most recently modified plan file in ~/.claude/plans/.
-///
-/// This is used when `PostToolUse` doesn't fire for `ExitPlanMode` and we need
-/// to find the plan file at `PreToolUse` time.
-pub fn find_most_recent_plan_file() -> Option<std::path::PathBuf> {
-    let plans_dir = dirs::home_dir()?.join(".claude").join("plans");
-    find_most_recent_plan_file_in_dir(&plans_dir)
-}
-
 /// Find the most recently modified .md file in a given directory.
-///
-/// This is the testable core logic for `find_most_recent_plan_file`.
 fn find_most_recent_plan_file_in_dir(plans_dir: &Path) -> Option<std::path::PathBuf> {
     if !plans_dir.exists() {
         return None;
@@ -60,15 +49,9 @@ fn find_most_recent_plan_file_in_dir(plans_dir: &Path) -> Option<std::path::Path
 /// This is the fallback when `PostToolUse` doesn't fire. It finds the most recently
 /// modified plan file in ~/.claude/plans/ and creates tasks for it.
 pub fn create_plan_tasks_from_recent(base_dir: &Path) -> Result<(), String> {
-    let plan_file =
-        find_most_recent_plan_file().ok_or("No plan files found in ~/.claude/plans/")?;
-
-    let tool_response = ExitPlanModeToolResponse {
-        file_path: Some(plan_file.to_string_lossy().to_string()),
-        plan: None,
-    };
-
-    create_plan_tasks(&tool_response, base_dir)
+    let plans_dir =
+        dirs::home_dir().ok_or("Could not determine home directory")?.join(".claude").join("plans");
+    create_plan_tasks_from_dir(&plans_dir, base_dir)
 }
 
 /// Create plan tasks from a specific plans directory.
