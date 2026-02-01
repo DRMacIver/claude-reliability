@@ -16,6 +16,9 @@ struct BashToolResponse {
     stderr: Option<String>,
 }
 
+/// Environment variable to disable the warning detection hook.
+const DISABLE_ENV_VAR: &str = "CLAUDE_RELIABILITY_DISABLE_HOOK";
+
 /// Maximum length of warning text included in work item descriptions.
 const MAX_WARNING_TEXT_LEN: usize = 2000;
 
@@ -58,6 +61,10 @@ fn extract_stderr(tool_response: &serde_json::Value) -> Option<String> {
 ///
 /// Returns an error if the task store cannot be opened or the task cannot be created.
 pub fn check_bash_warnings(input: &PostToolUseInput, base_dir: &Path) -> Result<(), String> {
+    if std::env::var(DISABLE_ENV_VAR).is_ok_and(|v| !v.is_empty()) {
+        return Ok(());
+    }
+
     let Some(response) = &input.tool_response else {
         return Ok(());
     };
@@ -177,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_creates_work_item() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -206,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_no_stderr_no_work_item() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -228,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_no_warning_keyword_no_work_item() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -250,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_plain_string_response() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -270,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_missing_command() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -293,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_no_response() {
         let dir = TempDir::new().unwrap();
 
@@ -307,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_long_command_truncated_in_title() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
@@ -335,6 +349,61 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn test_check_bash_warnings_disabled_by_env_var() {
+        let dir = TempDir::new().unwrap();
+        setup_db(dir.path());
+
+        std::env::set_var(DISABLE_ENV_VAR, "1");
+
+        let input = PostToolUseInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "cargo build"})),
+            tool_response: Some(serde_json::json!({
+                "stdout": "",
+                "stderr": "warning: unused variable"
+            })),
+        };
+
+        let result = check_bash_warnings(&input, dir.path());
+        assert!(result.is_ok());
+
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 0);
+
+        std::env::remove_var(DISABLE_ENV_VAR);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_check_bash_warnings_not_disabled_by_empty_env_var() {
+        let dir = TempDir::new().unwrap();
+        setup_db(dir.path());
+
+        std::env::set_var(DISABLE_ENV_VAR, "");
+
+        let input = PostToolUseInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "cargo build"})),
+            tool_response: Some(serde_json::json!({
+                "stdout": "",
+                "stderr": "warning: unused variable"
+            })),
+        };
+
+        let result = check_bash_warnings(&input, dir.path());
+        assert!(result.is_ok());
+
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        std::env::remove_var(DISABLE_ENV_VAR);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_check_bash_warnings_long_warning_text_truncated() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());

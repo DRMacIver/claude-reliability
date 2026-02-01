@@ -151,6 +151,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_run_post_tool_use_bash_with_warnings() {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
