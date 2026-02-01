@@ -3,8 +3,10 @@
 //! This module handles hooks that run after a tool completes execution.
 //! Currently supports:
 //! - `ExitPlanMode`: Creates tasks to track plan implementation
+//! - `Bash`: Detects warnings in stderr and creates work items to track them
 
 use crate::hooks::plan_tasks::{create_plan_tasks, ExitPlanModeToolResponse};
+use crate::hooks::warn_on_warnings;
 use std::path::Path;
 
 /// Input provided to `PostToolUse` hooks by Claude Code.
@@ -13,6 +15,8 @@ use std::path::Path;
 pub struct PostToolUseInput {
     /// The name of the tool that was executed.
     pub tool_name: Option<String>,
+    /// The input that was passed to the tool.
+    pub tool_input: Option<serde_json::Value>,
     /// The response from the tool.
     pub tool_response: Option<serde_json::Value>,
 }
@@ -41,6 +45,10 @@ pub fn run_post_tool_use(input: &PostToolUseInput, base_dir: &Path) -> Result<()
         }
     }
 
+    if tool_name == "Bash" {
+        warn_on_warnings::check_bash_warnings(input, base_dir)?;
+    }
+
     Ok(())
 }
 
@@ -63,6 +71,7 @@ mod tests {
 
         let input = PostToolUseInput {
             tool_name: Some("ExitPlanMode".to_string()),
+            tool_input: None,
             tool_response: Some(serde_json::json!({
                 "filePath": "~/.claude/plans/test-plan.md"
             })),
@@ -83,6 +92,7 @@ mod tests {
 
         let input = PostToolUseInput {
             tool_name: Some("UnknownTool".to_string()),
+            tool_input: None,
             tool_response: Some(serde_json::json!({"foo": "bar"})),
         };
 
@@ -95,7 +105,7 @@ mod tests {
     fn test_run_post_tool_use_no_tool_name() {
         let dir = TempDir::new().unwrap();
 
-        let input = PostToolUseInput { tool_name: None, tool_response: None };
+        let input = PostToolUseInput { tool_name: None, tool_input: None, tool_response: None };
 
         // Should succeed (no tool name means nothing to do)
         let result = run_post_tool_use(&input, dir.path());
@@ -107,8 +117,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         setup_db(dir.path());
 
-        let input =
-            PostToolUseInput { tool_name: Some("ExitPlanMode".to_string()), tool_response: None };
+        let input = PostToolUseInput {
+            tool_name: Some("ExitPlanMode".to_string()),
+            tool_input: None,
+            tool_response: None,
+        };
 
         // Should succeed (no response means nothing to process)
         let result = run_post_tool_use(&input, dir.path());
@@ -127,6 +140,7 @@ mod tests {
 
         let input = PostToolUseInput {
             tool_name: Some("ExitPlanMode".to_string()),
+            tool_input: None,
             // Missing filePath - this will cause create_plan_tasks to fail
             tool_response: Some(serde_json::json!({"plan": "content only"})),
         };
@@ -134,5 +148,29 @@ mod tests {
         let result = run_post_tool_use(&input, dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No plan file path"));
+    }
+
+    #[test]
+    fn test_run_post_tool_use_bash_with_warnings() {
+        let dir = TempDir::new().unwrap();
+        setup_db(dir.path());
+
+        let input = PostToolUseInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({"command": "cargo build"})),
+            tool_response: Some(serde_json::json!({
+                "stdout": "Compiling project",
+                "stderr": "warning: unused variable `x`"
+            })),
+        };
+
+        let result = run_post_tool_use(&input, dir.path());
+        assert!(result.is_ok());
+
+        let store = SqliteTaskStore::for_project(dir.path()).unwrap();
+        let tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].title.contains("Fix warnings from:"));
+        assert!(tasks[0].title.contains("cargo build"));
     }
 }

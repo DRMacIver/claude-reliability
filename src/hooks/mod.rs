@@ -11,6 +11,7 @@ mod require_task;
 mod stop;
 mod user_prompt_submit;
 mod validation;
+mod warn_on_warnings;
 
 pub use code_review::{run_code_review_hook, CodeReviewConfig};
 pub use no_verify::run_no_verify_hook;
