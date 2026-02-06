@@ -4,7 +4,7 @@
 //! - Boolean markers (problem mode, validation needed, etc.)
 //!
 //! All state is stored in a single `SQLite` database at
-//! `~/.claude-reliability/projects/<sanitized-path>/working-memory.sqlite3`.
+//! `<project_dir>/.claude-reliability/working-memory.sqlite3`.
 
 use crate::error::Result;
 use crate::paths;
@@ -39,7 +39,7 @@ impl SqliteStore {
     /// Create a new `SQLite` store for the given project directory.
     ///
     /// The database file will be created at
-    /// `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
+    /// `<project_dir>/.claude-reliability/working-memory.sqlite3`.
     ///
     /// # Errors
     ///

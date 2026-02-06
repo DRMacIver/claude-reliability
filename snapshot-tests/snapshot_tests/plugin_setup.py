@@ -85,9 +85,10 @@ def install_plugin(target_dir: Path, home_dir: Path | None = None) -> None:
         shutil.copy(binary_src, bin_dir / "claude-reliability")
         os.chmod(bin_dir / "claude-reliability", 0o755)
 
-        # Also copy to the global cache location where ensure-binary.sh expects it
-        # This is needed because the hook scripts call ensure-binary.sh which
-        # looks in ~/.claude-reliability/bin/ for the binary
+        # Also copy to the global cache location for legacy compatibility.
+        # Note: ensure-binary.sh actually looks in .claude-reliability/bin/
+        # (project-local), but this global copy ensures tests work even if
+        # they're run from a context where the project-local path isn't set up.
         effective_home = home_dir or Path.home()
         global_cache_dir = effective_home / ".claude-reliability" / "bin"
         global_cache_dir.mkdir(parents=True, exist_ok=True)

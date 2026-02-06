@@ -1,7 +1,7 @@
 //! Session state management for reliability mode.
 //!
 //! Session state is stored in a `SQLite` database at
-//! `~/.claude-reliability/projects/<hash>/working-memory.sqlite3`.
+//! `<project_dir>/.claude-reliability/working-memory.sqlite3`.
 //!
 //! This module provides both:
 //! - Path-based functions for backward compatibility (create `SqliteStore` internally)
