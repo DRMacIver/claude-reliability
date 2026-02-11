@@ -16,7 +16,7 @@ use crate::tasks::{
     HowToUpdate, Priority, SqliteTaskStore, Status, TaskFilter, TaskStore, TaskUpdate,
 };
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Output from running the CLI, with separate stdout and stderr messages.
@@ -33,11 +33,79 @@ pub struct CliOutput {
 /// Default result limit for list/search operations.
 const DEFAULT_RESULT_LIMIT: usize = 50;
 
+/// Check whether the given binary path is at the expected project-local location.
+///
+/// Returns `Ok(())` if the path ends with `.claude-reliability/bin/claude-reliability`
+/// and the project directory (two levels up from the binary) contains a `.claude` directory.
+/// Returns `Err(message)` with a clear error message if the check fails.
+pub fn check_binary_path(binary_path: &Path) -> Result<(), String> {
+    let expected_suffix: PathBuf =
+        [".claude-reliability", "bin", "claude-reliability"].iter().collect();
+
+    if !binary_path.ends_with(&expected_suffix) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        return Err(format!(
+            "ERROR: Wrong binary location.\n\n\
+             This binary is at: {}\n\
+             Expected location: <project>/.claude-reliability/bin/claude-reliability\n\n\
+             Use the bare command `claude-reliability` (the pre-tool-use hook will rewrite it)\n\
+             or use the absolute path: {}/.claude-reliability/bin/claude-reliability",
+            binary_path.display(),
+            cwd.display(),
+        ));
+    }
+
+    // Check that the project directory (2 levels up from binary) has a .claude dir
+    if let Some(project_dir) =
+        binary_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+    {
+        if !project_dir.join(".claude").is_dir() {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            return Err(format!(
+                "ERROR: Wrong binary location.\n\n\
+                 This binary is at: {}\n\
+                 The project directory ({}) does not contain a .claude directory.\n\n\
+                 Use the bare command `claude-reliability` (the pre-tool-use hook will rewrite it)\n\
+                 or use the absolute path: {}/.claude-reliability/bin/claude-reliability",
+                binary_path.display(),
+                project_dir.display(),
+                cwd.display(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify the binary is at the correct project-local location.
+///
+/// Returns an error `CliOutput` if the binary is at the wrong location,
+/// or `None` if everything is fine.
+fn verify_binary_location() -> Option<CliOutput> {
+    let Ok(exe_path) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
+        return None; // Can't determine path; skip check
+    };
+
+    match check_binary_path(&exe_path) {
+        Ok(()) => None,
+        Err(msg) => {
+            Some(CliOutput { exit_code: ExitCode::from(1), stdout: vec![], stderr: vec![msg] })
+        }
+    }
+}
+
 /// Run a CLI command with the given stdin input.
 pub fn run(command: Command, stdin: &str) -> CliOutput {
     // Log hook events for debugging when enabled
     if let Some(hook_type) = command.hook_type() {
         crate::hook_logging::log_hook_event(hook_type, stdin);
+    }
+
+    // For non-hook commands, verify the binary is at the correct location
+    if !command.is_hook() {
+        if let Some(error_output) = verify_binary_location() {
+            return error_output;
+        }
     }
 
     match command {

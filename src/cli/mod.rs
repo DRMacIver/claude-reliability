@@ -152,6 +152,12 @@ impl Command {
         matches!(self, Self::Stop | Self::PreToolUse | Self::PostToolUse | Self::UserPromptSubmit)
     }
 
+    /// Returns true if this is a hook command (invoked by the plugin system).
+    #[must_use]
+    pub const fn is_hook(&self) -> bool {
+        matches!(self, Self::Stop | Self::PreToolUse | Self::PostToolUse | Self::UserPromptSubmit)
+    }
+
     /// Returns the hook type name for logging, or None for non-hook commands.
     #[must_use]
     pub const fn hook_type(&self) -> Option<&'static str> {

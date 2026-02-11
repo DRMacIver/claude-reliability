@@ -70,9 +70,14 @@ fn run_user_prompt_submit_hook_inner(
     // Clear the reflection marker so the next stop with modifying tools will prompt again
     session::clear_reflect_marker(base)?;
 
+    let binary_msg = binary_location_message();
+
     // Check if this is a post-compaction scenario
     if input.is_compact_summary {
-        return Ok(UserPromptSubmitOutput { system_message: Some(post_compaction_message(input)) });
+        let compaction_msg = post_compaction_message(input);
+        return Ok(UserPromptSubmitOutput {
+            system_message: Some(format!("{binary_msg}\n\n{compaction_msg}")),
+        });
     }
 
     // Single work item mode: validate the assigned item and announce it
@@ -80,13 +85,14 @@ fn run_user_prompt_submit_hook_inner(
         return match crate::single_work_item::validate_work_item(base, swi_id) {
             Ok((id, title)) => Ok(UserPromptSubmitOutput {
                 system_message: Some(format!(
-                    "Single work item mode active. Assigned item: [{id}] {title}\n\
+                    "{binary_msg}\n\n\
+                     Single work item mode active. Assigned item: [{id}] {title}\n\
                      Only this item needs to be completed to exit."
                 )),
             }),
-            Err(msg) => {
-                Ok(UserPromptSubmitOutput { system_message: Some(format!("ERROR: {msg}")) })
-            }
+            Err(msg) => Ok(UserPromptSubmitOutput {
+                system_message: Some(format!("{binary_msg}\n\nERROR: {msg}")),
+            }),
         };
     }
 
@@ -95,7 +101,7 @@ fn run_user_prompt_submit_hook_inner(
         create_user_message_work_item(prompt, input.transcript_path.as_deref(), base);
     }
 
-    Ok(UserPromptSubmitOutput::default())
+    Ok(UserPromptSubmitOutput { system_message: Some(binary_location_message()) })
 }
 
 /// Create a work item for a user message so nothing gets missed.
@@ -169,6 +175,17 @@ fn create_user_message_task(
     store.request_tasks(&[&task.id])?;
 
     Ok(())
+}
+
+/// Generate the binary location message to inject into the system message.
+fn binary_location_message() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let binary_path = cwd.join(".claude-reliability/bin/claude-reliability");
+    crate::templates::render_with_vars(
+        "messages/binary_location.tera",
+        &[("binary_path", &binary_path.display().to_string())],
+    )
+    .expect("binary_location.tera template should always render")
 }
 
 /// Generate the post-compaction message to prompt work item recovery.
@@ -273,6 +290,10 @@ mod tests {
         let msg = output.system_message.unwrap();
         assert!(msg.contains("Post-Compaction Work Item Check"));
         assert!(msg.contains("list_tasks"));
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "compaction msg should also include binary path: {msg}"
+        );
     }
 
     #[test]
@@ -294,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_prompt_submit_no_compaction() {
+    fn test_user_prompt_submit_no_compaction_has_binary_path() {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
@@ -306,7 +327,17 @@ mod tests {
 
         let output = run_user_prompt_submit_hook(&input, Some(base)).unwrap();
 
-        assert!(output.system_message.is_none());
+        assert!(output.system_message.is_some(), "system_message should always be set");
+        let msg = output.system_message.unwrap();
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "msg should contain binary path: {msg}"
+        );
+        assert!(msg.contains("pre-tool-use hook"), "msg should mention hook rewriting: {msg}");
+        assert!(
+            msg.contains("Do NOT construct paths"),
+            "msg should warn against constructing paths: {msg}"
+        );
     }
 
     #[test]
@@ -543,6 +574,10 @@ mod tests {
         assert!(msg.contains("Single work item mode active"), "msg: {msg}");
         assert!(msg.contains(&task.id), "msg: {msg}");
         assert!(msg.contains("My assigned task"), "msg: {msg}");
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "single work item msg should include binary path: {msg}"
+        );
     }
 
     #[test]
@@ -561,6 +596,10 @@ mod tests {
         let msg = output.system_message.unwrap();
         assert!(msg.contains("ERROR"), "msg: {msg}");
         assert!(msg.contains("not found"), "msg: {msg}");
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "error msg should include binary path: {msg}"
+        );
     }
 
     #[test]

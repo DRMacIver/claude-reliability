@@ -100,6 +100,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/enter_plan_mode_intent.tera",
         include_str!("../templates/messages/enter_plan_mode_intent.tera"),
     );
+    m.insert(
+        "messages/binary_location.tera",
+        include_str!("../templates/messages/binary_location.tera"),
+    );
 
     m
 });
@@ -301,6 +305,7 @@ fn sample_context_for(template_name: &str) -> Context {
 
     // Other hooks
     ctx.insert("tool_name", "Bash");
+    ctx.insert("binary_path", "/project/.claude-reliability/bin/claude-reliability");
     ctx.insert("session_notes_path", ".claude/jkw-session.local.md");
     ctx.insert("config_path", ".claude/reliability-config.yaml");
     ctx.insert("acknowledgment", "I promise the user has said I can use --no-verify here");

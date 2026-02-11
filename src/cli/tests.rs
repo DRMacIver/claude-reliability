@@ -61,6 +61,25 @@ fn test_command_needs_stdin() {
 }
 
 #[test]
+fn test_command_is_hook() {
+    // Hook commands
+    assert!(Command::Stop.is_hook());
+    assert!(Command::PreToolUse.is_hook());
+    assert!(Command::PostToolUse.is_hook());
+    assert!(Command::UserPromptSubmit.is_hook());
+
+    // Non-hook commands
+    assert!(!Command::Version.is_hook());
+    assert!(!Command::EnsureConfig.is_hook());
+    assert!(!Command::EnsureGitignore.is_hook());
+    assert!(!Command::Intro.is_hook());
+    assert!(!Command::Work(WorkCommand::Next).is_hook());
+    assert!(!Command::Howto(HowToCommand::List).is_hook());
+    assert!(!Command::AuditLog { work_id: None, limit: None }.is_hook());
+    assert!(!Command::EmergencyStop { explanation: String::new() }.is_hook());
+}
+
+#[test]
 fn test_command_hook_type() {
     // Hook commands return their type name
     assert_eq!(Command::Stop.hook_type(), Some("stop"));
@@ -327,7 +346,14 @@ fn test_run_user_prompt_submit_via_cli() {
     std::env::set_current_dir(original_dir).unwrap();
 
     assert_eq!(output.exit_code, ExitCode::SUCCESS);
-    assert!(output.stderr.is_empty());
+    // Should now output a system message with the binary path
+    assert_eq!(output.stdout.len(), 1, "stdout: {:?}", output.stdout);
+    assert!(output.stdout[0].contains("systemMessage"), "stdout: {}", output.stdout[0]);
+    assert!(
+        output.stdout[0].contains(".claude-reliability/bin/claude-reliability"),
+        "stdout: {}",
+        output.stdout[0]
+    );
 }
 
 #[test]
@@ -348,6 +374,50 @@ fn test_run_user_prompt_submit_post_compaction() {
     assert_eq!(output.stdout.len(), 1);
     assert!(output.stdout[0].contains("systemMessage"));
     assert!(output.stdout[0].contains("Post-Compaction"));
+}
+
+// === Binary location tests ===
+
+#[test]
+fn test_check_binary_path_correct_with_claude_dir() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::create_dir_all(project.join(".claude-reliability/bin")).unwrap();
+    let binary = project.join(".claude-reliability/bin/claude-reliability");
+    std::fs::write(&binary, "fake").unwrap();
+
+    assert!(run::check_binary_path(&binary).is_ok());
+}
+
+#[test]
+fn test_check_binary_path_wrong_suffix() {
+    let dir = TempDir::new().unwrap();
+    let wrong_path = dir.path().join("plugins/cache/abc123/claude-reliability");
+    std::fs::create_dir_all(wrong_path.parent().unwrap()).unwrap();
+    std::fs::write(&wrong_path, "fake").unwrap();
+
+    let result = run::check_binary_path(&wrong_path);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(msg.contains("ERROR: Wrong binary location"), "msg: {msg}");
+    assert!(msg.contains("plugins/cache"), "msg: {msg}");
+    assert!(msg.contains("pre-tool-use hook"), "msg: {msg}");
+}
+
+#[test]
+fn test_check_binary_path_correct_suffix_no_claude_dir() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    // Create the binary path but NOT the .claude directory
+    std::fs::create_dir_all(project.join(".claude-reliability/bin")).unwrap();
+    let binary = project.join(".claude-reliability/bin/claude-reliability");
+    std::fs::write(&binary, "fake").unwrap();
+
+    let result = run::check_binary_path(&binary);
+    assert!(result.is_err());
+    let msg = result.unwrap_err();
+    assert!(msg.contains("does not contain a .claude directory"), "msg: {msg}");
 }
 
 // === Work command tests ===
