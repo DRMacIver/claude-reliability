@@ -16,6 +16,7 @@ lcov.info
 .claude/*.local.md
 .claude/*.local.json
 .claude/*.local
+.claude-reliability/
 # Python cache
 __pycache__/
 *.pyc
