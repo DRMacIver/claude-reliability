@@ -177,33 +177,75 @@ fn handle_exit_plan_mode(base_dir: &Path, plans_dir_override: Option<&Path>) {
 
 /// Rewrite bare `claude-reliability` commands to use the correct binary path.
 ///
-/// When a Bash command starts with `claude-reliability` (without a path prefix),
-/// this rewrites it to `.claude-reliability/bin/claude-reliability` so that
-/// documentation and instructions can use the short form.
+/// When a Bash command contains `claude-reliability` (without a path prefix),
+/// this rewrites all bare occurrences to `.claude-reliability/bin/claude-reliability`
+/// so that documentation and instructions can use the short form. This handles
+/// chained commands using `;`, `&&`, or `||`.
 ///
 /// Returns `Some(output)` with `updatedInput` if the command was rewritten,
 /// or `None` if no rewrite was needed.
 fn rewrite_bare_claude_reliability(input: &HookInput) -> Option<PreToolUseOutput> {
     let command = input.tool_input.as_ref()?.command.as_deref()?;
-    let trimmed = command.trim_start();
 
-    // Only match bare "claude-reliability" at the start (not already a path)
-    if !trimmed.starts_with("claude-reliability") {
+    // Fast path: skip if the command doesn't contain the token at all
+    if !command.contains("claude-reliability") {
         return None;
     }
 
-    // Ensure it's the full token, not something like "claude-reliability-other"
-    let rest = &trimmed["claude-reliability".len()..];
-    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('\t') {
+    let new_command = replace_bare_claude_reliability(command);
+
+    if new_command == command {
         return None;
     }
-
-    // Rewrite the first occurrence
-    let new_command =
-        command.replacen("claude-reliability", ".claude-reliability/bin/claude-reliability", 1);
 
     let updated_input = serde_json::json!({ "command": new_command });
     Some(PreToolUseOutput::allow_with_rewrite(updated_input))
+}
+
+/// Replace all bare `claude-reliability` occurrences in a command string.
+///
+/// Scans left-to-right for each `claude-reliability` occurrence and replaces it
+/// with `.claude-reliability/bin/claude-reliability`, unless:
+/// - It's preceded by `/` or `.` (already a full path)
+/// - It's followed by a non-separator character (partial match like `claude-reliability-other`)
+fn replace_bare_claude_reliability(command: &str) -> String {
+    const TOKEN: &str = "claude-reliability";
+    const REPLACEMENT: &str = ".claude-reliability/bin/claude-reliability";
+
+    let mut result = String::with_capacity(command.len());
+    let mut remaining = command;
+
+    while let Some(pos) = remaining.find(TOKEN) {
+        // Check if preceded by `/` or `.` (already a path)
+        let preceded_by_path_char = pos > 0 && {
+            let prev = remaining.as_bytes()[pos - 1];
+            prev == b'/' || prev == b'.'
+        };
+
+        // Check if followed by a non-separator character (partial match)
+        let after = &remaining[pos + TOKEN.len()..];
+        let followed_by_non_separator = !after.is_empty()
+            && !after.starts_with(' ')
+            && !after.starts_with('\t')
+            && !after.starts_with(';')
+            && !after.starts_with('\n')
+            && !after.starts_with('\r');
+
+        if preceded_by_path_char || followed_by_non_separator {
+            // Not a bare occurrence — copy through including the token
+            result.push_str(&remaining[..pos + TOKEN.len()]);
+        } else {
+            // Bare occurrence — replace it
+            result.push_str(&remaining[..pos]);
+            result.push_str(REPLACEMENT);
+        }
+
+        remaining = &remaining[pos + TOKEN.len()..];
+    }
+
+    // Append any remaining text after the last match
+    result.push_str(remaining);
+    result
 }
 
 /// Check for --no-verify flag in git commands.
@@ -556,6 +598,70 @@ mod tests {
         };
 
         assert!(rewrite_bare_claude_reliability(&input).is_none());
+    }
+
+    #[test]
+    fn test_bash_rewrites_chained_semicolon() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(
+                    "claude-reliability work on 1; claude-reliability work list".to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = rewrite_bare_claude_reliability(&input).unwrap();
+        let updated = result.hook_specific_output.updated_input.unwrap();
+        assert_eq!(
+            updated["command"],
+            ".claude-reliability/bin/claude-reliability work on 1; .claude-reliability/bin/claude-reliability work list"
+        );
+    }
+
+    #[test]
+    fn test_bash_rewrites_chained_and() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(
+                    "claude-reliability work on 1 && claude-reliability work list".to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = rewrite_bare_claude_reliability(&input).unwrap();
+        let updated = result.hook_specific_output.updated_input.unwrap();
+        assert_eq!(
+            updated["command"],
+            ".claude-reliability/bin/claude-reliability work on 1 && .claude-reliability/bin/claude-reliability work list"
+        );
+    }
+
+    #[test]
+    fn test_bash_rewrites_mixed_bare_and_full_path() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(
+                    ".claude-reliability/bin/claude-reliability work on 1 && claude-reliability work list"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = rewrite_bare_claude_reliability(&input).unwrap();
+        let updated = result.hook_specific_output.updated_input.unwrap();
+        assert_eq!(
+            updated["command"],
+            ".claude-reliability/bin/claude-reliability work on 1 && .claude-reliability/bin/claude-reliability work list"
+        );
     }
 
     #[test]
