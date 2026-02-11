@@ -15,8 +15,13 @@ pub const CONFIG_FILE_PATH: &str = ".claude/reliability-config.yaml";
 const GITIGNORE_SECTION_HEADER: &str = "# claude-reliability managed";
 
 /// Files that should be gitignored by claude-reliability.
-const GITIGNORE_ENTRIES: &[&str] =
-    &[".claude/bin/", ".claude/*.local.md", ".claude/*.local.json", ".claude/*.local"];
+const GITIGNORE_ENTRIES: &[&str] = &[
+    ".claude/bin/",
+    ".claude/*.local.md",
+    ".claude/*.local.json",
+    ".claude/*.local",
+    ".claude-reliability/",
+];
 
 /// Path to CLAUDE.md file.
 const CLAUDE_MD_PATH: &str = "CLAUDE.md";
@@ -359,6 +364,14 @@ pub fn ensure_config_in(runner: &dyn CommandRunner, base_dir: &Path) -> Result<P
     Ok(config)
 }
 
+/// Check if a path is gitignored in the given directory.
+fn is_gitignored(base_dir: &Path, path: &str) -> bool {
+    use std::process::Command;
+    let result =
+        Command::new("git").args(["check-ignore", "-q", path]).current_dir(base_dir).output();
+    matches!(result, Ok(output) if output.status.success())
+}
+
 /// Automatically add and commit the config file.
 /// Silently ignores any errors (best effort).
 fn auto_commit_config(base_dir: &Path) {
@@ -366,6 +379,11 @@ fn auto_commit_config(base_dir: &Path) {
 
     let config_path = ProjectConfig::config_path(base_dir);
     let config_path_str = config_path.to_string_lossy();
+
+    // Skip if the file is gitignored
+    if is_gitignored(base_dir, &config_path_str) {
+        return;
+    }
 
     // Try to add the file
     let add_result =
@@ -433,32 +451,56 @@ pub fn ensure_gitignore(base_dir: &Path) -> std::io::Result<bool> {
 }
 
 /// Update gitignore content to include the managed section.
+///
+/// This is additive-only: it never removes existing entries from the managed section.
+/// If a user adds entries within the managed section, they are preserved.
+/// If entries from `GITIGNORE_ENTRIES` are already present, they are not duplicated.
 #[allow(clippy::option_if_let_else)]
 fn update_gitignore_content(existing: &str) -> String {
-    let managed_section = build_managed_section();
-
     // Check if the managed section already exists
     if let Some(start_idx) = existing.find(GITIGNORE_SECTION_HEADER) {
         // Find the end of the managed section (next comment or end of file)
         let after_header = &existing[start_idx + GITIGNORE_SECTION_HEADER.len()..];
         let section_end = find_section_end(after_header);
 
-        let before = &existing[..start_idx];
-        let after = &after_header[section_end..];
+        // Extract existing entries in the managed section
+        let section_content = &after_header[..section_end];
+        let existing_entries: Vec<&str> =
+            section_content.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
 
-        // Rebuild with updated managed section
-        let mut result = before.to_string();
-        if !result.is_empty() && !result.ends_with('\n') {
+        // Determine which entries from GITIGNORE_ENTRIES are missing
+        let missing: Vec<&&str> = GITIGNORE_ENTRIES
+            .iter()
+            .filter(|entry| !existing_entries.contains(&entry.trim()))
+            .collect();
+
+        if missing.is_empty() {
+            // All entries present, no modification needed
+            return existing.to_string();
+        }
+
+        // Append missing entries to the end of the existing managed section content.
+        // We insert them just before `section_end` (before any trailing content).
+        let insert_pos = start_idx + GITIGNORE_SECTION_HEADER.len() + section_end;
+
+        let mut result = existing[..insert_pos].to_string();
+        // Ensure we're on a new line before appending
+        if !result.ends_with('\n') {
             result.push('\n');
         }
-        result.push_str(&managed_section);
-        // Note: managed_section always ends with '\n' so we don't need to add one
+        for entry in &missing {
+            result.push_str(entry);
+            result.push('\n');
+        }
+        // Append everything after the managed section
+        let after = &existing[insert_pos..];
         if !after.is_empty() {
             result.push_str(after.trim_start_matches('\n'));
         }
         result
     } else {
         // No managed section exists, append it
+        let managed_section = build_managed_section();
         let mut result = existing.to_string();
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
@@ -507,6 +549,11 @@ fn auto_commit_gitignore(base_dir: &Path) {
 
     let gitignore_path = base_dir.join(".gitignore");
     let gitignore_str = gitignore_path.to_string_lossy();
+
+    // Skip if the file is gitignored
+    if is_gitignored(base_dir, &gitignore_str) {
+        return;
+    }
 
     // Try to add the file
     let add_result =
@@ -950,8 +997,8 @@ mod tests {
         // Other section preserved
         assert!(content.contains("# Other section"));
         assert!(content.contains("foo/"));
-        // Old entry removed, new entries present
-        assert!(!content.contains(".claude/old-entry/"));
+        // Old entry PRESERVED (additive-only), new entries also present
+        assert!(content.contains(".claude/old-entry/"));
         assert!(content.contains(".claude/bin/"));
     }
 
@@ -1038,9 +1085,10 @@ mod tests {
     fn test_gitignore_handles_section_at_beginning() {
         let existing = "# claude-reliability managed\n.claude/old/\n\n# Other stuff\nfoo/\n";
         let result = update_gitignore_content(existing);
-        // Our section should be updated
+        // Our section should have new entries appended
         assert!(result.contains(".claude/bin/"));
-        assert!(!result.contains(".claude/old/"));
+        // Old entry preserved (additive-only)
+        assert!(result.contains(".claude/old/"));
         // Other section preserved
         assert!(result.contains("# Other stuff"));
         assert!(result.contains("foo/"));
@@ -1053,9 +1101,9 @@ mod tests {
         // Other section preserved
         assert!(result.contains("# Other stuff"));
         assert!(result.contains("foo/"));
-        // Our section updated
+        // Our section updated with new entries, old entry preserved
         assert!(result.contains(".claude/bin/"));
-        assert!(!result.contains(".claude/old/"));
+        assert!(result.contains(".claude/old/"));
     }
 
     #[test]
@@ -1068,7 +1116,8 @@ mod tests {
         assert!(result.contains("foo/"));
         assert!(result.contains(GITIGNORE_SECTION_HEADER));
         assert!(result.contains(".claude/bin/"));
-        assert!(!result.contains(".claude/old/"));
+        // Old entry preserved (additive-only)
+        assert!(result.contains(".claude/old/"));
         assert!(result.contains("# End"));
         assert!(result.contains("bar/"));
         // Verify order
@@ -1430,13 +1479,15 @@ mod tests {
     // Tests for auto_commit_claude_md removed - function no longer exists (claude-9i2m)
 
     #[test]
-    fn test_update_gitignore_content_replaces_existing_section() {
-        // Test updating an existing managed section with content before (no trailing newline)
-        let existing = "node_modules/# claude-reliability managed\n.claude/bin/\n";
+    fn test_update_gitignore_content_appends_missing_entries() {
+        // Test updating an existing managed section that only has some entries
+        let existing = "node_modules/\n# claude-reliability managed\n.claude/bin/\n";
         let result = update_gitignore_content(existing);
-        // Should have newline added before managed section
-        assert!(result.contains("node_modules/\n# claude-reliability managed"));
+        // Should preserve existing entry and add missing ones
         assert!(result.contains(GITIGNORE_SECTION_HEADER));
+        assert!(result.contains(".claude/bin/"));
+        assert!(result.contains(".claude/*.local.md"));
+        assert!(result.contains(".claude-reliability/"));
     }
 
     #[test]
@@ -1854,5 +1905,192 @@ explain_stops: true
 
         let config = ProjectConfig::load_from(dir.path()).unwrap().unwrap();
         assert!(!config.debug_logging);
+    }
+
+    #[test]
+    fn test_gitignore_user_entries_in_managed_section_preserved() {
+        // User-added entries within the managed section must be preserved
+        let existing =
+            "# claude-reliability managed\n.claude/bin/\n.claude/*.local.md\n.claude/*.local.json\n.claude/*.local\n.claude-reliability/\n.claude/my-custom-entry\n";
+        let result = update_gitignore_content(existing);
+        // All original entries preserved including user-added one
+        assert!(result.contains(".claude/my-custom-entry"));
+        assert!(result.contains(".claude/bin/"));
+        assert!(result.contains(".claude-reliability/"));
+        // Content unchanged since all GITIGNORE_ENTRIES are present
+        assert_eq!(result, existing);
+    }
+
+    #[test]
+    fn test_gitignore_contains_claude_reliability_dir() {
+        // .claude-reliability/ should be in the managed section
+        let result = update_gitignore_content("");
+        assert!(result.contains(".claude-reliability/"));
+    }
+
+    #[test]
+    fn test_is_gitignored_returns_true_for_ignored_path() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo with a .gitignore
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        std::fs::write(base.join(".gitignore"), "secret/\n").unwrap();
+
+        assert!(is_gitignored(base, "secret/foo.txt"));
+    }
+
+    #[test]
+    fn test_is_gitignored_returns_false_for_non_ignored_path() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo with a .gitignore
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        std::fs::write(base.join(".gitignore"), "secret/\n").unwrap();
+
+        assert!(!is_gitignored(base, "src/main.rs"));
+    }
+
+    #[test]
+    fn test_is_gitignored_returns_false_when_not_git_repo() {
+        let dir = TempDir::new().unwrap();
+        // No git init, so git check-ignore should fail
+        assert!(!is_gitignored(dir.path(), "anything"));
+    }
+
+    #[test]
+    fn test_auto_commit_config_skips_gitignored_file() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create initial commit
+        std::fs::write(base.join("README.md"), "test").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
+
+        // Add config path to gitignore
+        std::fs::write(base.join(".gitignore"), ".claude/\n").unwrap();
+        Command::new("git").args(["add", ".gitignore"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add gitignore"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create the config file (gitignored)
+        let config_path = ProjectConfig::config_path(base);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "git_repo: true\n").unwrap();
+
+        // Count commits before
+        let count_before = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout).trim().parse().unwrap();
+
+        // Call auto_commit_config - should skip because file is gitignored
+        auto_commit_config(base);
+
+        // Count commits after - should be same (no new commit)
+        let count_after = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
+
+        assert_eq!(before, after, "Should not commit gitignored config file");
+    }
+
+    #[test]
+    fn test_update_gitignore_content_no_trailing_newline_in_managed_section() {
+        // When the managed section has no trailing newline, new entries should
+        // still be appended correctly with proper newline separation
+        let existing = "# claude-reliability managed\n.claude/bin/";
+        let result = update_gitignore_content(existing);
+        // Should have all entries
+        assert!(result.contains(".claude/bin/"));
+        assert!(result.contains(".claude/*.local.md"));
+        assert!(result.contains(".claude-reliability/"));
+        // New entries should be on separate lines
+        for entry in GITIGNORE_ENTRIES {
+            assert!(result.contains(entry));
+        }
+    }
+
+    #[test]
+    fn test_auto_commit_gitignore_skips_gitignored_file() {
+        use std::process::Command;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set up git repo
+        Command::new("git").args(["init"]).current_dir(base).output().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+
+        // Create initial commit
+        std::fs::write(base.join("README.md"), "test").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(base).output().unwrap();
+
+        // Gitignore the .gitignore itself (unusual but tests the guard)
+        // We use .git/info/exclude instead, which acts like gitignore
+        std::fs::write(base.join(".git/info/exclude"), ".gitignore\n").unwrap();
+
+        // Create .gitignore (which is now excluded)
+        std::fs::write(base.join(".gitignore"), "test-entry/\n").unwrap();
+
+        // Count commits before
+        let count_before = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let before: u32 = String::from_utf8_lossy(&count_before.stdout).trim().parse().unwrap();
+
+        // Call auto_commit_gitignore - should skip because file is gitignored
+        auto_commit_gitignore(base);
+
+        // Count commits after - should be same (no new commit)
+        let count_after = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(base)
+            .output()
+            .unwrap();
+        let after: u32 = String::from_utf8_lossy(&count_after.stdout).trim().parse().unwrap();
+
+        assert_eq!(before, after, "Should not commit gitignored .gitignore file");
     }
 }
