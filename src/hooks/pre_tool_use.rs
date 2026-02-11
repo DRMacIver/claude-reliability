@@ -192,7 +192,16 @@ fn rewrite_bare_claude_reliability(input: &HookInput) -> Option<PreToolUseOutput
         return None;
     }
 
-    let new_command = replace_bare_claude_reliability(command);
+    // Use an absolute path so the rewrite works even if the agent has cd'd
+    // into a subdirectory. The hook binary runs from the project root, so
+    // current_dir() gives us the project root.
+    let replacement = std::env::current_dir()
+        .expect("hook binary must have a valid working directory")
+        .join(".claude-reliability/bin/claude-reliability")
+        .to_string_lossy()
+        .into_owned();
+
+    let new_command = replace_bare_claude_reliability(command, &replacement);
 
     if new_command == command {
         return None;
@@ -205,12 +214,11 @@ fn rewrite_bare_claude_reliability(input: &HookInput) -> Option<PreToolUseOutput
 /// Replace all bare `claude-reliability` occurrences in a command string.
 ///
 /// Scans left-to-right for each `claude-reliability` occurrence and replaces it
-/// with `.claude-reliability/bin/claude-reliability`, unless:
+/// with the provided replacement path, unless:
 /// - It's preceded by `/` or `.` (already a full path)
 /// - It's followed by a non-separator character (partial match like `claude-reliability-other`)
-fn replace_bare_claude_reliability(command: &str) -> String {
+fn replace_bare_claude_reliability(command: &str, replacement: &str) -> String {
     const TOKEN: &str = "claude-reliability";
-    const REPLACEMENT: &str = ".claude-reliability/bin/claude-reliability";
 
     let mut result = String::with_capacity(command.len());
     let mut remaining = command;
@@ -237,7 +245,7 @@ fn replace_bare_claude_reliability(command: &str) -> String {
         } else {
             // Bare occurrence — replace it
             result.push_str(&remaining[..pos]);
-            result.push_str(REPLACEMENT);
+            result.push_str(replacement);
         }
 
         remaining = &remaining[pos + TOKEN.len()..];
@@ -273,6 +281,15 @@ mod tests {
     use crate::hooks::ToolInput;
     use crate::testing::MockCommandRunner;
     use tempfile::TempDir;
+
+    /// Returns the absolute binary path that rewrite produces (mirrors production logic).
+    fn expected_binary_path() -> String {
+        std::env::current_dir()
+            .unwrap()
+            .join(".claude-reliability/bin/claude-reliability")
+            .to_string_lossy()
+            .into_owned()
+    }
 
     #[test]
     fn test_bash_allowed_without_no_verify() {
@@ -512,7 +529,8 @@ mod tests {
         let output = run_pre_tool_use(&input, dir.path(), &runner);
         assert!(!output.is_block());
         let updated = output.hook_specific_output.updated_input.unwrap();
-        assert_eq!(updated["command"], ".claude-reliability/bin/claude-reliability work list");
+        let bin = expected_binary_path();
+        assert_eq!(updated["command"], format!("{bin} work list"));
     }
 
     #[test]
@@ -567,7 +585,7 @@ mod tests {
 
         let result = rewrite_bare_claude_reliability(&input).unwrap();
         let updated = result.hook_specific_output.updated_input.unwrap();
-        assert_eq!(updated["command"], ".claude-reliability/bin/claude-reliability");
+        assert_eq!(updated["command"], expected_binary_path());
     }
 
     #[test]
@@ -583,7 +601,8 @@ mod tests {
 
         let result = rewrite_bare_claude_reliability(&input).unwrap();
         let updated = result.hook_specific_output.updated_input.unwrap();
-        assert_eq!(updated["command"], "  .claude-reliability/bin/claude-reliability work next");
+        let bin = expected_binary_path();
+        assert_eq!(updated["command"], format!("  {bin} work next"));
     }
 
     #[test]
@@ -615,10 +634,8 @@ mod tests {
 
         let result = rewrite_bare_claude_reliability(&input).unwrap();
         let updated = result.hook_specific_output.updated_input.unwrap();
-        assert_eq!(
-            updated["command"],
-            ".claude-reliability/bin/claude-reliability work on 1; .claude-reliability/bin/claude-reliability work list"
-        );
+        let bin = expected_binary_path();
+        assert_eq!(updated["command"], format!("{bin} work on 1; {bin} work list"));
     }
 
     #[test]
@@ -636,10 +653,8 @@ mod tests {
 
         let result = rewrite_bare_claude_reliability(&input).unwrap();
         let updated = result.hook_specific_output.updated_input.unwrap();
-        assert_eq!(
-            updated["command"],
-            ".claude-reliability/bin/claude-reliability work on 1 && .claude-reliability/bin/claude-reliability work list"
-        );
+        let bin = expected_binary_path();
+        assert_eq!(updated["command"], format!("{bin} work on 1 && {bin} work list"));
     }
 
     #[test]
@@ -658,9 +673,10 @@ mod tests {
 
         let result = rewrite_bare_claude_reliability(&input).unwrap();
         let updated = result.hook_specific_output.updated_input.unwrap();
+        let bin = expected_binary_path();
         assert_eq!(
             updated["command"],
-            ".claude-reliability/bin/claude-reliability work on 1 && .claude-reliability/bin/claude-reliability work list"
+            format!(".claude-reliability/bin/claude-reliability work on 1 && {bin} work list")
         );
     }
 
