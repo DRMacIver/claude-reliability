@@ -1,0 +1,20 @@
+{# Message shown to remind agent to create follow-up work items before stopping.
+
+No variables required.
+#}
+# Follow-Up Work Items
+
+Before stopping, consider whether there are follow-up work items to track:
+
+- **TODOs discovered**: Any tasks you noticed but didn't address
+- **Out-of-scope changes**: Improvements related to the work but beyond the current scope
+- **Technical debt**: Code quality issues worth tracking for later
+
+## What to do
+
+If there are follow-up items, create them now:
+```
+claude-reliability work create -t "Title" -d "Description"
+```
+
+If there are no follow-up items, stop again to continue.

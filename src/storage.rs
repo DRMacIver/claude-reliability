@@ -22,6 +22,8 @@ pub mod markers {
     pub const MUST_REFLECT: &str = "must_reflect";
     /// Emergency stop requested by agent.
     pub const EMERGENCY_STOP: &str = "emergency_stop";
+    /// Work item reminder has been shown this session.
+    pub const WORK_ITEM_REMINDED: &str = "work_item_reminded";
 }
 
 /// SQLite-based state store.

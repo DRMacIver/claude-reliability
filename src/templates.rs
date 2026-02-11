@@ -69,6 +69,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/stop/auto_work_tasks.tera",
         include_str!("../templates/messages/stop/auto_work_tasks.tera"),
     );
+    m.insert(
+        "messages/stop/work_item_reminder.tera",
+        include_str!("../templates/messages/stop/work_item_reminder.tera"),
+    );
 
     // Other hook messages
     m.insert(
@@ -402,7 +406,7 @@ mod tests {
     fn test_embedded_template_count() {
         // Ensure we have all expected templates
         let names = embedded_template_names();
-        assert!(names.len() >= 15, "Expected at least 15 templates, got {}", names.len());
+        assert!(names.len() >= 16, "Expected at least 16 templates, got {}", names.len());
     }
 
     #[test]

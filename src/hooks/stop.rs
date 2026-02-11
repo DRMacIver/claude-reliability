@@ -643,6 +643,39 @@ fn check_interactive_question_block(
 }
 
 // =============================================================================
+// Tier 5b: Work Item Reminder
+// =============================================================================
+
+/// Check if the agent should be reminded to create follow-up work items.
+///
+/// On the first stop with modifying tool use, prompt the agent to consider
+/// creating work items. The marker is set once and never cleared by the stop
+/// hook, so subsequent stops pass through.
+///
+/// # Panics
+///
+/// Panics if setting the work item reminded marker fails (database error).
+fn check_work_item_reminder(
+    transcript_info: &TranscriptInfo,
+    config: &StopHookConfig,
+) -> Option<StopHookResult> {
+    if !transcript_info.has_modifying_tool_use {
+        return None;
+    }
+
+    let base_dir = config.base_dir();
+    if session::has_work_item_reminded(base_dir) {
+        return None;
+    }
+
+    // First stop with modifying tools - set marker and prompt
+    session::set_work_item_reminded(base_dir).expect("failed to set work item reminded marker");
+    let message = templates::render("messages/stop/work_item_reminder.tera", &tera::Context::new())
+        .expect("work_item_reminder.tera template should always render");
+    Some(StopHookResult::block().with_message(message))
+}
+
+// =============================================================================
 // Tier 6: Reflection Checks
 // =============================================================================
 
@@ -753,7 +786,8 @@ fn check_auto_work_tasks_block(
 /// 2. **Tier 2 - Validation**: Run quality checks if configured
 /// 3. **Tier 3 - Task completion**: Requested tasks, auto-work tasks
 /// 4. **Tier 4 - Git state**: Uncommitted changes block
-/// 5. **Tier 5 - Reflection**: Reflection markers, question skip, reflection prompts
+/// 5. **Tier 5 - Work item reminder**: Prompt to create follow-up work items (first stop only)
+/// 6. **Tier 6 - Reflection**: Reflection markers, question skip, reflection prompts
 ///
 /// Note: A clean git repo is never a reason to allow stopping - it just means
 /// git-related blocking conditions don't apply. All other checks still run.
@@ -877,6 +911,13 @@ pub fn run_stop_hook(
         return Ok(log.into_result(r));
     }
     log.pass("uncommitted_changes", "no uncommitted changes");
+
+    // Remind agent to create follow-up work items (first stop only).
+    if let Some(r) = check_work_item_reminder(&transcript_info, config) {
+        log.pass("work_item_reminder", "prompting for work items");
+        return Ok(log.into_result(r));
+    }
+    log.pass("work_item_reminder", "already reminded or no modifying tools");
 
     // The model has previously been asked to reflect, and now it has.
     if let Some(r) = check_reflection_marker_allow(config) {
@@ -1488,7 +1529,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
-        // Set reflection marker since modifying tools trigger reflection on first stop
+        // Set markers since modifying tools trigger work item reminder then reflection
+        session::set_work_item_reminded(base).unwrap();
         session::set_reflect_marker(base).unwrap();
 
         // Set up database directory and create a requested task, then complete it
@@ -1546,7 +1588,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
-        // Set reflection marker since modifying tools trigger reflection on first stop
+        // Set markers since modifying tools trigger work item reminder then reflection
+        session::set_work_item_reminded(base).unwrap();
         session::set_reflect_marker(base).unwrap();
 
         // Set up database directory and create a requested task blocked by question
@@ -2879,6 +2922,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path();
 
+        // Set work item reminded marker (simulating that reminder already fired)
+        session::set_work_item_reminded(base).unwrap();
+
         // Create a transcript with modifying tool use
         let transcript_path = base.join("transcript.jsonl");
         {
@@ -2993,6 +3039,9 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let base = dir.path();
+
+        // Set work item reminded marker (simulating that reminder already fired)
+        session::set_work_item_reminded(base).unwrap();
 
         // Create a transcript with modifying tools BUT ending with a question
         let transcript_path = base.join("transcript.jsonl");
@@ -3370,12 +3419,13 @@ mod tests {
 
     #[test]
     fn test_simple_question_with_modifications_no_fast_path() {
-        // When there are modifications, the first stop prompts reflection.
-        // On second stop (with reflection marker set), it should allow.
+        // When there are modifications, the first stop prompts work item reminder,
+        // second prompts reflection, third stop (with reflection marker set) allows.
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
-        // Set reflection marker (simulating second stop after reflection prompt)
+        // Set markers (simulating third stop after work item reminder and reflection)
+        session::set_work_item_reminded(base).unwrap();
         session::set_reflect_marker(base).unwrap();
 
         let mut runner = MockCommandRunner::new();
@@ -3586,7 +3636,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path();
 
-        // Set reflection marker since modifying tools trigger reflection on first stop
+        // Set markers since modifying tools trigger work item reminder then reflection
+        session::set_work_item_reminded(base).unwrap();
         session::set_reflect_marker(base).unwrap();
 
         let mut runner = MockCommandRunner::new();
@@ -4767,5 +4818,171 @@ mod tests {
         // Item is complete, so reflection should allow
         assert!(result.is_some());
         assert!(result.unwrap().allow_stop);
+    }
+
+    #[test]
+    fn test_work_item_reminder_blocks_on_first_stop() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript with modifying tool use
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Follow-Up Work Items")));
+        // Marker should be set
+        assert!(session::has_work_item_reminded(base));
+    }
+
+    #[test]
+    fn test_work_item_reminder_passes_through_on_second_stop() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set the work item reminded marker (simulating first stop already happened)
+        session::set_work_item_reminded(base).unwrap();
+
+        // Create a transcript with modifying tool use
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // Second stop: work item reminder passes through, reflection fires instead
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Task Completion Check")));
+    }
+
+    #[test]
+    fn test_work_item_reminder_skipped_without_modifying_tools() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript with only read operations
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Read","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        // Marker should NOT be set since no modifying tools
+        assert!(!session::has_work_item_reminded(base));
+    }
+
+    #[test]
+    fn test_work_item_reminder_three_stop_integration() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript with modifying tool use
+        let transcript_path = base.join("transcript.jsonl");
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input = crate::hooks::HookInput {
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // First stop: work item reminder fires
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Follow-Up Work Items")));
+        assert!(session::has_work_item_reminded(base));
+
+        // Second stop: work item reminder passes through, reflection fires
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        assert!(result.messages.iter().any(|m| m.contains("Task Completion Check")));
+        assert!(session::has_reflect_marker(base));
+
+        // Third stop: reflection marker allows stop
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(result.allow_stop);
+        assert!(!session::has_reflect_marker(base));
+        // work_item_reminded marker persists (set once, never cleared by stop hook)
+        assert!(session::has_work_item_reminded(base));
     }
 }

@@ -84,6 +84,10 @@ digraph StopHookStateMachine {
     QualityCheck [label="Run quality checks\n(if enabled)"];
     QualityFailed [label="Quality Gates Failed"];
 
+    // 10b. Work Item Reminder Check
+    CheckWorkItemReminder [label="Check:\nmodifying tools &&\n!work_item_reminded?"];
+    SetWorkItemReminded [label="Set work_item_reminded\nPrompt for work items"];
+
     // 11. Simple Reflection Check (marker-based)
     CheckReflectMarker [label="Check:\nmust_reflect marker?"];
     ClearReflectMarker [label="Clear reflect marker\n(second stop attempt)"];
@@ -157,6 +161,13 @@ digraph StopHookStateMachine {
     CheckUnpushed -> CheckQuestion [label="no"];
     UnpushedBlock -> BlockStop;
 
+    // 10b. Work Item Reminder (between uncommitted changes and reflection)
+    // Inserted after uncommitted changes pass, before reflection checks
+    // In the main flow: after git checks pass → CheckWorkItemReminder
+    CheckWorkItemReminder -> SetWorkItemReminded [label="first stop +\nmodifying tools"];
+    CheckWorkItemReminder -> CheckReflectMarker [label="already reminded\nor no modifying tools"];
+    SetWorkItemReminded -> BlockStop [label="prompt work items"];
+
     // 9. Interactive Question
     CheckQuestion -> CheckContinueQ [label="is question +\nuser active", lhead=cluster_question];
     CheckQuestion -> QualityCheck [label="not question"];
@@ -173,7 +184,7 @@ digraph StopHookStateMachine {
 
     // 10. Quality Check
     QualityCheck -> QualityFailed [label="failed"];
-    QualityCheck -> CheckReflectMarker [label="passed or\nnot enabled"];
+    QualityCheck -> CheckWorkItemReminder [label="passed or\nnot enabled"];
     QualityFailed -> BlockStop;
 
     // 11. Simple Reflection (marker-based)

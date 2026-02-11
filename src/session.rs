@@ -223,6 +223,54 @@ pub fn clear_emergency_stop_with_store(store: &dyn StateStore) -> Result<()> {
     store.clear_marker(markers::EMERGENCY_STOP)
 }
 
+/// Check if the work item reminder has been shown this session.
+#[must_use]
+pub fn has_work_item_reminded(base_dir: &Path) -> bool {
+    get_store(base_dir).map(|s| s.has_marker(markers::WORK_ITEM_REMINDED)).unwrap_or(false)
+}
+
+/// Check if the work item reminder has been shown using a provided store.
+#[must_use]
+pub fn has_work_item_reminded_with_store(store: &dyn StateStore) -> bool {
+    store.has_marker(markers::WORK_ITEM_REMINDED)
+}
+
+/// Set the work item reminded marker.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_work_item_reminded(base_dir: &Path) -> Result<()> {
+    get_store(base_dir)?.set_marker(markers::WORK_ITEM_REMINDED)
+}
+
+/// Set the work item reminded marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn set_work_item_reminded_with_store(store: &dyn StateStore) -> Result<()> {
+    store.set_marker(markers::WORK_ITEM_REMINDED)
+}
+
+/// Clear the work item reminded marker.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_work_item_reminded(base_dir: &Path) -> Result<()> {
+    get_store(base_dir)?.clear_marker(markers::WORK_ITEM_REMINDED)
+}
+
+/// Clear the work item reminded marker using a provided store.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub fn clear_work_item_reminded_with_store(store: &dyn StateStore) -> Result<()> {
+    store.clear_marker(markers::WORK_ITEM_REMINDED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +534,62 @@ mod tests {
         // Should not error when clearing without setting
         clear_emergency_stop(dir.path()).unwrap();
         assert!(!is_emergency_stop_active(dir.path()));
+    }
+
+    #[test]
+    fn test_work_item_reminded_not_set_by_default() {
+        let dir = TempDir::new().unwrap();
+        assert!(!has_work_item_reminded(dir.path()));
+    }
+
+    #[test]
+    fn test_set_work_item_reminded() {
+        let dir = TempDir::new().unwrap();
+
+        set_work_item_reminded(dir.path()).unwrap();
+        assert!(has_work_item_reminded(dir.path()));
+    }
+
+    #[test]
+    fn test_set_work_item_reminded_with_store() {
+        let store = MockStateStore::new();
+
+        assert!(!has_work_item_reminded_with_store(&store));
+
+        set_work_item_reminded_with_store(&store).unwrap();
+
+        assert!(has_work_item_reminded_with_store(&store));
+    }
+
+    #[test]
+    fn test_clear_work_item_reminded() {
+        let dir = TempDir::new().unwrap();
+
+        set_work_item_reminded(dir.path()).unwrap();
+        assert!(has_work_item_reminded(dir.path()));
+
+        clear_work_item_reminded(dir.path()).unwrap();
+        assert!(!has_work_item_reminded(dir.path()));
+    }
+
+    #[test]
+    fn test_clear_work_item_reminded_with_store() {
+        let store = MockStateStore::new();
+
+        set_work_item_reminded_with_store(&store).unwrap();
+        assert!(has_work_item_reminded_with_store(&store));
+
+        clear_work_item_reminded_with_store(&store).unwrap();
+        assert!(!has_work_item_reminded_with_store(&store));
+    }
+
+    #[test]
+    fn test_clear_work_item_reminded_when_not_set() {
+        let dir = TempDir::new().unwrap();
+
+        // Should not error when clearing without setting
+        clear_work_item_reminded(dir.path()).unwrap();
+        assert!(!has_work_item_reminded(dir.path()));
     }
 
     #[test]
