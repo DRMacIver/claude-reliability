@@ -56,6 +56,22 @@ pub fn run_user_prompt_submit_hook(
     run_user_prompt_submit_hook_inner(input, base_dir, single_work_item_id.as_deref())
 }
 
+/// Check if this is the opening prompt (first user message in the session).
+///
+/// Returns `true` if no transcript is available, the transcript can't be parsed,
+/// or no assistant output has been produced yet.
+fn is_opening_prompt(input: &UserPromptSubmitInput) -> bool {
+    let Some(transcript_path) = &input.transcript_path else {
+        return true; // No transcript → first prompt
+    };
+    let path = Path::new(transcript_path);
+    let Ok(info) = crate::transcript::parse_transcript(path) else {
+        return true; // Can't parse → assume first prompt
+    };
+    // If there's any assistant output, the agent has already responded
+    info.last_assistant_output.is_none()
+}
+
 /// Inner implementation that accepts single work item ID explicitly for testability.
 fn run_user_prompt_submit_hook_inner(
     input: &UserPromptSubmitInput,
@@ -70,10 +86,11 @@ fn run_user_prompt_submit_hook_inner(
     // Clear the reflection marker so the next stop with modifying tools will prompt again
     session::clear_reflect_marker(base)?;
 
-    let binary_msg = binary_location_message();
+    let include_binary_msg = input.is_compact_summary || is_opening_prompt(input);
 
     // Check if this is a post-compaction scenario
     if input.is_compact_summary {
+        let binary_msg = binary_location_message();
         let compaction_msg = post_compaction_message(input);
         return Ok(UserPromptSubmitOutput {
             system_message: Some(format!("{binary_msg}\n\n{compaction_msg}")),
@@ -83,16 +100,29 @@ fn run_user_prompt_submit_hook_inner(
     // Single work item mode: validate the assigned item and announce it
     if let Some(swi_id) = single_work_item_id {
         return match crate::single_work_item::validate_work_item(base, swi_id) {
-            Ok((id, title)) => Ok(UserPromptSubmitOutput {
-                system_message: Some(format!(
-                    "{binary_msg}\n\n\
-                     Single work item mode active. Assigned item: [{id}] {title}\n\
+            Ok((id, title)) => {
+                let swi_msg = format!(
+                    "Single work item mode active. Assigned item: [{id}] {title}\n\
                      Only this item needs to be completed to exit."
-                )),
-            }),
-            Err(msg) => Ok(UserPromptSubmitOutput {
-                system_message: Some(format!("{binary_msg}\n\nERROR: {msg}")),
-            }),
+                );
+                let system_message = if include_binary_msg {
+                    let binary_msg = binary_location_message();
+                    format!("{binary_msg}\n\n{swi_msg}")
+                } else {
+                    swi_msg
+                };
+                Ok(UserPromptSubmitOutput { system_message: Some(system_message) })
+            }
+            Err(msg) => {
+                let error_msg = format!("ERROR: {msg}");
+                let system_message = if include_binary_msg {
+                    let binary_msg = binary_location_message();
+                    format!("{binary_msg}\n\n{error_msg}")
+                } else {
+                    error_msg
+                };
+                Ok(UserPromptSubmitOutput { system_message: Some(system_message) })
+            }
         };
     }
 
@@ -101,7 +131,11 @@ fn run_user_prompt_submit_hook_inner(
         create_user_message_work_item(prompt, input.transcript_path.as_deref(), base);
     }
 
-    Ok(UserPromptSubmitOutput { system_message: Some(binary_location_message()) })
+    if include_binary_msg {
+        Ok(UserPromptSubmitOutput { system_message: Some(binary_location_message()) })
+    } else {
+        Ok(UserPromptSubmitOutput { system_message: None })
+    }
 }
 
 /// Create a work item for a user message so nothing gets missed.
@@ -178,7 +212,7 @@ fn create_user_message_task(
 }
 
 /// Generate the binary location message to inject into the system message.
-fn binary_location_message() -> String {
+pub fn binary_location_message() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     let binary_path = cwd.join(".claude-reliability/bin/claude-reliability");
     crate::templates::render_with_vars(
@@ -337,6 +371,136 @@ mod tests {
         assert!(
             msg.contains("Do NOT construct paths"),
             "msg should warn against constructing paths: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_user_prompt_submit_no_binary_msg_after_first_prompt() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript file that has an assistant response (not opening prompt)
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Hello"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi there!"}]}}
+"#,
+        )
+        .unwrap();
+
+        let input = UserPromptSubmitInput {
+            is_compact_summary: false,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            prompt: Some("Follow up question".to_string()),
+        };
+
+        let output = run_user_prompt_submit_hook_inner(&input, Some(base), None).unwrap();
+
+        // Should NOT include binary message since this is not the opening prompt
+        assert!(
+            output.system_message.is_none(),
+            "system_message should be None after opening prompt, got: {:?}",
+            output.system_message
+        );
+    }
+
+    #[test]
+    fn test_user_prompt_submit_binary_msg_on_opening_prompt_with_transcript() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create a transcript file with only a user message (no assistant response yet)
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Hello"}}
+"#,
+        )
+        .unwrap();
+
+        let input = UserPromptSubmitInput {
+            is_compact_summary: false,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            prompt: None,
+        };
+
+        let output = run_user_prompt_submit_hook_inner(&input, Some(base), None).unwrap();
+
+        assert!(output.system_message.is_some(), "system_message should be set on opening prompt");
+        let msg = output.system_message.unwrap();
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "opening prompt should contain binary path: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_single_work_item_no_binary_msg_after_first_prompt() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let task = store.create_task("My assigned task", "Do the thing", Priority::Medium).unwrap();
+
+        // Create a transcript with an assistant response (not opening prompt)
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Hello"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi!"}]}}
+"#,
+        )
+        .unwrap();
+
+        let input = UserPromptSubmitInput {
+            prompt: Some("Continue work".to_string()),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let output = run_user_prompt_submit_hook_inner(&input, Some(base), Some(&task.id)).unwrap();
+
+        assert!(output.system_message.is_some());
+        let msg = output.system_message.unwrap();
+        assert!(msg.contains("Single work item mode active"), "msg: {msg}");
+        assert!(
+            !msg.contains(".claude-reliability/bin/claude-reliability"),
+            "non-opening prompt should NOT include binary path: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_single_work_item_invalid_id_no_binary_msg_after_first_prompt() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Create the database so the store can be opened
+        let _store = SqliteTaskStore::for_project(base).unwrap();
+
+        // Create a transcript with an assistant response (not opening prompt)
+        let transcript_path = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type": "user", "timestamp": "2024-01-01T12:00:00Z", "message": {"content": "Hello"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi!"}]}}
+"#,
+        )
+        .unwrap();
+
+        let input = UserPromptSubmitInput {
+            prompt: Some("Hello".to_string()),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let output =
+            run_user_prompt_submit_hook_inner(&input, Some(base), Some("nonexistent-id")).unwrap();
+
+        assert!(output.system_message.is_some());
+        let msg = output.system_message.unwrap();
+        assert!(msg.contains("ERROR"), "msg: {msg}");
+        assert!(
+            !msg.contains(".claude-reliability/bin/claude-reliability"),
+            "non-opening prompt error should NOT include binary path: {msg}"
         );
     }
 

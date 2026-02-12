@@ -3,6 +3,7 @@
 //! This module consolidates all `PreToolUse` hook logic into a single entry point,
 //! dispatching to appropriate handlers based on tool name.
 
+use crate::hooks::user_prompt_submit::binary_location_message;
 use crate::hooks::{
     plan_tasks, run_code_review_hook, run_problem_mode_hook, run_protect_config_hook,
     run_require_task_hook, run_validation_hook, CodeReviewConfig, HookInput, PreToolUseOutput,
@@ -68,6 +69,11 @@ pub fn run_pre_tool_use_with_sub_agent(
             // Rewrite bare "claude-reliability" to the correct binary path
             if let Some(rewritten) = rewrite_bare_claude_reliability(input) {
                 return rewritten;
+            }
+
+            // Detect wrong binary path (e.g. ~/.claude-reliability/bin/claude-reliability)
+            if let Some(msg) = detect_wrong_claude_reliability_path(input) {
+                return PreToolUseOutput::allow(Some(msg));
             }
 
             // Check for --no-verify
@@ -254,6 +260,64 @@ fn replace_bare_claude_reliability(command: &str, replacement: &str) -> String {
     // Append any remaining text after the last match
     result.push_str(remaining);
     result
+}
+
+/// Detect when the agent uses `claude-reliability` with a wrong path prefix.
+///
+/// Returns the binary location message if the command contains `claude-reliability`
+/// but uses an incorrect path (e.g. `~/.claude-reliability/bin/claude-reliability`
+/// instead of the project-local `.claude-reliability/bin/claude-reliability`).
+///
+/// Returns `None` if the command doesn't contain `claude-reliability` or uses
+/// the correct path.
+fn detect_wrong_claude_reliability_path(input: &HookInput) -> Option<String> {
+    let command = input.tool_input.as_ref()?.command.as_deref()?;
+    if !command.contains("claude-reliability") {
+        return None;
+    }
+    let correct_abs = std::env::current_dir()
+        .ok()?
+        .join(".claude-reliability/bin/claude-reliability")
+        .to_string_lossy()
+        .into_owned();
+    let correct_rel = ".claude-reliability/bin/claude-reliability";
+
+    // Check for correct absolute path
+    if command.contains(&correct_abs) {
+        return None;
+    }
+
+    // Check for correct relative path as a standalone path token
+    // (not embedded in a larger path like ~/.claude-reliability/...)
+    if has_standalone_path(command, correct_rel) {
+        return None;
+    }
+
+    // Command has claude-reliability but with a wrong path prefix
+    Some(binary_location_message())
+}
+
+/// Check if `needle` appears in `command` as a standalone path.
+///
+/// A standalone path is one preceded by start-of-string or a command
+/// separator/whitespace character, not embedded inside a larger path
+/// (e.g. `~/.claude-reliability/...` is NOT standalone for `.claude-reliability/...`).
+fn has_standalone_path(command: &str, needle: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    while start + needle.len() <= command.len() {
+        let Some(pos) = command[start..].find(needle) else {
+            break;
+        };
+        let abs_pos = start + pos;
+        let is_standalone = abs_pos == 0
+            || matches!(bytes[abs_pos - 1], b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(');
+        if is_standalone {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
 }
 
 /// Check for --no-verify flag in git commands.
@@ -950,5 +1014,115 @@ reminders:
 
         let context = get_reminder_context(&input, dir.path());
         assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_bash_wrong_path_emits_binary_instructions() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("~/.claude-reliability/bin/claude-reliability work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = detect_wrong_claude_reliability_path(&input);
+        assert!(result.is_some(), "should detect wrong path");
+        let msg = result.unwrap();
+        assert!(
+            msg.contains(".claude-reliability/bin/claude-reliability"),
+            "should contain correct binary path: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_bash_wrong_path_absolute_home_dir() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(
+                    "/home/user/.claude-reliability/bin/claude-reliability work list".to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = detect_wrong_claude_reliability_path(&input);
+        assert!(result.is_some(), "should detect wrong absolute path");
+    }
+
+    #[test]
+    fn test_bash_correct_relative_path_no_extra_instructions() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(".claude-reliability/bin/claude-reliability work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = detect_wrong_claude_reliability_path(&input);
+        assert!(result.is_none(), "correct relative path should not trigger detection");
+    }
+
+    #[test]
+    fn test_bash_correct_abs_path_no_extra_instructions() {
+        let bin = expected_binary_path();
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(format!("{bin} work list")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = detect_wrong_claude_reliability_path(&input);
+        assert!(result.is_none(), "correct absolute path should not trigger detection");
+    }
+
+    #[test]
+    fn test_bash_no_claude_reliability_no_detection() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("git status".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = detect_wrong_claude_reliability_path(&input);
+        assert!(result.is_none(), "non-claude-reliability command should not trigger detection");
+    }
+
+    #[test]
+    fn test_bash_wrong_path_integrated() {
+        // Test the full pre_tool_use flow with a wrong path
+        let dir = TempDir::new().unwrap();
+        let runner = MockCommandRunner::new();
+
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("~/.claude-reliability/bin/claude-reliability work list".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_pre_tool_use(&input, dir.path(), &runner);
+        assert!(!output.is_block());
+        let context = output
+            .hook_specific_output
+            .additional_context
+            .expect("wrong path should produce additional_context");
+        assert!(
+            context.contains(".claude-reliability/bin/claude-reliability"),
+            "additional_context should contain correct binary path: {context}"
+        );
     }
 }
