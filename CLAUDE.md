@@ -2,14 +2,6 @@
 
 A plugin for Claude to improve its reliability through comprehensive testing infrastructure and behavioral validation.
 
-## IMPORTANT: Binary Location
-
-**DO NOT put binaries in shared locations like `~/.claude-reliability/`.**
-
-Different projects may use different versions of this plugin. Binaries MUST be stored per-project in `.claude-reliability/bin/` within the project directory, NOT in a shared home directory location. The startup hooks ensure the correct version is available for each project.
-
-**Command usage:** Just use `claude-reliability` in all commands and documentation. The pre-tool-use hook automatically rewrites bare `claude-reliability` commands to the correct path (`.claude-reliability/bin/claude-reliability`) via `updatedInput` before execution.
-
 ## Overview
 
 This project provides tools for testing and validating Claude Code behavior by recording and replaying tool call transcripts. The infrastructure supports reliability improvements through snapshot-based testing that captures expected behavior and validates consistency across changes.
@@ -55,14 +47,14 @@ python -m snapshot_tests.run_snapshots --save-snapshot my-test
 
 ## Work Tracking
 
-This project uses the claude-reliability plugin for work tracking via CLI. The binary is at `claude-reliability`:
+This project uses the claude-reliability plugin for work tracking via CLI:
 
 ```bash
-claude-reliability work create -t "Title" -d "Description"  # Create work item
-claude-reliability work list                                 # List work items
-claude-reliability work on <id>                              # Mark as in-progress
-claude-reliability work update <id> --status complete        # Update status
-claude-reliability work next                                 # Get next work item
+.claude-reliability/bin/claude-reliability work create -t "Title" -d "Description"  # Create work item
+.claude-reliability/bin/claude-reliability work list                                 # List work items
+.claude-reliability/bin/claude-reliability work on <id>                              # Mark as in-progress
+.claude-reliability/bin/claude-reliability work update <id> --status complete        # Update status
+.claude-reliability/bin/claude-reliability work next                                 # Get next work item
 ```
 
 ## Quality Standards
@@ -192,3 +184,22 @@ Read through `src/hooks/stop.rs` and update `docs/stop-hook-states.dot` to refle
 ```bash
 dot -Tpng docs/stop-hook-states.dot -o docs/stop-hook-states.png
 ```
+
+<!-- claude-reliability:binary-instructions managed section - DO NOT EDIT -->
+## claude-reliability Binary
+
+The `claude-reliability` binary for this project is located at:
+
+    .claude-reliability/bin/claude-reliability
+
+Always use this path when running commands. Do NOT use bare `claude-reliability`,
+do NOT use paths containing `~/.claude-reliability/`, and do NOT use `$PLUGIN_ROOT_DIR`
+or any other variable to construct the path.
+
+Example usage:
+
+    .claude-reliability/bin/claude-reliability work list
+    .claude-reliability/bin/claude-reliability work next
+    .claude-reliability/bin/claude-reliability work on <id>
+    .claude-reliability/bin/claude-reliability work update <id> --status complete
+<!-- end claude-reliability:binary-instructions -->
