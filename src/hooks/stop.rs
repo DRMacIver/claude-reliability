@@ -1315,9 +1315,8 @@ fn handle_uncommitted_changes(
 
 /// Check for interactive question handling.
 ///
-/// # Panics
-///
-/// Panics if the sub-agent fails to make a decision.
+/// If the sub-agent fails (e.g. timeout), defaults to allowing the stop
+/// so the hook doesn't panic.
 fn check_interactive_question(
     transcript_info: &TranscriptInfo,
     sub_agent: &dyn SubAgent,
@@ -1355,9 +1354,21 @@ fn check_interactive_question(
         has_modifications_since_user: transcript_info.has_modifying_tool_use_since_user,
     };
 
-    // Run sub-agent decision
-    let decision =
-        sub_agent.decide_on_question(&question_context).expect("sub-agent failed to make decision");
+    // Run sub-agent decision. If the sub-agent fails (e.g. timeout), allow the stop
+    // rather than panicking - a timeout likely means the agent is stuck anyway.
+    let decision = match sub_agent.decide_on_question(&question_context) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Sub-agent failed to make decision: {e}");
+            return Some(
+                StopHookResult::allow()
+                    .with_message("# Sub-agent Error")
+                    .with_message("")
+                    .with_message(format!("Sub-agent failed: {e}"))
+                    .with_message("Allowing stop due to sub-agent failure."),
+            );
+        }
+    };
 
     match decision {
         SubAgentDecision::AllowStop(reason) => {
@@ -2555,6 +2566,35 @@ mod tests {
         let result =
             check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_interactive_question_subagent_error_allows_stop() {
+        use crate::testing::FailingSubAgent;
+        use chrono::{Duration, Utc};
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Which approach should I use?".to_string()),
+            last_user_message_time: Some(Utc::now() - Duration::minutes(1)),
+            has_api_error: false,
+            consecutive_api_errors: 0,
+            last_error_is_overloaded: false,
+            has_modifying_tool_use: false,
+            has_modifying_tool_use_since_user: false,
+            first_user_message: None,
+            last_user_message: None,
+        };
+        let sub_agent = FailingSubAgent::new("command timed out");
+
+        let result =
+            check_interactive_question(&transcript_info, &sub_agent, &StopHookConfig::default());
+        assert!(result.is_some(), "Should allow stop when sub-agent fails");
+        let result = result.unwrap();
+        assert!(result.allow_stop, "Should allow stop on sub-agent error");
+        assert!(
+            result.messages.iter().any(|m| m.contains("Sub-agent failed")),
+            "Should mention sub-agent failure in messages"
+        );
     }
 
     fn create_transcript_with_output(output: &str) -> tempfile::NamedTempFile {

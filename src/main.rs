@@ -9,6 +9,11 @@ use clap::Parser;
 use claude_reliability::cli::Cli;
 
 fn main() -> ExitCode {
+    // Always enable full backtraces for panic diagnostics unless explicitly overridden.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "full");
+    }
+
     let cli = Cli::parse();
 
     let stdin = if cli.command.needs_stdin() { read_stdin() } else { String::new() };
