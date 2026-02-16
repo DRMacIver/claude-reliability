@@ -672,6 +672,31 @@ impl crate::tasks::TaskStore for FailingTaskStore {
     fn get_incomplete_requested_work(&self) -> Result<Vec<crate::tasks::Task>> {
         Ok(vec![])
     }
+
+    fn record_user_message(
+        &self,
+        _message: &str,
+        _context: &str,
+        _transcript_path: Option<&str>,
+        _session_id: &str,
+    ) -> Result<()> {
+        Err(crate::error::Error::Config(self.error_message.clone()))
+    }
+
+    fn get_session_user_messages(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<crate::tasks::UserMessage>> {
+        Ok(vec![])
+    }
+
+    fn clear_user_messages_for_session(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn mark_pre_compaction(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1021,5 +1046,11 @@ mod tests {
         assert!(!store.is_request_mode_active().unwrap());
         store.clear_request_mode().unwrap();
         assert!(store.get_incomplete_requested_work().unwrap().is_empty());
+
+        // User messages
+        assert!(store.record_user_message("msg", "ctx", None, "session").is_err());
+        assert!(store.get_session_user_messages("session").unwrap().is_empty());
+        store.clear_user_messages_for_session("session").unwrap();
+        store.mark_pre_compaction("session").unwrap();
     }
 }

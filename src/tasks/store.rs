@@ -3,7 +3,9 @@
 use crate::error::Result;
 use crate::paths;
 use crate::tasks::id::generate_task_id;
-use crate::tasks::models::{AuditEntry, HowTo, Note, Priority, Question, Status, Task};
+use crate::tasks::models::{
+    AuditEntry, HowTo, Note, Priority, Question, Status, Task, UserMessage,
+};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::hash_map::RandomState;
@@ -162,6 +164,26 @@ pub trait TaskStore {
     /// Results are ordered by priority (ascending) then dependent count (descending),
     /// and limited to the top 5.
     fn get_incomplete_requested_work(&self) -> Result<Vec<Task>>;
+
+    // User message tracking
+
+    /// Record a user message for session tracking.
+    fn record_user_message(
+        &self,
+        message: &str,
+        context: &str,
+        transcript_path: Option<&str>,
+        session_id: &str,
+    ) -> Result<()>;
+
+    /// Get all user messages for a session, ordered by creation time.
+    fn get_session_user_messages(&self, session_id: &str) -> Result<Vec<UserMessage>>;
+
+    /// Clear all user messages for a session.
+    fn clear_user_messages_for_session(&self, session_id: &str) -> Result<()>;
+
+    /// Mark all existing messages for a session as pre-compaction.
+    fn mark_pre_compaction(&self, session_id: &str) -> Result<()>;
 }
 
 /// Fields that can be updated on a task.
@@ -521,6 +543,20 @@ impl SqliteTaskStore {
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            -- User messages for session tracking
+            CREATE TABLE IF NOT EXISTS user_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message TEXT NOT NULL,
+                context TEXT NOT NULL DEFAULT '',
+                transcript_path TEXT,
+                session_id TEXT NOT NULL DEFAULT '',
+                pre_compaction INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Index for looking up messages by session
+            CREATE INDEX IF NOT EXISTS idx_user_messages_session_id ON user_messages(session_id);
             ",
         )?;
 
@@ -1896,6 +1932,63 @@ impl TaskStore for SqliteTaskStore {
         result.truncate(5);
 
         Ok(result)
+    }
+
+    fn record_user_message(
+        &self,
+        message: &str,
+        context: &str,
+        transcript_path: Option<&str>,
+        session_id: &str,
+    ) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute(
+            "INSERT INTO user_messages (message, context, transcript_path, session_id)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![message, context, transcript_path, session_id],
+        )?;
+        Ok(())
+    }
+
+    fn get_session_user_messages(&self, session_id: &str) -> Result<Vec<UserMessage>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, message, context, transcript_path, session_id, pre_compaction, created_at
+             FROM user_messages
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let messages = stmt
+            .query_map(params![session_id], |row| {
+                let pre_compaction_val: i64 = row.get(5)?;
+                Ok(UserMessage {
+                    id: row.get(0)?,
+                    message: row.get(1)?,
+                    context: row.get(2)?,
+                    transcript_path: row.get(3)?,
+                    session_id: row.get(4)?,
+                    pre_compaction: pre_compaction_val != 0,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .flatten()
+            .collect();
+        Ok(messages)
+    }
+
+    fn clear_user_messages_for_session(&self, session_id: &str) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute("DELETE FROM user_messages WHERE session_id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    fn mark_pre_compaction(&self, session_id: &str) -> Result<()> {
+        let conn = self.open()?;
+        conn.execute(
+            "UPDATE user_messages SET pre_compaction = 1 WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
     }
 }
 
@@ -3519,5 +3612,113 @@ mod tests {
         assert!(!updated.requested);
 
         disable_deterministic_ids();
+    }
+
+    // === User message tests ===
+
+    #[test]
+    fn test_record_and_get_user_messages() {
+        let (_dir, store) = create_test_store();
+
+        store
+            .record_user_message("Hello world", "opening prompt", Some("/tmp/t.jsonl"), "session-1")
+            .unwrap();
+        store
+            .record_user_message("Follow up", "follow-up", Some("/tmp/t.jsonl"), "session-1")
+            .unwrap();
+
+        let messages = store.get_session_user_messages("session-1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].message, "Hello world");
+        assert_eq!(messages[0].context, "opening prompt");
+        assert_eq!(messages[0].transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+        assert_eq!(messages[0].session_id, "session-1");
+        assert!(!messages[0].pre_compaction);
+
+        assert_eq!(messages[1].message, "Follow up");
+        assert_eq!(messages[1].context, "follow-up");
+    }
+
+    #[test]
+    fn test_user_messages_scoped_to_session() {
+        let (_dir, store) = create_test_store();
+
+        store.record_user_message("Msg A", "ctx", None, "session-a").unwrap();
+        store.record_user_message("Msg B", "ctx", None, "session-b").unwrap();
+
+        let a_messages = store.get_session_user_messages("session-a").unwrap();
+        assert_eq!(a_messages.len(), 1);
+        assert_eq!(a_messages[0].message, "Msg A");
+
+        let b_messages = store.get_session_user_messages("session-b").unwrap();
+        assert_eq!(b_messages.len(), 1);
+        assert_eq!(b_messages[0].message, "Msg B");
+    }
+
+    #[test]
+    fn test_clear_user_messages_for_session() {
+        let (_dir, store) = create_test_store();
+
+        store.record_user_message("Msg 1", "ctx", None, "session-1").unwrap();
+        store.record_user_message("Msg 2", "ctx", None, "session-1").unwrap();
+        store.record_user_message("Msg 3", "ctx", None, "session-2").unwrap();
+
+        store.clear_user_messages_for_session("session-1").unwrap();
+
+        let s1 = store.get_session_user_messages("session-1").unwrap();
+        assert!(s1.is_empty(), "session-1 should be cleared");
+
+        let s2 = store.get_session_user_messages("session-2").unwrap();
+        assert_eq!(s2.len(), 1, "session-2 should be untouched");
+    }
+
+    #[test]
+    fn test_mark_pre_compaction() {
+        let (_dir, store) = create_test_store();
+
+        store.record_user_message("Before compaction", "ctx", None, "session-1").unwrap();
+
+        let before = store.get_session_user_messages("session-1").unwrap();
+        assert!(!before[0].pre_compaction);
+
+        store.mark_pre_compaction("session-1").unwrap();
+
+        let after = store.get_session_user_messages("session-1").unwrap();
+        assert!(after[0].pre_compaction);
+    }
+
+    #[test]
+    fn test_mark_pre_compaction_only_affects_session() {
+        let (_dir, store) = create_test_store();
+
+        store.record_user_message("Msg A", "ctx", None, "session-a").unwrap();
+        store.record_user_message("Msg B", "ctx", None, "session-b").unwrap();
+
+        store.mark_pre_compaction("session-a").unwrap();
+
+        let a = store.get_session_user_messages("session-a").unwrap();
+        assert!(a[0].pre_compaction);
+
+        let b = store.get_session_user_messages("session-b").unwrap();
+        assert!(!b[0].pre_compaction);
+    }
+
+    #[test]
+    fn test_user_message_no_transcript_path() {
+        let (_dir, store) = create_test_store();
+
+        store.record_user_message("No transcript", "ctx", None, "session-1").unwrap();
+
+        let messages = store.get_session_user_messages("session-1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].transcript_path.is_none());
+    }
+
+    #[test]
+    fn test_empty_session_returns_empty_vec() {
+        let (_dir, store) = create_test_store();
+
+        let messages = store.get_session_user_messages("nonexistent").unwrap();
+        assert!(messages.is_empty());
     }
 }

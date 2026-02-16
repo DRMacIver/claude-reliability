@@ -687,7 +687,10 @@ fn check_work_item_reminder(
 /// # Panics
 ///
 /// Panics if clearing the reflect marker fails (database error).
-fn check_reflection_marker_allow(config: &StopHookConfig) -> Option<StopHookResult> {
+fn check_reflection_marker_allow(
+    config: &StopHookConfig,
+    session_id: &str,
+) -> Option<StopHookResult> {
     let base_dir = config.base_dir();
     if !session::has_reflect_marker(base_dir) {
         return None;
@@ -708,6 +711,9 @@ fn check_reflection_marker_allow(config: &StopHookConfig) -> Option<StopHookResu
 
     // Note: check_auto_work_tasks already ran before this in run_stop_hook,
     // so we don't need to check it again here.
+
+    // Clear user messages for this session since reflection is complete
+    tasks::clear_session_user_messages(base_dir, session_id);
 
     Some(
         StopHookResult::allow()
@@ -734,7 +740,23 @@ fn check_question_skip_reflection(
     None
 }
 
+/// Truncate a message for display in the reflection prompt.
+fn truncate_message(message: &str, max_len: usize) -> String {
+    let collapsed: String = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= max_len {
+        return collapsed;
+    }
+    let mut end = max_len;
+    while end > 0 && !collapsed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &collapsed[..end])
+}
+
 /// Prompt for reflection on first stop if modifying tools were used.
+///
+/// Includes user messages from the session in the reflection prompt
+/// so the agent can verify all requests were addressed.
 ///
 /// # Panics
 ///
@@ -742,6 +764,7 @@ fn check_question_skip_reflection(
 fn check_reflection_prompt(
     transcript_info: &TranscriptInfo,
     config: &StopHookConfig,
+    session_id: &str,
 ) -> Option<StopHookResult> {
     if !transcript_info.has_modifying_tool_use {
         return None;
@@ -749,10 +772,15 @@ fn check_reflection_prompt(
 
     // Modifying tools were used, prompt for reflection
     session::set_reflect_marker(config.base_dir()).expect("failed to set reflect marker");
-    Some(
-        StopHookResult::block()
-            .with_message("# Task Completion Check")
-            .with_message("")
+
+    // Get user messages for this session
+    let messages = tasks::get_session_user_messages(config.base_dir(), session_id);
+
+    let mut result =
+        StopHookResult::block().with_message("# Task Completion Check").with_message("");
+
+    if messages.is_empty() {
+        result = result
             .with_message(
                 "Before exiting, carefully analyze whether you have fully completed the task.",
             )
@@ -762,8 +790,42 @@ fn check_reflection_prompt(
             .with_message("")
             .with_message("If you HAVE completed the task:")
             .with_message("  - Provide a clear, concise summary of what was done for the user")
-            .with_message("  - Then stop again to exit"),
-    )
+            .with_message("  - Then stop again to exit");
+    } else {
+        result = result.with_message(
+            "Before exiting, verify that ALL user messages in this session have been fully addressed:",
+        ).with_message("");
+
+        for (i, msg) in messages.iter().enumerate() {
+            let pre_compaction_note = if msg.pre_compaction {
+                " (from before context compaction - MUST still be verified)"
+            } else {
+                ""
+            };
+            let truncated = truncate_message(&msg.message, 200);
+            result = result.with_message(format!(
+                "{}. [{}] ({}{}): \"{}\"",
+                i + 1,
+                msg.created_at,
+                msg.context,
+                pre_compaction_note,
+                truncated
+            ));
+        }
+
+        result = result
+            .with_message("")
+            .with_message("For each message above, confirm it has been fully addressed.")
+            .with_message("")
+            .with_message("If any requests are NOT complete:")
+            .with_message("  - Continue working to finish them")
+            .with_message("")
+            .with_message("If ALL requests HAVE been addressed:")
+            .with_message("  - Provide a clear, concise summary of what was done")
+            .with_message("  - Then stop again to exit");
+    }
+
+    Some(result)
 }
 
 /// Check if we should prompt to work on open tasks (final check before allow).
@@ -919,8 +981,11 @@ pub fn run_stop_hook(
     }
     log.pass("work_item_reminder", "already reminded or no modifying tools");
 
+    // Derive session ID for user message tracking.
+    let session_id = input.transcript_path.as_deref().unwrap_or("unknown");
+
     // The model has previously been asked to reflect, and now it has.
-    if let Some(r) = check_reflection_marker_allow(config) {
+    if let Some(r) = check_reflection_marker_allow(config, session_id) {
         log.pass("reflection_marker", "reflection complete, allowing stop");
         return Ok(log.into_result(r));
     }
@@ -934,7 +999,7 @@ pub fn run_stop_hook(
     log.pass("question_skip_reflection", "not a question");
 
     // Prompt for reflection before allowing stop.
-    if let Some(r) = check_reflection_prompt(&transcript_info, config) {
+    if let Some(r) = check_reflection_prompt(&transcript_info, config, session_id) {
         log.pass("reflection_prompt", "prompting for reflection");
         return Ok(log.into_result(r));
     }
@@ -4779,7 +4844,7 @@ mod tests {
             single_work_item_id: Some(task.id),
             ..Default::default()
         };
-        let result = check_reflection_marker_allow(&config);
+        let result = check_reflection_marker_allow(&config, "test-session");
 
         // Item is incomplete, so reflection should block
         assert!(result.is_some());
@@ -4813,7 +4878,7 @@ mod tests {
             single_work_item_id: Some(task.id),
             ..Default::default()
         };
-        let result = check_reflection_marker_allow(&config);
+        let result = check_reflection_marker_allow(&config, "test-session");
 
         // Item is complete, so reflection should allow
         assert!(result.is_some());
@@ -4984,5 +5049,201 @@ mod tests {
         assert!(!session::has_reflect_marker(base));
         // work_item_reminded marker persists (set once, never cleared by stop hook)
         assert!(session::has_work_item_reminded(base));
+    }
+
+    #[test]
+    fn test_truncate_message_short_message() {
+        let result = truncate_message("Hello world", 200);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_truncate_message_long_message() {
+        let long = "a ".repeat(200);
+        let result = truncate_message(&long, 50);
+        assert!(result.len() <= 53); // 50 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_message_collapses_whitespace() {
+        let result = truncate_message("Hello   world\n\nnewline\there", 200);
+        assert_eq!(result, "Hello world newline here");
+    }
+
+    #[test]
+    fn test_truncate_message_exact_boundary() {
+        // Exactly at the limit
+        let msg = "a".repeat(50);
+        let result = truncate_message(&msg, 50);
+        assert_eq!(result, msg); // No truncation
+    }
+
+    #[test]
+    fn test_truncate_message_multibyte_char_boundary() {
+        // "é" is 2 bytes in UTF-8. Place it so truncation lands mid-character.
+        // 49 'a' chars + "é" (2 bytes) = 51 bytes total, max_len = 50
+        // Truncation at byte 50 is mid-char, so it backs up to 49.
+        let msg = format!("{}é more text", "a".repeat(49));
+        let result = truncate_message(&msg, 50);
+        assert!(result.ends_with("..."));
+        // Should truncate cleanly before the multi-byte char
+        assert!(!result.contains("é"), "should not contain partial multi-byte char");
+    }
+
+    #[test]
+    fn test_reflection_prompt_includes_user_messages() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set work item reminded marker
+        session::set_work_item_reminded(base).unwrap();
+
+        // Create transcript path first (used as session_id by run_stop_hook)
+        let transcript_path = base.join("transcript.jsonl");
+        let session_id = transcript_path.to_string_lossy().to_string();
+
+        // Record user messages using transcript path as session_id
+        tasks::record_user_message(
+            base,
+            "Fix the login bug",
+            "opening prompt",
+            Some(&session_id),
+            &session_id,
+        );
+        tasks::record_user_message(
+            base,
+            "Also add tests",
+            "follow-up",
+            Some(&session_id),
+            &session_id,
+        );
+
+        // Write transcript content with modifying tool use
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input =
+            crate::hooks::HookInput { transcript_path: Some(session_id), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        let joined = result.messages.join("\n");
+        assert!(joined.contains("Task Completion Check"), "messages: {joined}");
+        assert!(joined.contains("Fix the login bug"), "messages: {joined}");
+        assert!(joined.contains("Also add tests"), "messages: {joined}");
+        assert!(joined.contains("opening prompt"), "messages: {joined}");
+        assert!(joined.contains("follow-up"), "messages: {joined}");
+        assert!(joined.contains("verify that ALL user messages"), "messages: {joined}");
+    }
+
+    #[test]
+    fn test_reflection_prompt_includes_pre_compaction_note() {
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        // Set work item reminded marker
+        session::set_work_item_reminded(base).unwrap();
+
+        // Create transcript path first (used as session_id by run_stop_hook)
+        let transcript_path = base.join("transcript.jsonl");
+        let session_id = transcript_path.to_string_lossy().to_string();
+
+        // Record a message and mark it as pre-compaction
+        tasks::record_user_message(
+            base,
+            "Original request",
+            "opening prompt",
+            Some(&session_id),
+            &session_id,
+        );
+        tasks::mark_pre_compaction_messages(base, &session_id);
+
+        // Add a post-compaction message
+        tasks::record_user_message(
+            base,
+            "New request after compaction",
+            "follow-up",
+            Some(&session_id),
+            &session_id,
+        );
+
+        // Write transcript content with modifying tool use
+        {
+            let mut file = std::fs::File::create(&transcript_path).unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","id":"123"}}]}}}}"#
+            )
+            .unwrap();
+        }
+
+        let runner = MockCommandRunner::new();
+        let sub_agent = MockSubAgent::new();
+        let input =
+            crate::hooks::HookInput { transcript_path: Some(session_id), ..Default::default() };
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = run_stop_hook(&input, &config, &runner, &sub_agent).unwrap();
+        assert!(!result.allow_stop);
+        let joined = result.messages.join("\n");
+        assert!(
+            joined.contains("before context compaction"),
+            "should note pre-compaction: {joined}"
+        );
+        assert!(joined.contains("Original request"), "messages: {joined}");
+        assert!(joined.contains("New request after compaction"), "messages: {joined}");
+    }
+
+    #[test]
+    fn test_reflection_marker_allow_clears_user_messages() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Record a user message
+        tasks::record_user_message(base, "Do something", "opening prompt", None, session_id);
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let result = check_reflection_marker_allow(&config, session_id);
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
+
+        // User messages should be cleared after successful reflection
+        let messages = tasks::get_session_user_messages(base, session_id);
+        assert!(messages.is_empty(), "messages should be cleared after reflection");
     }
 }

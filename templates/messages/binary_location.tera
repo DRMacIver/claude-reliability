@@ -1,3 +1,0 @@
-The claude-reliability binary for this project is at: {{ binary_path }}
-
-When running claude-reliability commands, use the bare command `claude-reliability` — the pre-tool-use hook will automatically rewrite it to the correct absolute path. Do NOT construct paths to the binary yourself.

@@ -402,7 +402,7 @@ fn test_check_binary_path_wrong_suffix() {
     let msg = result.unwrap_err();
     assert!(msg.contains("ERROR: Wrong binary location"), "msg: {msg}");
     assert!(msg.contains("plugins/cache"), "msg: {msg}");
-    assert!(msg.contains("pre-tool-use hook"), "msg: {msg}");
+    assert!(msg.contains("from your project root"), "msg: {msg}");
 }
 
 #[test]

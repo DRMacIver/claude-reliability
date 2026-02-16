@@ -33,6 +33,7 @@ pub mod store;
 
 pub use models::{
     AuditEntry, HowTo, InvalidPriority, InvalidStatus, Note, Priority, Question, Status, Task,
+    UserMessage,
 };
 pub use store::{
     CircularDependency, HowToNotFound, HowToUpdate, QuestionNotFound, SqliteTaskStore, TaskFilter,
@@ -146,6 +147,86 @@ pub fn get_incomplete_requested_work(base_dir: &Path) -> Vec<(String, String, St
         .into_iter()
         .map(|t| (t.id, t.title, t.status.as_str().to_string()))
         .collect()
+}
+
+/// Record a user message for session tracking.
+///
+/// Logs a warning if the task store can't be opened (e.g. directory doesn't exist).
+///
+/// # Panics
+///
+/// Panics if the store opens successfully but the SQL operation fails.
+pub fn record_user_message(
+    base_dir: &Path,
+    message: &str,
+    context: &str,
+    transcript_path: Option<&str>,
+    session_id: &str,
+) {
+    let store = match SqliteTaskStore::for_project(base_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Failed to open task store for user message: {e}");
+            return;
+        }
+    };
+    store
+        .record_user_message(message, context, transcript_path, session_id)
+        .expect("failed to record user message after store opened successfully");
+}
+
+/// Get all user messages for a session.
+///
+/// Returns empty vec if the database file doesn't exist.
+///
+/// # Panics
+///
+/// Panics if the database file exists but can't be opened or queried.
+#[must_use]
+pub fn get_session_user_messages(base_dir: &Path, session_id: &str) -> Vec<UserMessage> {
+    let db_path = paths::project_db_path(base_dir);
+    if !db_path.exists() {
+        return Vec::new();
+    }
+
+    let store = SqliteTaskStore::new(&db_path).expect("failed to open existing task store");
+    store.get_session_user_messages(session_id).expect("failed to get session user messages")
+}
+
+/// Clear all user messages for a session.
+///
+/// Does nothing if the database file doesn't exist.
+///
+/// # Panics
+///
+/// Panics if the database file exists but can't be opened or modified.
+pub fn clear_session_user_messages(base_dir: &Path, session_id: &str) {
+    let db_path = paths::project_db_path(base_dir);
+    if !db_path.exists() {
+        return;
+    }
+
+    let store = SqliteTaskStore::new(&db_path).expect("failed to open existing task store");
+    store
+        .clear_user_messages_for_session(session_id)
+        .expect("failed to clear session user messages");
+}
+
+/// Mark all existing user messages for a session as pre-compaction.
+///
+/// Does nothing if the database file doesn't exist.
+///
+/// # Panics
+///
+/// Panics if the database file exists but can't be opened or modified.
+pub fn mark_pre_compaction_messages(base_dir: &Path, session_id: &str) {
+    let db_path = paths::project_db_path(base_dir);
+    if !db_path.exists() {
+        return;
+    }
+
+    let store = SqliteTaskStore::new(&db_path).expect("failed to open existing task store");
+    store.mark_pre_compaction(session_id).expect("failed to mark pre-compaction messages");
 }
 
 /// Clear request mode (called when all requested tasks are complete).
@@ -445,5 +526,112 @@ mod tests {
         clear_request_mode(dir.path());
 
         assert!(!store.is_request_mode_active().unwrap());
+    }
+
+    // === User message convenience function tests ===
+
+    #[test]
+    fn test_record_and_get_user_messages() {
+        let dir = TempDir::new().unwrap();
+
+        record_user_message(dir.path(), "Hello", "opening prompt", None, "session-1");
+        record_user_message(dir.path(), "Follow up", "follow-up", None, "session-1");
+
+        let messages = get_session_user_messages(dir.path(), "session-1");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].message, "Hello");
+        assert_eq!(messages[1].message, "Follow up");
+    }
+
+    #[test]
+    fn test_get_user_messages_no_database() {
+        let dir = TempDir::new().unwrap();
+        let messages = get_session_user_messages(dir.path(), "session-1");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_clear_user_messages() {
+        let dir = TempDir::new().unwrap();
+
+        record_user_message(dir.path(), "Msg", "ctx", None, "session-1");
+        assert_eq!(get_session_user_messages(dir.path(), "session-1").len(), 1);
+
+        clear_session_user_messages(dir.path(), "session-1");
+        assert!(get_session_user_messages(dir.path(), "session-1").is_empty());
+    }
+
+    #[test]
+    fn test_clear_user_messages_no_database() {
+        let dir = TempDir::new().unwrap();
+        // Should not panic
+        clear_session_user_messages(dir.path(), "session-1");
+    }
+
+    #[test]
+    fn test_mark_pre_compaction_messages() {
+        let dir = TempDir::new().unwrap();
+
+        record_user_message(dir.path(), "Msg", "ctx", None, "session-1");
+        mark_pre_compaction_messages(dir.path(), "session-1");
+
+        let messages = get_session_user_messages(dir.path(), "session-1");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].pre_compaction);
+    }
+
+    #[test]
+    fn test_mark_pre_compaction_no_database() {
+        let dir = TempDir::new().unwrap();
+        // Should not panic
+        mark_pre_compaction_messages(dir.path(), "session-1");
+    }
+
+    #[test]
+    fn test_record_user_message_with_broken_store() {
+        let dir = TempDir::new().unwrap();
+        // Create .claude-reliability as a file so the store can't open
+        let store_dir = dir.path().join(".claude-reliability");
+        std::fs::write(&store_dir, "not a directory").unwrap();
+
+        // Should not panic - just logs a warning
+        record_user_message(dir.path(), "msg", "ctx", None, "session-1");
+    }
+
+    #[test]
+    #[should_panic(expected = "failed to open existing task store")]
+    fn test_get_session_user_messages_with_corrupted_db() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join(".claude-reliability");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join(crate::paths::DATABASE_FILENAME), "not a sqlite database")
+            .unwrap();
+
+        let _ = get_session_user_messages(dir.path(), "session-1");
+    }
+
+    #[test]
+    #[should_panic(expected = "failed to open existing task store")]
+    fn test_clear_session_user_messages_with_corrupted_db() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join(".claude-reliability");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join(crate::paths::DATABASE_FILENAME), "not a sqlite database")
+            .unwrap();
+
+        clear_session_user_messages(dir.path(), "session-1");
+    }
+
+    #[test]
+    #[should_panic(expected = "failed to open existing task store")]
+    fn test_mark_pre_compaction_messages_with_corrupted_db() {
+        let dir = TempDir::new().unwrap();
+        let db_dir = dir.path().join(".claude-reliability");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(db_dir.join(crate::paths::DATABASE_FILENAME), "not a sqlite database")
+            .unwrap();
+
+        // Should not panic
+        mark_pre_compaction_messages(dir.path(), "session-1");
     }
 }

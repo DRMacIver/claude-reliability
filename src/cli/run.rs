@@ -43,15 +43,12 @@ pub fn check_binary_path(binary_path: &Path) -> Result<(), String> {
         [".claude-reliability", "bin", "claude-reliability"].iter().collect();
 
     if !binary_path.ends_with(&expected_suffix) {
-        let cwd = std::env::current_dir().unwrap_or_default();
         return Err(format!(
             "ERROR: Wrong binary location.\n\n\
              This binary is at: {}\n\
              Expected location: <project>/.claude-reliability/bin/claude-reliability\n\n\
-             Use the bare command `claude-reliability` (the pre-tool-use hook will rewrite it)\n\
-             or use the absolute path: {}/.claude-reliability/bin/claude-reliability",
+             Use the path `.claude-reliability/bin/claude-reliability` from your project root.",
             binary_path.display(),
-            cwd.display(),
         ));
     }
 
@@ -60,16 +57,13 @@ pub fn check_binary_path(binary_path: &Path) -> Result<(), String> {
         binary_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
     {
         if !project_dir.join(".claude").is_dir() {
-            let cwd = std::env::current_dir().unwrap_or_default();
             return Err(format!(
                 "ERROR: Wrong binary location.\n\n\
                  This binary is at: {}\n\
                  The project directory ({}) does not contain a .claude directory.\n\n\
-                 Use the bare command `claude-reliability` (the pre-tool-use hook will rewrite it)\n\
-                 or use the absolute path: {}/.claude-reliability/bin/claude-reliability",
+                 Use the path `.claude-reliability/bin/claude-reliability` from your project root.",
                 binary_path.display(),
                 project_dir.display(),
-                cwd.display(),
             ));
         }
     }

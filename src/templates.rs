@@ -100,11 +100,6 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "messages/enter_plan_mode_intent.tera",
         include_str!("../templates/messages/enter_plan_mode_intent.tera"),
     );
-    m.insert(
-        "messages/binary_location.tera",
-        include_str!("../templates/messages/binary_location.tera"),
-    );
-
     m
 });
 

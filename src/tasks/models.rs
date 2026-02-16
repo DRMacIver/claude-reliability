@@ -208,6 +208,28 @@ impl Question {
     }
 }
 
+/// A recorded user message for session tracking.
+///
+/// User messages are recorded during a session and included in the
+/// reflection prompt to ensure all requests are addressed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMessage {
+    /// Unique identifier.
+    pub id: i64,
+    /// The user's message text.
+    pub message: String,
+    /// Context about the message (e.g. "opening prompt", "follow-up").
+    pub context: String,
+    /// Path to the conversation transcript, if available.
+    pub transcript_path: Option<String>,
+    /// Session identifier (typically the transcript path).
+    pub session_id: String,
+    /// Whether this message was recorded before a context compaction.
+    pub pre_compaction: bool,
+    /// ISO 8601 timestamp when the message was recorded.
+    pub created_at: String,
+}
+
 /// An entry in the audit log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
