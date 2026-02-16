@@ -1,0 +1,54 @@
+{# Sub-agent prompt for evaluating whether a reflection indicates all work is complete.
+
+Variables:
+  - reflection_output: The agent's reflection/completion summary
+  - user_messages: List of user messages from the session
+#}
+You are a sub-agent evaluating whether an AI coding agent has completed all requested work.
+
+## Agent's Reflection
+
+The agent was asked to review its work before stopping. Here is its reflection:
+
+<reflection>
+{{ reflection_output }}
+</reflection>
+
+## User Messages From This Session
+
+These are the requests the user made during this session:
+
+{% for msg in user_messages %}
+- {{ msg }}
+{% endfor %}
+{% if user_messages | length == 0 %}
+(No user messages recorded)
+{% endif %}
+
+## Your Task
+
+Determine whether the agent has completed ALL requested work, or whether work items remain incomplete.
+
+Look for:
+- Explicit mentions of remaining, unfinished, or pending work
+- Items described as "TODO", "still needed", "not yet done", "remaining"
+- Mismatches between what the user requested and what was completed
+- Partial implementations (e.g., "started but didn't finish X")
+- Items the agent says it skipped or deferred
+
+Respond with EXACTLY one of these formats:
+
+If all work is complete:
+COMPLETE
+
+If work remains incomplete, list each incomplete item on its own line starting with "- ":
+INCOMPLETE:
+- Title of first incomplete item
+- Title of second incomplete item
+
+## Important
+
+- Be conservative: if the reflection clearly states everything is done, respond COMPLETE
+- Only list genuinely incomplete items, not minor suggestions or nice-to-haves
+- Each item title should be concise (under 80 characters) and actionable
+- Do NOT invent items that aren't mentioned in the reflection or user messages

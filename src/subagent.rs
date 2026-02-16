@@ -5,7 +5,8 @@ use crate::subagent_logging::log_subagent_event;
 use crate::templates;
 use crate::traits::{
     CommandRunner, CreateQuestionContext, CreateQuestionDecision, EmergencyStopContext,
-    EmergencyStopDecision, QuestionContext, SubAgent, SubAgentDecision,
+    EmergencyStopDecision, QuestionContext, ReflectionContext, ReflectionDecision, SubAgent,
+    SubAgentDecision,
 };
 use std::time::{Duration, Instant};
 use tera::Context;
@@ -21,6 +22,9 @@ const EMERGENCY_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for `create_question` decisions (60 seconds).
 const CREATE_QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for reflection decisions (60 seconds).
+const REFLECTION_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Subdirectory name for running sub-agents to avoid picking up project hooks.
 const SUBAGENT_SUBDIR: &str = "claude-reliability-subagents";
@@ -311,6 +315,77 @@ impl SubAgent for RealSubAgent<'_> {
             |answer| Ok(CreateQuestionDecision::AutoAnswer(answer.trim().to_string())),
         )
     }
+
+    fn evaluate_reflection(&self, context: &ReflectionContext) -> Result<ReflectionDecision> {
+        let mut ctx = Context::new();
+        ctx.insert("reflection_output", &context.reflection_output);
+        ctx.insert("user_messages", &context.user_messages);
+
+        let prompt = templates::render("prompts/reflection_decision.tera", &ctx)
+            .expect("reflection_decision.tera template should always render");
+
+        let start = Instant::now();
+
+        // Run in a neutral directory to avoid picking up project hooks
+        let output = self.runner.run_in_dir(
+            self.claude_cmd(),
+            &["--print", "--model", "haiku", "-p", &prompt],
+            Some(REFLECTION_DECISION_TIMEOUT),
+            &get_subagent_cwd(),
+        )?;
+
+        #[allow(clippy::cast_possible_truncation)] // Duration in ms won't overflow u64
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        if !output.success() {
+            log_subagent_event(
+                "reflection_decision",
+                &prompt,
+                Some(&output.stderr),
+                false,
+                Some(duration_ms),
+            );
+            // If Claude fails, default to Complete (avoid infinite loops)
+            return Ok(ReflectionDecision::Complete);
+        }
+
+        let response = output.stdout.trim();
+
+        log_subagent_event("reflection_decision", &prompt, Some(response), true, Some(duration_ms));
+
+        Ok(parse_reflection_response(response))
+    }
+}
+
+/// Parse a reflection decision response.
+///
+/// Expects either `COMPLETE` or `INCOMPLETE:` followed by `- item` lines.
+fn parse_reflection_response(response: &str) -> ReflectionDecision {
+    let trimmed = response.trim();
+
+    if trimmed == "COMPLETE" || trimmed.starts_with("COMPLETE:") {
+        return ReflectionDecision::Complete;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("INCOMPLETE:") {
+        let items: Vec<String> = rest
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("- "))
+            .map(|line| line[2..].trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if items.is_empty() {
+            // INCOMPLETE but no items listed — treat as complete
+            return ReflectionDecision::Complete;
+        }
+
+        return ReflectionDecision::Incomplete { items };
+    }
+
+    // Unrecognized format — default to Complete
+    ReflectionDecision::Complete
 }
 
 /// Extract a JSON object from text (looking for `{"decision": ...}`).
@@ -357,6 +432,67 @@ mod tests {
             user_last_active: Some("2 minutes ago".to_string()),
             has_modifications_since_user: false,
         }
+    }
+
+    #[test]
+    fn test_parse_reflection_response_complete() {
+        let result = parse_reflection_response("COMPLETE");
+        assert_eq!(result, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    fn test_parse_reflection_response_complete_with_colon() {
+        let result = parse_reflection_response("COMPLETE: All work done");
+        assert_eq!(result, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    fn test_parse_reflection_response_incomplete() {
+        let response = "INCOMPLETE:\n- Fix the login bug\n- Add unit tests";
+        let result = parse_reflection_response(response);
+        assert_eq!(
+            result,
+            ReflectionDecision::Incomplete {
+                items: vec!["Fix the login bug".to_string(), "Add unit tests".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_reflection_response_incomplete_no_items() {
+        // INCOMPLETE but no actual items listed — defaults to Complete
+        let result = parse_reflection_response("INCOMPLETE:");
+        assert_eq!(result, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    fn test_parse_reflection_response_incomplete_with_blank_lines() {
+        let response = "INCOMPLETE:\n\n- Fix X\n  \n- Add Y\n";
+        let result = parse_reflection_response(response);
+        assert_eq!(
+            result,
+            ReflectionDecision::Incomplete {
+                items: vec!["Fix X".to_string(), "Add Y".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_reflection_response_unrecognized() {
+        let result = parse_reflection_response("Some random text");
+        assert_eq!(result, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    fn test_parse_reflection_response_incomplete_filters_empty_items() {
+        let response = "INCOMPLETE:\n- \n- Fix X\n- ";
+        let result = parse_reflection_response(response);
+        assert_eq!(result, ReflectionDecision::Incomplete { items: vec!["Fix X".to_string()] });
+    }
+
+    #[test]
+    fn test_reflection_decision_timeout_constant() {
+        assert_eq!(REFLECTION_DECISION_TIMEOUT, Duration::from_secs(60));
     }
 
     #[test]
@@ -877,6 +1013,102 @@ mod tests {
 
             let context = CreateQuestionContext { question_text: "test".to_string() };
             let result = agent.evaluate_create_question(&context);
+
+            // The run() call returns Err, which propagates via ?
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_real_subagent_reflection_complete() {
+            use crate::traits::ReflectionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "COMPLETE", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = ReflectionContext {
+                reflection_output: "All work is done".to_string(),
+                user_messages: vec!["Fix the bug".to_string()],
+            };
+            let result = agent.evaluate_reflection(&context).unwrap();
+
+            assert_eq!(result, ReflectionDecision::Complete);
+        }
+
+        #[test]
+        fn test_real_subagent_reflection_incomplete() {
+            use crate::traits::ReflectionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd =
+                setup_fake_claude(&dir, "INCOMPLETE:\n- Fix the login bug\n- Add unit tests", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context = ReflectionContext {
+                reflection_output: "Still need to fix login and add tests".to_string(),
+                user_messages: vec![],
+            };
+            let result = agent.evaluate_reflection(&context).unwrap();
+
+            assert_eq!(
+                result,
+                ReflectionDecision::Incomplete {
+                    items: vec!["Fix the login bug".to_string(), "Add unit tests".to_string()]
+                }
+            );
+        }
+
+        #[test]
+        fn test_real_subagent_reflection_command_fails() {
+            use crate::traits::ReflectionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "error", 1);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context =
+                ReflectionContext { reflection_output: "test".to_string(), user_messages: vec![] };
+            let result = agent.evaluate_reflection(&context).unwrap();
+
+            // Command failure defaults to Complete
+            assert_eq!(result, ReflectionDecision::Complete);
+        }
+
+        #[test]
+        fn test_real_subagent_reflection_unrecognized_format() {
+            use crate::traits::ReflectionContext;
+
+            let dir = TempDir::new().unwrap();
+            let claude_cmd = setup_fake_claude(&dir, "I think the work is done", 0);
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner).with_claude_cmd(&claude_cmd);
+
+            let context =
+                ReflectionContext { reflection_output: "test".to_string(), user_messages: vec![] };
+            let result = agent.evaluate_reflection(&context).unwrap();
+
+            // Unrecognized format defaults to Complete
+            assert_eq!(result, ReflectionDecision::Complete);
+        }
+
+        #[test]
+        fn test_real_subagent_reflection_spawn_fails() {
+            use crate::traits::ReflectionContext;
+
+            let runner = RealCommandRunner::new();
+            let agent = RealSubAgent::new(&runner)
+                .with_claude_cmd("/nonexistent/path/to/claude_command_that_does_not_exist");
+
+            let context =
+                ReflectionContext { reflection_output: "test".to_string(), user_messages: vec![] };
+            let result = agent.evaluate_reflection(&context);
 
             // The run() call returns Err, which propagates via ?
             assert!(result.is_err());

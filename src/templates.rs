@@ -31,6 +31,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         "prompts/create_question_decision.tera",
         include_str!("../templates/prompts/create_question_decision.tera"),
     );
+    m.insert(
+        "prompts/reflection_decision.tera",
+        include_str!("../templates/prompts/reflection_decision.tera"),
+    );
 
     // Stop hook messages
     m.insert(
@@ -298,6 +302,12 @@ fn sample_context_for(template_name: &str) -> Context {
     // Create question
     ctx.insert("question_text", "Should I continue with the remaining tasks?");
 
+    // Reflection decision
+    ctx.insert("reflection_output", "I have completed all requested changes.");
+    if template_name.contains("reflection_decision") {
+        ctx.insert("user_messages", &vec!["Fix the login bug", "Add tests for auth"]);
+    }
+
     // Other hooks
     ctx.insert("tool_name", "Bash");
     ctx.insert("binary_path", "/project/.claude-reliability/bin/claude-reliability");
@@ -406,7 +416,7 @@ mod tests {
     fn test_embedded_template_count() {
         // Ensure we have all expected templates
         let names = embedded_template_names();
-        assert!(names.len() >= 16, "Expected at least 16 templates, got {}", names.len());
+        assert!(names.len() >= 17, "Expected at least 17 templates, got {}", names.len());
     }
 
     #[test]

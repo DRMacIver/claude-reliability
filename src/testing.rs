@@ -9,8 +9,8 @@
 use crate::error::Result;
 use crate::traits::{
     CommandOutput, CommandRunner, CreateQuestionContext, CreateQuestionDecision,
-    EmergencyStopContext, EmergencyStopDecision, QuestionContext, StateStore, SubAgent,
-    SubAgentDecision,
+    EmergencyStopContext, EmergencyStopDecision, QuestionContext, ReflectionContext,
+    ReflectionDecision, StateStore, SubAgent, SubAgentDecision,
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -117,10 +117,12 @@ pub struct MockSubAgent {
     code_reviews: RefCell<Vec<(bool, String)>>,
     emergency_stop_decisions: RefCell<Vec<EmergencyStopDecision>>,
     create_question_decisions: RefCell<Vec<CreateQuestionDecision>>,
+    reflection_decisions: RefCell<Vec<ReflectionDecision>>,
     question_index: RefCell<usize>,
     review_index: RefCell<usize>,
     emergency_stop_index: RefCell<usize>,
     create_question_index: RefCell<usize>,
+    reflection_index: RefCell<usize>,
 }
 
 impl MockSubAgent {
@@ -148,6 +150,11 @@ impl MockSubAgent {
     /// Add an expected `create_question` decision.
     pub fn expect_create_question(&mut self, decision: CreateQuestionDecision) {
         self.create_question_decisions.borrow_mut().push(decision);
+    }
+
+    /// Add an expected reflection decision.
+    pub fn expect_reflection(&mut self, decision: ReflectionDecision) {
+        self.reflection_decisions.borrow_mut().push(decision);
     }
 }
 
@@ -206,6 +213,22 @@ impl SubAgent for MockSubAgent {
         }
 
         assert!(*index < decisions.len(), "No more create_question decisions expected");
+
+        let decision = decisions[*index].clone();
+        *index += 1;
+        Ok(decision)
+    }
+
+    fn evaluate_reflection(&self, _context: &ReflectionContext) -> Result<ReflectionDecision> {
+        let mut index = self.reflection_index.borrow_mut();
+        let decisions = self.reflection_decisions.borrow();
+
+        // If no decisions expected, default to Complete (so existing tests work)
+        if decisions.is_empty() {
+            return Ok(ReflectionDecision::Complete);
+        }
+
+        assert!(*index < decisions.len(), "No more reflection decisions expected");
 
         let decision = decisions[*index].clone();
         *index += 1;
@@ -335,6 +358,10 @@ impl SubAgent for FailingSubAgent {
         &self,
         _context: &CreateQuestionContext,
     ) -> Result<CreateQuestionDecision> {
+        Err(std::io::Error::other(self.error_message.clone()).into())
+    }
+
+    fn evaluate_reflection(&self, _context: &ReflectionContext) -> Result<ReflectionDecision> {
         Err(std::io::Error::other(self.error_message.clone()).into())
     }
 }
@@ -849,6 +876,62 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_sub_agent_reflection_complete() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_reflection(ReflectionDecision::Complete);
+
+        let context = ReflectionContext {
+            reflection_output: "All done".to_string(),
+            user_messages: vec!["Fix bug".to_string()],
+        };
+        let decision = agent.evaluate_reflection(&context).unwrap();
+
+        assert_eq!(decision, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    fn test_mock_sub_agent_reflection_incomplete() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_reflection(ReflectionDecision::Incomplete {
+            items: vec!["Fix X".to_string(), "Add Y".to_string()],
+        });
+
+        let context = ReflectionContext {
+            reflection_output: "Still need to do X and Y".to_string(),
+            user_messages: vec![],
+        };
+        let decision = agent.evaluate_reflection(&context).unwrap();
+
+        assert!(matches!(
+            decision,
+            ReflectionDecision::Incomplete { ref items } if items.len() == 2
+        ));
+    }
+
+    #[test]
+    fn test_mock_sub_agent_reflection_no_expectations_defaults_to_complete() {
+        let agent = MockSubAgent::new();
+        let context =
+            ReflectionContext { reflection_output: "test".to_string(), user_messages: vec![] };
+        let decision = agent.evaluate_reflection(&context).unwrap();
+
+        assert_eq!(decision, ReflectionDecision::Complete);
+    }
+
+    #[test]
+    #[should_panic(expected = "No more reflection decisions expected")]
+    fn test_mock_sub_agent_reflection_too_many_calls() {
+        let mut agent = MockSubAgent::new();
+        agent.expect_reflection(ReflectionDecision::Complete);
+
+        let context =
+            ReflectionContext { reflection_output: "test".to_string(), user_messages: vec![] };
+        let _ = agent.evaluate_reflection(&context).unwrap();
+        // Second call should panic
+        let _ = agent.evaluate_reflection(&context);
+    }
+
+    #[test]
     #[should_panic(expected = "No more create_question decisions expected")]
     fn test_mock_sub_agent_create_question_too_many_calls() {
         let mut agent = MockSubAgent::new();
@@ -928,6 +1011,12 @@ mod tests {
             .is_err());
         assert!(agent
             .evaluate_create_question(&CreateQuestionContext { question_text: "test".to_string() })
+            .is_err());
+        assert!(agent
+            .evaluate_reflection(&ReflectionContext {
+                reflection_output: "test".to_string(),
+                user_messages: vec![],
+            })
             .is_err());
     }
 

@@ -184,6 +184,21 @@ pub trait SubAgent {
         &self,
         context: &CreateQuestionContext,
     ) -> Result<CreateQuestionDecision>;
+
+    /// Evaluate whether an agent's reflection indicates all work is complete.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The reflection content and user messages to evaluate.
+    ///
+    /// # Returns
+    ///
+    /// The sub-agent's decision on whether work is complete or incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sub-agent call fails.
+    fn evaluate_reflection(&self, context: &ReflectionContext) -> Result<ReflectionDecision>;
 }
 
 /// Context for emergency stop evaluation.
@@ -216,6 +231,27 @@ pub enum CreateQuestionDecision {
     AutoAnswer(String),
     /// Allow the question to be created (genuinely needs user input).
     Create,
+}
+
+/// Context for reflection evaluation.
+#[derive(Debug, Clone)]
+pub struct ReflectionContext {
+    /// The agent's reflection output.
+    pub reflection_output: String,
+    /// User messages from the session.
+    pub user_messages: Vec<String>,
+}
+
+/// Decision from sub-agent about whether reflection indicates completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReflectionDecision {
+    /// All work appears complete.
+    Complete,
+    /// Work remains incomplete; contains titles of remaining items.
+    Incomplete {
+        /// Titles of remaining work items.
+        items: Vec<String>,
+    },
 }
 
 /// Trait for persistent state storage.

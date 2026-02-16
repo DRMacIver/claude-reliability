@@ -679,6 +679,37 @@ fn check_work_item_reminder(
 // Tier 6: Reflection Checks
 // =============================================================================
 
+/// Create work items in the task store for incomplete reflection items.
+///
+/// Returns a list of formatted strings like `- [ID] Title` for each successfully created item.
+/// Returns an empty vec if the task store can't be opened or task creation fails.
+fn create_reflection_work_items(base_dir: &Path, items: &[String]) -> Vec<String> {
+    use crate::tasks::{Priority, SqliteTaskStore, TaskStore};
+
+    let mut created = Vec::new();
+    if let Ok(store) = SqliteTaskStore::for_project(base_dir) {
+        for title in items {
+            if let Ok(task) =
+                store.create_task(title, "Created from reflection evaluation", Priority::Medium)
+            {
+                created.push(format!("- [{}] {}", task.id, title));
+            }
+        }
+    }
+    created
+}
+
+/// Format the work list for display.
+///
+/// Uses created task titles (with IDs) if available, otherwise falls back to plain items.
+fn format_work_list(items: &[String], created_titles: &[String]) -> String {
+    if created_titles.is_empty() {
+        items.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n")
+    } else {
+        created_titles.join("\n")
+    }
+}
+
 /// Check if reflection was already prompted and allow stop.
 ///
 /// If the agent got the reflection prompt and is stopping again, allow it.
@@ -690,7 +721,11 @@ fn check_work_item_reminder(
 fn check_reflection_marker_allow(
     config: &StopHookConfig,
     session_id: &str,
+    transcript_info: &TranscriptInfo,
+    sub_agent: &dyn SubAgent,
 ) -> Option<StopHookResult> {
+    use crate::traits::ReflectionContext;
+
     let base_dir = config.base_dir();
     if !session::has_reflect_marker(base_dir) {
         return None;
@@ -698,6 +733,39 @@ fn check_reflection_marker_allow(
 
     // Agent already got the reflection prompt and is stopping again - allow it
     session::clear_reflect_marker(base_dir).expect("failed to clear reflect marker");
+
+    // Evaluate the reflection content via sub-agent
+    if let Some(ref reflection_output) = transcript_info.last_assistant_output {
+        let user_messages: Vec<String> = tasks::get_session_user_messages(base_dir, session_id)
+            .into_iter()
+            .map(|m| m.message)
+            .collect();
+
+        let context =
+            ReflectionContext { reflection_output: reflection_output.clone(), user_messages };
+
+        match sub_agent.evaluate_reflection(&context) {
+            Ok(crate::traits::ReflectionDecision::Incomplete { items }) => {
+                // Create work items for each incomplete item
+                let created_titles = create_reflection_work_items(base_dir, &items);
+
+                // Re-set reflect marker so next stop re-evaluates
+                session::set_reflect_marker(base_dir).expect("failed to re-set reflect marker");
+
+                let work_list = format_work_list(&items, &created_titles);
+
+                return Some(StopHookResult::block().with_message(format!(
+                    "## Incomplete Work Detected\n\n\
+                         Your reflection indicates the following work items remain:\n\n\
+                         {work_list}\n\n\
+                         Work items have been created. Please complete them before stopping."
+                )));
+            }
+            Ok(crate::traits::ReflectionDecision::Complete) | Err(_) => {
+                // Complete or sub-agent error — fall through to existing checks
+            }
+        }
+    }
 
     // Check for incomplete requested tasks before allowing stop (work was done)
     // In single work item mode, check only the assigned item
@@ -985,7 +1053,8 @@ pub fn run_stop_hook(
     let session_id = input.transcript_path.as_deref().unwrap_or("unknown");
 
     // The model has previously been asked to reflect, and now it has.
-    if let Some(r) = check_reflection_marker_allow(config, session_id) {
+    if let Some(r) = check_reflection_marker_allow(config, session_id, &transcript_info, sub_agent)
+    {
         log.pass("reflection_marker", "reflection complete, allowing stop");
         return Ok(log.into_result(r));
     }
@@ -4884,7 +4953,10 @@ mod tests {
             single_work_item_id: Some(task.id),
             ..Default::default()
         };
-        let result = check_reflection_marker_allow(&config, "test-session");
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+        let result =
+            check_reflection_marker_allow(&config, "test-session", &transcript_info, &sub_agent);
 
         // Item is incomplete, so reflection should block
         assert!(result.is_some());
@@ -4918,7 +4990,10 @@ mod tests {
             single_work_item_id: Some(task.id),
             ..Default::default()
         };
-        let result = check_reflection_marker_allow(&config, "test-session");
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+        let result =
+            check_reflection_marker_allow(&config, "test-session", &transcript_info, &sub_agent);
 
         // Item is complete, so reflection should allow
         assert!(result.is_some());
@@ -5277,13 +5352,245 @@ mod tests {
             base_dir: Some(base.to_path_buf()),
             ..Default::default()
         };
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
 
-        let result = check_reflection_marker_allow(&config, session_id);
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
         assert!(result.is_some());
         assert!(result.unwrap().allow_stop);
 
         // User messages should be cleared after successful reflection
         let messages = tasks::get_session_user_messages(base, session_id);
         assert!(messages.is_empty(), "messages should be cleared after reflection");
+    }
+
+    #[test]
+    fn test_reflection_subagent_says_incomplete_blocks_and_creates_work_items() {
+        use crate::tasks::{SqliteTaskStore, TaskFilter, TaskStore};
+        use crate::traits::ReflectionDecision;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Ensure task store exists
+        let _store = SqliteTaskStore::for_project(base).unwrap();
+
+        // Record a user message
+        tasks::record_user_message(base, "Fix the login bug", "opening prompt", None, session_id);
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // Transcript has assistant output (the reflection)
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("I still need to fix X and add Y".to_string()),
+            ..Default::default()
+        };
+
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_reflection(ReflectionDecision::Incomplete {
+            items: vec!["Fix X".to_string(), "Add Y".to_string()],
+        });
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
+
+        // Should block
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.allow_stop);
+        let joined = result.messages.join("\n");
+        assert!(joined.contains("Incomplete Work Detected"), "messages: {joined}");
+        assert!(joined.contains("Fix X"), "messages: {joined}");
+        assert!(joined.contains("Add Y"), "messages: {joined}");
+
+        // Reflect marker should be re-set for next evaluation
+        assert!(session::has_reflect_marker(base));
+
+        // Work items should be created in the task store
+        let store = SqliteTaskStore::for_project(base).unwrap();
+        let all_tasks = store.list_tasks(TaskFilter::default()).unwrap();
+        assert_eq!(all_tasks.len(), 2, "expected 2 tasks created");
+        let titles: Vec<&str> = all_tasks.iter().map(|t| t.title.as_str()).collect();
+        assert!(titles.contains(&"Fix X"));
+        assert!(titles.contains(&"Add Y"));
+    }
+
+    #[test]
+    fn test_format_work_list_with_created_titles() {
+        let items = vec!["Fix X".to_string(), "Add Y".to_string()];
+        let created = vec!["- [abc] Fix X".to_string(), "- [def] Add Y".to_string()];
+        let result = format_work_list(&items, &created);
+        assert_eq!(result, "- [abc] Fix X\n- [def] Add Y");
+    }
+
+    #[test]
+    fn test_format_work_list_fallback_without_ids() {
+        let items = vec!["Fix X".to_string(), "Add Y".to_string()];
+        let created: Vec<String> = vec![];
+        let result = format_work_list(&items, &created);
+        assert_eq!(result, "- Fix X\n- Add Y");
+    }
+
+    #[test]
+    fn test_reflection_subagent_says_complete_allows_stop() {
+        use crate::traits::ReflectionDecision;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("All work is complete".to_string()),
+            ..Default::default()
+        };
+
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent.expect_reflection(ReflectionDecision::Complete);
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
+
+        // Should allow
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
+        // Reflect marker should NOT be re-set
+        assert!(!session::has_reflect_marker(base));
+    }
+
+    #[test]
+    fn test_reflection_subagent_failure_allows_stop() {
+        use crate::testing::FailingSubAgent;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Some reflection output".to_string()),
+            ..Default::default()
+        };
+
+        let sub_agent = FailingSubAgent::new("sub-agent failed");
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
+
+        // Sub-agent error should fall through to allow (fail-open)
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
+    }
+
+    #[test]
+    fn test_reflection_no_assistant_output_allows_stop() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // No assistant output — sub-agent evaluation is skipped
+        let transcript_info = TranscriptInfo::default();
+        let sub_agent = MockSubAgent::new();
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
+
+        // Should allow (no output to evaluate)
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
+    }
+
+    #[test]
+    fn test_reflection_incomplete_then_complete_two_stops() {
+        use crate::tasks::SqliteTaskStore;
+        use crate::traits::ReflectionDecision;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let session_id = "test-session";
+
+        // Ensure task store exists
+        let _store = SqliteTaskStore::for_project(base).unwrap();
+
+        // Set reflection marker
+        session::set_reflect_marker(base).unwrap();
+
+        let config = StopHookConfig {
+            git_repo: false,
+            base_dir: Some(base.to_path_buf()),
+            ..Default::default()
+        };
+
+        // First stop: sub-agent says incomplete
+        let transcript_info = TranscriptInfo {
+            last_assistant_output: Some("Still need to do X".to_string()),
+            ..Default::default()
+        };
+
+        let mut sub_agent = MockSubAgent::new();
+        sub_agent
+            .expect_reflection(ReflectionDecision::Incomplete { items: vec!["Do X".to_string()] });
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info, &sub_agent);
+        assert!(result.is_some());
+        assert!(!result.unwrap().allow_stop);
+        // Marker should be re-set
+        assert!(session::has_reflect_marker(base));
+
+        // Second stop: sub-agent says complete
+        let transcript_info2 = TranscriptInfo {
+            last_assistant_output: Some("All done now".to_string()),
+            ..Default::default()
+        };
+
+        let mut sub_agent2 = MockSubAgent::new();
+        sub_agent2.expect_reflection(ReflectionDecision::Complete);
+
+        let result =
+            check_reflection_marker_allow(&config, session_id, &transcript_info2, &sub_agent2);
+        assert!(result.is_some());
+        assert!(result.unwrap().allow_stop);
+        assert!(!session::has_reflect_marker(base));
     }
 }
