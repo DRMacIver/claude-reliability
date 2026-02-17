@@ -72,6 +72,14 @@ fn is_opening_prompt(input: &UserPromptSubmitInput) -> bool {
     info.last_assistant_output.is_none()
 }
 
+/// Check if the prompt is a task notification from a background agent.
+///
+/// Task notifications have the form `<task-notification> <task-id>...` and should
+/// not be recorded as user messages since they are system-generated noise.
+fn is_task_notification(prompt: &str) -> bool {
+    prompt.trim_start().starts_with("<task-notification>")
+}
+
 /// Inner implementation that accepts single work item ID explicitly for testability.
 fn run_user_prompt_submit_hook_inner(
     input: &UserPromptSubmitInput,
@@ -114,21 +122,24 @@ fn run_user_prompt_submit_hook_inner(
     }
 
     // Record user message for verification during reflection prompt
+    // Skip task notifications — they are system-generated noise from background agents
     if let Some(prompt) = &input.prompt {
-        let context = if is_opening_prompt(input) { "opening prompt" } else { "follow-up" };
+        if !is_task_notification(prompt) {
+            let context = if is_opening_prompt(input) { "opening prompt" } else { "follow-up" };
 
-        // Clear previous messages on opening prompt (new session)
-        if is_opening_prompt(input) {
-            tasks::clear_session_user_messages(base, session_id);
+            // Clear previous messages on opening prompt (new session)
+            if is_opening_prompt(input) {
+                tasks::clear_session_user_messages(base, session_id);
+            }
+
+            tasks::record_user_message(
+                base,
+                prompt,
+                context,
+                input.transcript_path.as_deref(),
+                session_id,
+            );
         }
-
-        tasks::record_user_message(
-            base,
-            prompt,
-            context,
-            input.transcript_path.as_deref(),
-            session_id,
-        );
     }
 
     Ok(UserPromptSubmitOutput { system_message: None })
@@ -510,6 +521,36 @@ mod tests {
         assert!(output.system_message.is_some());
         let msg = output.system_message.unwrap();
         assert!(msg.contains("Single work item mode active"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_is_task_notification_true() {
+        assert!(is_task_notification(
+            "<task-notification> <task-id>b8e2422</task-id> <output-file>/tmp/claude</output-file>"
+        ));
+        // Leading whitespace should still match
+        assert!(is_task_notification("  <task-notification> <task-id>abc</task-id>"));
+    }
+
+    #[test]
+    fn test_is_task_notification_false() {
+        assert!(!is_task_notification("Fix the login bug"));
+        assert!(!is_task_notification(""));
+        assert!(!is_task_notification("some text <task-notification>"));
+    }
+
+    #[test]
+    fn test_task_notification_not_recorded() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+
+        let input = input_with_prompt(
+            "<task-notification> <task-id>b8e2422</task-id> <output-file>/tmp/out</output-file>",
+        );
+        run_user_prompt_submit_hook_inner(&input, Some(base), None).unwrap();
+
+        let messages = tasks::get_session_user_messages(base, "unknown");
+        assert!(messages.is_empty(), "task notification should not be recorded");
     }
 
     #[test]
