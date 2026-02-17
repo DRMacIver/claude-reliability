@@ -96,6 +96,10 @@ static EMBEDDED_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
         include_str!("../templates/messages/no_verify_block.tera"),
     );
     m.insert(
+        "messages/direct_db_access_block.tera",
+        include_str!("../templates/messages/direct_db_access_block.tera"),
+    );
+    m.insert(
         "messages/session_intro.tera",
         include_str!("../templates/messages/session_intro.tera"),
     );

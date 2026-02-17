@@ -65,6 +65,9 @@ pub fn run_pre_tool_use_with_sub_agent(
     // Tool-specific hooks
     match tool_name {
         "Bash" => {
+            // Check for direct sqlite3 access to working-memory database
+            check_hook!(run_direct_db_access_check(input));
+
             // Check for --no-verify
             check_hook!(run_no_verify_check(input));
 
@@ -183,6 +186,24 @@ fn run_no_verify_check(input: &HookInput) -> PreToolUseOutput {
         ctx.insert("acknowledgment", "I promise the user has said I can use --no-verify here");
         let message = templates::render("messages/no_verify_block.tera", &ctx)
             .expect("no_verify_block.tera template should always render");
+        PreToolUseOutput::block(Some(message))
+    } else {
+        PreToolUseOutput::allow(None)
+    }
+}
+
+/// Check for direct sqlite3 access to the working-memory database.
+fn run_direct_db_access_check(input: &HookInput) -> PreToolUseOutput {
+    let command = input.tool_input.as_ref().and_then(|ti| ti.command.as_deref()).unwrap_or("");
+
+    let has_sqlite3 = command.contains("sqlite3");
+    let targets_working_memory =
+        command.contains("working-memory.sqlite3") || command.contains(".claude-reliability/");
+
+    if has_sqlite3 && targets_working_memory {
+        let ctx = Context::new();
+        let message = templates::render("messages/direct_db_access_block.tera", &ctx)
+            .expect("direct_db_access_block.tera template should always render");
         PreToolUseOutput::block(Some(message))
     } else {
         PreToolUseOutput::allow(None)
@@ -665,5 +686,53 @@ reminders:
 
         let context = get_reminder_context(&input, dir.path());
         assert!(context.is_none());
+    }
+
+    #[test]
+    fn test_bash_blocked_direct_sqlite3_access() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some(
+                    "sqlite3 .claude-reliability/working-memory.sqlite3 \"UPDATE work_items SET status = 'complete'\""
+                        .to_string(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_direct_db_access_check(&input);
+        assert!(output.is_block());
+    }
+
+    #[test]
+    fn test_bash_allowed_unrelated_sqlite3() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("sqlite3 /other/database.db \"SELECT 1\"".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_direct_db_access_check(&input);
+        assert!(!output.is_block());
+    }
+
+    #[test]
+    fn test_bash_blocked_sqlite3_with_dotfile_path() {
+        let input = HookInput {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(ToolInput {
+                command: Some("sqlite3 .claude-reliability/some-other.db \"SELECT 1\"".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = run_direct_db_access_check(&input);
+        assert!(output.is_block());
     }
 }
