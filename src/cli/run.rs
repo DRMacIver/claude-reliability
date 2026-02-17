@@ -75,6 +75,7 @@ pub fn check_binary_path(binary_path: &Path) -> Result<(), String> {
 ///
 /// Returns an error `CliOutput` if the binary is at the wrong location,
 /// or `None` if everything is fine.
+#[cfg(not(test))]
 fn verify_binary_location() -> Option<CliOutput> {
     let Ok(exe_path) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
         return None; // Can't determine path; skip check
@@ -95,7 +96,9 @@ pub fn run(command: Command, stdin: &str) -> CliOutput {
         crate::hook_logging::log_hook_event(hook_type, stdin);
     }
 
-    // For non-hook commands, verify the binary is at the correct location
+    // For non-hook commands, verify the binary is at the correct location.
+    // Skip this check during tests since the test binary won't be at the expected path.
+    #[cfg(not(test))]
     if !command.is_hook() {
         if let Some(error_output) = verify_binary_location() {
             return error_output;

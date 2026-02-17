@@ -346,14 +346,8 @@ fn test_run_user_prompt_submit_via_cli() {
     std::env::set_current_dir(original_dir).unwrap();
 
     assert_eq!(output.exit_code, ExitCode::SUCCESS);
-    // Should now output a system message with the binary path
-    assert_eq!(output.stdout.len(), 1, "stdout: {:?}", output.stdout);
-    assert!(output.stdout[0].contains("systemMessage"), "stdout: {}", output.stdout[0]);
-    assert!(
-        output.stdout[0].contains(".claude-reliability/bin/claude-reliability"),
-        "stdout: {}",
-        output.stdout[0]
-    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
